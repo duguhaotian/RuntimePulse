@@ -9,9 +9,11 @@ type MetricChartProps = {
   height?: number;
   markerTime?: string;
   markerLabel?: string;
+  pinned?: boolean;
+  onTogglePin?: () => void;
 };
 
-export function MetricChart({ series, height = 220, markerTime, markerLabel }: MetricChartProps) {
+export function MetricChart({ series, height = 220, markerTime, markerLabel, pinned = false, onTogglePin }: MetricChartProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const width = 760;
@@ -48,16 +50,19 @@ export function MetricChart({ series, height = 220, markerTime, markerLabel }: M
   };
 
   return (
-    <div ref={chartRef} className="chart-card metric-chart-card" onPointerMove={handlePointerMove} onPointerLeave={() => setHoverIndex(null)}>
+    <div ref={chartRef} className={`chart-card metric-chart-card ${pinned ? 'pinned' : ''}`} onPointerMove={handlePointerMove} onPointerLeave={() => setHoverIndex(null)}>
       <div className="chart-header">
         <div>
           <h3>{firstSeries?.group.toUpperCase() ?? 'Metrics'}</h3>
           <p>{series.map((item) => item.label).join(' · ')}</p>
         </div>
-        <div className="legend">
-          {series.map((item, index) => (
-            <span key={item.id}><i style={{ background: chartPalette[index % chartPalette.length] }} />{item.label}</span>
-          ))}
+        <div className="chart-header-actions">
+          {onTogglePin && <button className={pinned ? 'active' : ''} onClick={onTogglePin}>{pinned ? 'Pinned' : 'Pin'}</button>}
+          <div className="legend">
+            {series.map((item, index) => (
+              <span key={item.id}><i style={{ background: chartPalette[index % chartPalette.length] }} />{item.label}</span>
+            ))}
+          </div>
         </div>
       </div>
       <svg viewBox={`0 0 ${width} ${height}`} className="metric-svg" role="img">

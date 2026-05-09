@@ -38,7 +38,7 @@ Next UI improvements:
 - Metric hover tooltip. Implemented with per-point hover cards and chart crosshair.
 - Multiple-run comparison overlays. Implemented for selected runs in the Runs table.
 - Resizable metric panels.
-- Metric group pinning.
+- Metric group pinning. Implemented for metrics tab chart ordering and pinned state.
 - Run selection and bulk compare.
 - Trace span detail panel. Implemented for startup waterfall spans.
 - Profile artifact preview panel.

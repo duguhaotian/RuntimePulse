@@ -27,6 +27,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [profiles, setProfiles] = useState<ProfileArtifact[]>([]);
   const [selectedSpan, setSelectedSpan] = useState<TraceSpan>();
   const [selectedEvent, setSelectedEvent] = useState<EventRecord>();
+  const [pinnedMetricGroups, setPinnedMetricGroups] = useState<string[]>([]);
 
   useEffect(() => {
     let mounted = true;
@@ -62,6 +63,22 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       return groups;
     }, {});
   }, [metrics]);
+
+  const metricGroups = useMemo(() => {
+    return Object.entries(metricsByGroup).sort(([leftGroup], [rightGroup]) => {
+      const leftPinned = pinnedMetricGroups.includes(leftGroup);
+      const rightPinned = pinnedMetricGroups.includes(rightGroup);
+
+      if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+      if (leftPinned && rightPinned) return pinnedMetricGroups.indexOf(leftGroup) - pinnedMetricGroups.indexOf(rightGroup);
+
+      return leftGroup.localeCompare(rightGroup);
+    });
+  }, [metricsByGroup, pinnedMetricGroups]);
+
+  function toggleMetricPin(group: string) {
+    setPinnedMetricGroups((current) => current.includes(group) ? current.filter((item) => item !== group) : [...current, group]);
+  }
 
   function jumpToMetricsFromEvent(event: EventRecord) {
     setSelectedEvent(event);
@@ -143,8 +160,16 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {tab === 'metrics' && (
         <div className="chart-grid">
           {selectedEvent && <SelectedEventContext event={selectedEvent} onClear={() => setSelectedEvent(undefined)} />}
-          {Object.entries(metricsByGroup).map(([group, groupSeries]) => (
-            <MetricChart key={group} markerLabel={selectedEvent?.eventName} markerTime={selectedEvent?.timestamp} series={groupSeries} />
+          {pinnedMetricGroups.length > 0 && <PinnedMetricSummary pinnedGroups={pinnedMetricGroups} onClear={() => setPinnedMetricGroups([])} />}
+          {metricGroups.map(([group, groupSeries]) => (
+            <MetricChart
+              key={group}
+              markerLabel={selectedEvent?.eventName}
+              markerTime={selectedEvent?.timestamp}
+              onTogglePin={() => toggleMetricPin(group)}
+              pinned={pinnedMetricGroups.includes(group)}
+              series={groupSeries}
+            />
           ))}
         </div>
       )}
@@ -159,6 +184,18 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {tab === 'profiles' && <ProfileTable profiles={profiles} />}
       {tab === 'raw' && <pre className="raw-json">{JSON.stringify({ sandbox, node, image, events, spans, profiles }, null, 2)}</pre>}
     </section>
+  );
+}
+
+function PinnedMetricSummary({ pinnedGroups, onClear }: { pinnedGroups: string[]; onClear: () => void }) {
+  return (
+    <div className="pinned-metrics-bar">
+      <div>
+        <strong>Pinned metric groups</strong>
+        <span>{pinnedGroups.map((group) => group.toUpperCase()).join(' · ')}</span>
+      </div>
+      <button onClick={onClear}>Clear pins</button>
+    </div>
   );
 }
 

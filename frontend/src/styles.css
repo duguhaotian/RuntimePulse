@@ -451,6 +451,11 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   position: relative;
 }
 
+.metric-chart-card.pinned {
+  border-color: rgba(246, 195, 68, 0.34);
+  background: linear-gradient(180deg, rgba(246, 195, 68, 0.08), rgba(13, 18, 25, 0.88));
+}
+
 .chart-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -467,6 +472,54 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
 
 .chart-header h3, .chart-header p { margin: 0; }
 .chart-header p { color: var(--muted); font-size: 12px; }
+
+.chart-header-actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.chart-header-actions button,
+.pinned-metrics-bar button {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 9px;
+  background: rgba(148, 163, 184, 0.08);
+  color: #cbd5e1;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 850;
+  padding: 6px 9px;
+}
+
+.chart-header-actions button.active,
+.pinned-metrics-bar button:hover {
+  border-color: rgba(246, 195, 68, 0.34);
+  background: rgba(246, 195, 68, 0.12);
+  color: #ffe29a;
+}
+
+.pinned-metrics-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid rgba(246, 195, 68, 0.24);
+  border-radius: 14px;
+  background: rgba(246, 195, 68, 0.08);
+}
+
+.pinned-metrics-bar strong {
+  display: block;
+  color: #fff2c8;
+  font-size: 13px;
+}
+
+.pinned-metrics-bar span {
+  color: var(--muted);
+  font-size: 12px;
+}
 
 .legend {
   display: flex;
