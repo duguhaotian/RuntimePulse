@@ -5,6 +5,31 @@ import { runtimeColors } from '../../utils/colors';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
 import { formatDateTime } from '../../utils/time';
 
+type SavedExplorerView = {
+  id: string;
+  name: string;
+  runtimeType: RuntimeType | 'all';
+  status: SandboxStatus | 'all';
+  text: string;
+  selectedRunIds: string[];
+};
+
+const savedViewsStorageKey = 'runtimepulse.savedExplorerViews';
+
+function loadSavedExplorerViews(): SavedExplorerView[] {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = window.localStorage.getItem(savedViewsStorageKey);
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw) as SavedExplorerView[];
+    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item.id === 'string' && typeof item.name === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 type SandboxExplorerProps = {
   api: RuntimePulseApi;
   onSelectSandbox: (id: string) => void;
@@ -16,6 +41,8 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
   const [text, setText] = useState('');
   const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
   const [selectedRunIds, setSelectedRunIds] = useState<string[]>([]);
+  const [savedViews, setSavedViews] = useState<SavedExplorerView[]>(loadSavedExplorerViews);
+  const [viewName, setViewName] = useState('');
 
   useEffect(() => {
     api.listSandboxes({ runtimeType, status, text }).then((nextSandboxes) => {
@@ -23,6 +50,11 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
       setSelectedRunIds((current) => current.filter((id) => nextSandboxes.some((sandbox) => sandbox.id === id)));
     });
   }, [api, runtimeType, status, text]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(savedViewsStorageKey, JSON.stringify(savedViews));
+  }, [savedViews]);
 
   const stats = useMemo(() => {
     const slow = sandboxes.filter((sandbox) => sandbox.startupDurationMs > 7000).length;
@@ -40,6 +72,32 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
 
   function toggleAllVisible() {
     setSelectedRunIds(allVisibleSelected ? [] : sandboxes.map((sandbox) => sandbox.id));
+  }
+
+  function saveCurrentView() {
+    const name = viewName.trim() || `${runtimeType === 'all' ? 'All runtimes' : runtimeType} · ${status === 'all' ? 'all status' : status}`;
+    const nextView: SavedExplorerView = {
+      id: `${Date.now()}`,
+      name,
+      runtimeType,
+      status,
+      text,
+      selectedRunIds,
+    };
+
+    setSavedViews((current) => [nextView, ...current.filter((item) => item.name !== nextView.name)].slice(0, 6));
+    setViewName('');
+  }
+
+  function applySavedView(view: SavedExplorerView) {
+    setRuntimeType(view.runtimeType);
+    setStatus(view.status);
+    setText(view.text);
+    setSelectedRunIds(view.selectedRunIds);
+  }
+
+  function deleteSavedView(id: string) {
+    setSavedViews((current) => current.filter((item) => item.id !== id));
   }
 
   return (
@@ -85,6 +143,38 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
           <option value="stopped">Stopped</option>
           <option value="failed">Failed</option>
         </select>
+      </div>
+
+      <div className="saved-views-panel">
+        <div className="saved-views-header">
+          <div>
+            <strong>Saved views</strong>
+            <span>Save common expert workflows with filter state and comparison set.</span>
+          </div>
+          <div className="saved-views-form">
+            <input value={viewName} onChange={(event) => setViewName(event.target.value)} placeholder="Name this view" />
+            <button className="primary" onClick={saveCurrentView}>Save current view</button>
+          </div>
+        </div>
+        <div className="saved-views-list">
+          {savedViews.length === 0 ? (
+            <div className="saved-view-empty">No saved views yet. Save the current filter and selection state for quick recall.</div>
+          ) : (
+            savedViews.map((view) => (
+              <article className="saved-view-card" key={view.id}>
+                <div>
+                  <strong>{view.name}</strong>
+                  <span>{view.runtimeType === 'all' ? 'All runtimes' : view.runtimeType} · {view.status === 'all' ? 'all status' : view.status} · {view.selectedRunIds.length} selected</span>
+                  {view.text && <small>query: {view.text}</small>}
+                </div>
+                <div className="saved-view-actions">
+                  <button onClick={() => applySavedView(view)}>Apply</button>
+                  <button onClick={() => deleteSavedView(view.id)}>Delete</button>
+                </div>
+              </article>
+            ))
+          )}
+        </div>
       </div>
 
       {selectedRuns.length > 0 && (

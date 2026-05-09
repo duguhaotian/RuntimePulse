@@ -42,7 +42,7 @@ Next UI improvements:
 - Run selection and bulk compare.
 - Trace span detail panel. Implemented for startup waterfall spans.
 - Profile artifact preview panel.
-- Saved views for common expert workflows.
+- Saved views for common expert workflows. Implemented for explorer filters and selection state.
 
 ## Phase 2: Query API and Storage Design
 
