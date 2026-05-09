@@ -36,7 +36,7 @@ Implemented:
 Next UI improvements:
 
 - Metric hover tooltip.
-- Multiple-run comparison overlays.
+- Multiple-run comparison overlays. Implemented for selected runs in the Runs table.
 - Resizable metric panels.
 - Metric group pinning.
 - Run selection and bulk compare.

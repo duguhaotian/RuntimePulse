@@ -15,9 +15,13 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
   const [status, setStatus] = useState<SandboxStatus | 'all'>('all');
   const [text, setText] = useState('');
   const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
+  const [selectedRunIds, setSelectedRunIds] = useState<string[]>([]);
 
   useEffect(() => {
-    api.listSandboxes({ runtimeType, status, text }).then(setSandboxes);
+    api.listSandboxes({ runtimeType, status, text }).then((nextSandboxes) => {
+      setSandboxes(nextSandboxes);
+      setSelectedRunIds((current) => current.filter((id) => nextSandboxes.some((sandbox) => sandbox.id === id)));
+    });
   }, [api, runtimeType, status, text]);
 
   const stats = useMemo(() => {
@@ -26,6 +30,17 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
     const avgStartup = sandboxes.reduce((sum, sandbox) => sum + sandbox.startupDurationMs, 0) / Math.max(sandboxes.length, 1);
     return { slow, failed, avgStartup };
   }, [sandboxes]);
+
+  const selectedRuns = useMemo(() => sandboxes.filter((sandbox) => selectedRunIds.includes(sandbox.id)), [sandboxes, selectedRunIds]);
+  const allVisibleSelected = sandboxes.length > 0 && selectedRunIds.length === sandboxes.length;
+
+  function toggleRun(id: string) {
+    setSelectedRunIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  function toggleAllVisible() {
+    setSelectedRunIds(allVisibleSelected ? [] : sandboxes.map((sandbox) => sandbox.id));
+  }
 
   return (
     <section className="page-stack">
@@ -72,6 +87,14 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
         </select>
       </div>
 
+      {selectedRuns.length > 0 && (
+        <div className="bulk-bar">
+          <strong>{selectedRuns.length} runs selected</strong>
+          <span>Compare startup, CPU, memory, and events across selected sandbox runs.</span>
+          <button onClick={() => setSelectedRunIds([])}>Clear selection</button>
+        </div>
+      )}
+
       <div className="table-card runs-table-card">
         <div className="table-titlebar">
           <div>
@@ -87,6 +110,7 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
         <table>
           <thead>
             <tr>
+              <th className="select-column"><input aria-label="Select all visible runs" checked={allVisibleSelected} type="checkbox" onChange={toggleAllVisible} /></th>
               <th>Run</th>
               <th>Runtime</th>
               <th>Node</th>
@@ -101,29 +125,37 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
             </tr>
           </thead>
           <tbody>
-            {sandboxes.map((sandbox) => (
-              <tr key={sandbox.id} onClick={() => onSelectSandbox(sandbox.id)}>
-                <td>
-                  <div className="run-name-cell">
-                    <span className="run-color" style={{ background: runtimeColors[sandbox.runtimeType] }} />
-                    <div><strong>{sandbox.id}</strong><small>{sandbox.namespace} / {sandbox.workloadName}</small></div>
-                  </div>
-                </td>
-                <td><RuntimeBadge runtimeType={sandbox.runtimeType} /></td>
-                <td>{sandbox.nodeId}</td>
-                <td>{sandbox.workloadName}</td>
-                <td className="truncate">{sandbox.imageRef}</td>
-                <td><StatusBadge status={sandbox.status} /></td>
-                <td>{formatDateTime(sandbox.createdAt)}</td>
-                <td className={sandbox.startupDurationMs > 7000 ? 'hot-value' : ''}>{formatDuration(sandbox.startupDurationMs)}</td>
-                <td>{formatRatio(sandbox.cpuAvg)}</td>
-                <td>{formatBytes(sandbox.memoryPeakBytes)}</td>
-                <td><MiniTrend value={sandbox.startupDurationMs} /></td>
-              </tr>
-            ))}
+            {sandboxes.map((sandbox) => {
+              const selected = selectedRunIds.includes(sandbox.id);
+              return (
+                <tr className={selected ? 'selected-row' : ''} key={sandbox.id} onClick={() => onSelectSandbox(sandbox.id)}>
+                  <td className="select-column" onClick={(event) => event.stopPropagation()}>
+                    <input aria-label={`Select ${sandbox.id}`} checked={selected} type="checkbox" onChange={() => toggleRun(sandbox.id)} />
+                  </td>
+                  <td>
+                    <div className="run-name-cell">
+                      <span className="run-color" style={{ background: runtimeColors[sandbox.runtimeType] }} />
+                      <div><strong>{sandbox.id}</strong><small>{sandbox.namespace} / {sandbox.workloadName}</small></div>
+                    </div>
+                  </td>
+                  <td><RuntimeBadge runtimeType={sandbox.runtimeType} /></td>
+                  <td>{sandbox.nodeId}</td>
+                  <td>{sandbox.workloadName}</td>
+                  <td className="truncate">{sandbox.imageRef}</td>
+                  <td><StatusBadge status={sandbox.status} /></td>
+                  <td>{formatDateTime(sandbox.createdAt)}</td>
+                  <td className={sandbox.startupDurationMs > 7000 ? 'hot-value' : ''}>{formatDuration(sandbox.startupDurationMs)}</td>
+                  <td>{formatRatio(sandbox.cpuAvg)}</td>
+                  <td>{formatBytes(sandbox.memoryPeakBytes)}</td>
+                  <td><MiniTrend value={sandbox.startupDurationMs} /></td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {selectedRuns.length > 0 && <RunComparePanel runs={selectedRuns} />}
     </section>
   );
 }
@@ -152,6 +184,61 @@ function MiniTrend({ value }: { value: number }) {
   return (
     <div className="mini-trend" aria-label="startup trend">
       {bars.map((bar, index) => <i key={index} style={{ height: `${Math.max(15, bar * 100)}%` }} />)}
+    </div>
+  );
+}
+
+function RunComparePanel({ runs }: { runs: Sandbox[] }) {
+  const maxStartup = Math.max(...runs.map((run) => run.startupDurationMs), 1);
+  const maxMemory = Math.max(...runs.map((run) => run.memoryPeakBytes), 1);
+  const avgCpu = runs.reduce((sum, run) => sum + run.cpuAvg, 0) / runs.length;
+  const maxEvents = Math.max(...runs.map((run) => run.eventCount), 1);
+
+  return (
+    <div className="compare-panel">
+      <div className="table-titlebar">
+        <div>
+          <strong>Compare selected runs</strong>
+          <span>{runs.length} sandbox runs selected for side-by-side analysis</span>
+        </div>
+        <div className="column-pills">
+          <span>startup</span>
+          <span>resources</span>
+          <span>events</span>
+        </div>
+      </div>
+      <div className="compare-summary-grid">
+        <SummaryCard label="Selected runs" value={String(runs.length)} caption="current comparison set" />
+        <SummaryCard label="Max startup" value={formatDuration(maxStartup)} caption="slowest selected run" tone={maxStartup > 7000 ? 'warning' : undefined} />
+        <SummaryCard label="Avg CPU" value={formatRatio(avgCpu)} caption="mean selected CPU" />
+        <SummaryCard label="Max memory" value={formatBytes(maxMemory)} caption="peak selected memory" />
+      </div>
+      <div className="compare-bars">
+        {runs.map((run) => (
+          <article className="compare-run" key={run.id}>
+            <div className="compare-run-header">
+              <span className="run-color" style={{ background: runtimeColors[run.runtimeType] }} />
+              <div>
+                <strong>{run.id}</strong>
+                <small>{run.runtimeType} · {run.nodeId} · {run.workloadName}</small>
+              </div>
+            </div>
+            <CompareMetric label="Startup" value={formatDuration(run.startupDurationMs)} percent={run.startupDurationMs / maxStartup} hot={run.startupDurationMs > 7000} />
+            <CompareMetric label="CPU" value={formatRatio(run.cpuAvg)} percent={run.cpuAvg} />
+            <CompareMetric label="Memory" value={formatBytes(run.memoryPeakBytes)} percent={run.memoryPeakBytes / maxMemory} />
+            <CompareMetric label="Events" value={String(run.eventCount)} percent={run.eventCount / maxEvents} hot={run.eventCount > 8} />
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CompareMetric({ label, value, percent, hot }: { label: string; value: string; percent: number; hot?: boolean }) {
+  return (
+    <div className="compare-metric">
+      <div><span>{label}</span><strong className={hot ? 'hot-value' : ''}>{value}</strong></div>
+      <div className="compare-track"><i style={{ width: `${Math.max(4, Math.min(percent, 1) * 100)}%` }} /></div>
     </div>
   );
 }

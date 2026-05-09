@@ -844,3 +844,131 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.select-column {
+  width: 44px;
+  text-align: center;
+}
+
+.select-column input {
+  accent-color: var(--accent);
+}
+
+.selected-row {
+  background: rgba(246, 195, 68, 0.07);
+  box-shadow: inset 3px 0 0 rgba(246, 195, 68, 0.9);
+}
+
+.bulk-bar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 13px;
+  border: 1px solid rgba(246, 195, 68, 0.28);
+  border-radius: 13px;
+  background: linear-gradient(180deg, rgba(246, 195, 68, 0.13), rgba(246, 195, 68, 0.05));
+  color: #fff2c8;
+}
+
+.bulk-bar strong {
+  font-size: 13px;
+}
+
+.bulk-bar span {
+  flex: 1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bulk-bar button {
+  border: 1px solid rgba(246, 195, 68, 0.36);
+  border-radius: 9px;
+  background: rgba(246, 195, 68, 0.1);
+  color: #ffe29a;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 7px 10px;
+}
+
+.compare-panel {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(24, 31, 42, 0.95), rgba(18, 23, 31, 0.96));
+  box-shadow: var(--shadow);
+}
+
+.compare-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.compare-bars {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.compare-run {
+  display: grid;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 13px;
+  background: rgba(10, 14, 20, 0.42);
+}
+
+.compare-run-header {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.compare-run-header strong {
+  display: block;
+  color: #f7fafc;
+  font-size: 13px;
+}
+
+.compare-run-header small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.compare-metric {
+  display: grid;
+  gap: 6px;
+}
+
+.compare-metric > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.compare-metric strong {
+  color: #e8eef6;
+  font-size: 12px;
+}
+
+.compare-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.compare-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--blue), var(--accent));
+}
