@@ -849,6 +849,47 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   gap: 12px;
 }
 
+.comparison-mode-bar {
+  display: inline-flex;
+  width: fit-content;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: rgba(16, 21, 29, 0.72);
+}
+
+.comparison-mode-bar button {
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 850;
+  padding: 8px 12px;
+}
+
+.comparison-mode-bar button.active {
+  background: rgba(246, 195, 68, 0.14);
+  color: #ffe29a;
+}
+
+.comparison-overview-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.comparison-overview-card > .runtime-bars {
+  padding: 14px;
+}
+
+.comparison-table-card td small {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .runtime-row {
   display: grid;
   grid-template-columns: 130px 1fr repeat(3, 118px);

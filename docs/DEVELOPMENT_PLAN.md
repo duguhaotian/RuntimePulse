@@ -110,7 +110,7 @@ Potential features:
 
 - Correlate event timestamp with metrics window. Implemented via event-to-metrics jump marker.
 - Compare startup waterfall across multiple runs.
-- Compare runtime overhead across images and nodes.
+- Compare runtime overhead across images and nodes. Implemented in Runtime Comparison scope switcher.
 - Compare cold start vs warm start.
 - Add node-level IO pressure and PSI overlays.
 - Add image layer breakdown and cache hit visualizations.
