@@ -1079,3 +1079,122 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   color: var(--muted-2);
   font-size: 11px;
 }
+
+
+.span-row.selected .span-name {
+  color: #ffe29a;
+  font-weight: 850;
+}
+
+.span-row.selected .span-track {
+  box-shadow: 0 0 0 1px rgba(246, 195, 68, 0.38), inset 0 0 0 1px rgba(246, 195, 68, 0.18);
+}
+
+.span-bar {
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.span-bar:hover {
+  filter: brightness(1.12);
+}
+
+.trace-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(360px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.span-detail-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.span-detail-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.span-detail-header h3,
+.span-detail-header p {
+  margin: 0;
+}
+
+.span-detail-header p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.span-detail-stats {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.span-detail-stats .summary-card {
+  min-height: auto;
+  padding: 12px 13px;
+}
+
+.span-detail-stats .summary-card strong {
+  font-size: 17px;
+}
+
+.span-attributes,
+.span-next-actions {
+  display: grid;
+  gap: 10px;
+}
+
+.span-attributes h3,
+.span-next-actions h3 {
+  margin: 0;
+}
+
+.span-attributes dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.span-attributes dl > div {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 10px;
+  background: rgba(10, 14, 20, 0.42);
+}
+
+.span-attributes dt {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.span-attributes dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #dbe4ee;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.span-next-actions button {
+  border: 1px solid rgba(246, 195, 68, 0.28);
+  border-radius: 10px;
+  background: rgba(246, 195, 68, 0.09);
+  color: #ffe29a;
+  font-size: 12px;
+  font-weight: 850;
+  padding: 9px 10px;
+  text-align: left;
+}

@@ -25,6 +25,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [spans, setSpans] = useState<TraceSpan[]>([]);
   const [profiles, setProfiles] = useState<ProfileArtifact[]>([]);
+  const [selectedSpan, setSelectedSpan] = useState<TraceSpan>();
 
   useEffect(() => {
     let mounted = true;
@@ -45,6 +46,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       setMetrics(nextMetrics);
       setEvents(nextEvents);
       setSpans(nextSpans);
+      setSelectedSpan(nextSpans[0]);
       setProfiles(nextProfiles);
     });
     return () => {
@@ -126,7 +128,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
           </div>
           <div className="panel-card">
             <h3>Startup Trace</h3>
-            <TraceWaterfall spans={spans} />
+            <TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} />
           </div>
         </div>
       )}
@@ -138,10 +140,55 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       )}
 
       {tab === 'timeline' && <div className="panel-card"><EventTimeline events={events} /></div>}
-      {tab === 'trace' && <div className="panel-card"><TraceWaterfall spans={spans} /></div>}
+      {tab === 'trace' && (
+        <div className="trace-detail-grid">
+          <div className="panel-card"><TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} /></div>
+          <SpanDetailPanel span={selectedSpan} />
+        </div>
+      )}
       {tab === 'profiles' && <ProfileTable profiles={profiles} />}
       {tab === 'raw' && <pre className="raw-json">{JSON.stringify({ sandbox, node, image, events, spans, profiles }, null, 2)}</pre>}
     </section>
+  );
+}
+
+function SpanDetailPanel({ span }: { span?: TraceSpan }) {
+  if (!span) {
+    return <div className="panel-card span-detail-panel"><div className="empty-state">Select a trace span to inspect details.</div></div>;
+  }
+
+  return (
+    <div className="panel-card span-detail-panel">
+      <div className="span-detail-header">
+        <div>
+          <h3>{span.spanName}</h3>
+          <p>{span.spanId} · {span.status}</p>
+        </div>
+        <span className={`status-badge ${span.status === 'error' ? 'failed' : 'running'}`}>{span.status}</span>
+      </div>
+      <div className="span-detail-stats">
+        <Info label="Duration" value={formatDuration(span.durationMs)} hot={span.durationMs > 7000} />
+        <Info label="Start" value={formatDateTime(span.startTime)} />
+        <Info label="End" value={formatDateTime(span.endTime)} />
+      </div>
+      <div className="span-attributes">
+        <h3>Attributes</h3>
+        <dl>
+          {Object.entries(span.attributes).map(([key, value]) => (
+            <div key={key}>
+              <dt>{key}</dt>
+              <dd>{String(value)}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+      <div className="span-next-actions">
+        <h3>Next analysis actions</h3>
+        <button>Focus metrics ±30s</button>
+        <button>Show nearby events</button>
+        <button>Create report note</button>
+      </div>
+    </div>
   );
 }
 

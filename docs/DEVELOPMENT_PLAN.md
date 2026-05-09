@@ -40,7 +40,7 @@ Next UI improvements:
 - Resizable metric panels.
 - Metric group pinning.
 - Run selection and bulk compare.
-- Trace span detail drawer.
+- Trace span detail panel. Implemented for startup waterfall spans.
 - Profile artifact preview panel.
 - Saved views for common expert workflows.
 
