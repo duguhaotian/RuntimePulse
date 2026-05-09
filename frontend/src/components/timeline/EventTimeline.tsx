@@ -4,13 +4,15 @@ import { formatDateTime } from '../../utils/time';
 
 type EventTimelineProps = {
   events: EventRecord[];
+  selectedEventId?: string;
+  onSelectEvent?: (event: EventRecord) => void;
 };
 
-export function EventTimeline({ events }: EventTimelineProps) {
+export function EventTimeline({ events, selectedEventId, onSelectEvent }: EventTimelineProps) {
   return (
     <div className="event-timeline">
       {events.map((event) => (
-        <article className={`event-item ${event.severity}`} key={event.id}>
+        <article className={`event-item ${event.severity} ${selectedEventId === event.id ? 'selected' : ''}`} key={event.id} onClick={() => onSelectEvent?.(event)}>
           <div className="event-dot" style={{ background: severityColors[event.severity] }} />
           <div className="event-body">
             <div className="event-title">

@@ -26,6 +26,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [spans, setSpans] = useState<TraceSpan[]>([]);
   const [profiles, setProfiles] = useState<ProfileArtifact[]>([]);
   const [selectedSpan, setSelectedSpan] = useState<TraceSpan>();
+  const [selectedEvent, setSelectedEvent] = useState<EventRecord>();
 
   useEffect(() => {
     let mounted = true;
@@ -45,6 +46,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       setImage(nextImage);
       setMetrics(nextMetrics);
       setEvents(nextEvents);
+      setSelectedEvent(undefined);
       setSpans(nextSpans);
       setSelectedSpan(nextSpans[0]);
       setProfiles(nextProfiles);
@@ -60,6 +62,11 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       return groups;
     }, {});
   }, [metrics]);
+
+  function jumpToMetricsFromEvent(event: EventRecord) {
+    setSelectedEvent(event);
+    setTab('metrics');
+  }
 
   if (!sandbox) return <div className="empty-state">Loading sandbox...</div>;
 
@@ -124,7 +131,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
         <div className="two-column">
           <div className="panel-card">
             <h3>Lifecycle Timeline</h3>
-            <EventTimeline events={events} />
+            <EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
           </div>
           <div className="panel-card">
             <h3>Startup Trace</h3>
@@ -135,11 +142,14 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 
       {tab === 'metrics' && (
         <div className="chart-grid">
-          {Object.entries(metricsByGroup).map(([group, groupSeries]) => <MetricChart key={group} series={groupSeries} />)}
+          {selectedEvent && <SelectedEventContext event={selectedEvent} onClear={() => setSelectedEvent(undefined)} />}
+          {Object.entries(metricsByGroup).map(([group, groupSeries]) => (
+            <MetricChart key={group} markerLabel={selectedEvent?.eventName} markerTime={selectedEvent?.timestamp} series={groupSeries} />
+          ))}
         </div>
       )}
 
-      {tab === 'timeline' && <div className="panel-card"><EventTimeline events={events} /></div>}
+      {tab === 'timeline' && <div className="panel-card"><EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} /></div>}
       {tab === 'trace' && (
         <div className="trace-detail-grid">
           <div className="panel-card"><TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} /></div>
@@ -149,6 +159,19 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {tab === 'profiles' && <ProfileTable profiles={profiles} />}
       {tab === 'raw' && <pre className="raw-json">{JSON.stringify({ sandbox, node, image, events, spans, profiles }, null, 2)}</pre>}
     </section>
+  );
+}
+
+function SelectedEventContext({ event, onClear }: { event: EventRecord; onClear: () => void }) {
+  return (
+    <div className="selected-event-context">
+      <div>
+        <strong>{event.eventName}</strong>
+        <span>{formatDateTime(event.timestamp)} · {event.severity} · {event.source}</span>
+      </div>
+      <p>{event.message}</p>
+      <button onClick={onClear}>Clear marker</button>
+    </div>
   );
 }
 

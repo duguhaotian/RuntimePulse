@@ -108,7 +108,7 @@ Goals:
 
 Potential features:
 
-- Correlate event timestamp with metrics window.
+- Correlate event timestamp with metrics window. Implemented via event-to-metrics jump marker.
 - Compare startup waterfall across multiple runs.
 - Compare runtime overhead across images and nodes.
 - Compare cold start vs warm start.
