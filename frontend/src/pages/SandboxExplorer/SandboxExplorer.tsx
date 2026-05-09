@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
-import type { RuntimeType, Sandbox, SandboxStatus } from '../../domain/model';
+import type { RuntimeType, Sandbox, SandboxStatus, TraceSpan } from '../../domain/model';
+import { TraceWaterfall } from '../../components/trace/TraceWaterfall';
 import { runtimeColors } from '../../utils/colors';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
-import { formatDateTime } from '../../utils/time';
+import { formatDateTime, toMs } from '../../utils/time';
 
 type SavedExplorerView = {
   id: string;
@@ -41,6 +42,7 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
   const [text, setText] = useState('');
   const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
   const [selectedRunIds, setSelectedRunIds] = useState<string[]>([]);
+  const [selectedRunTraces, setSelectedRunTraces] = useState<Record<string, TraceSpan[]>>({});
   const [savedViews, setSavedViews] = useState<SavedExplorerView[]>(loadSavedExplorerViews);
   const [viewName, setViewName] = useState('');
 
@@ -65,6 +67,26 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
 
   const selectedRuns = useMemo(() => sandboxes.filter((sandbox) => selectedRunIds.includes(sandbox.id)), [sandboxes, selectedRunIds]);
   const allVisibleSelected = sandboxes.length > 0 && selectedRunIds.length === sandboxes.length;
+
+  useEffect(() => {
+    let mounted = true;
+
+    if (selectedRuns.length === 0) {
+      setSelectedRunTraces({});
+      return () => {
+        mounted = false;
+      };
+    }
+
+    Promise.all(selectedRuns.map(async (run) => [run.id, await api.getSandboxTrace(run.id)] as const)).then((entries) => {
+      if (!mounted) return;
+      setSelectedRunTraces(Object.fromEntries(entries));
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, [api, selectedRuns]);
 
   function toggleRun(id: string) {
     setSelectedRunIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
@@ -246,6 +268,7 @@ export function SandboxExplorer({ api, onSelectSandbox }: SandboxExplorerProps) 
       </div>
 
       {selectedRuns.length > 0 && <RunComparePanel runs={selectedRuns} />}
+      {selectedRuns.length > 0 && <RunTraceComparePanel runs={selectedRuns} traces={selectedRunTraces} />}
     </section>
   );
 }
@@ -322,6 +345,67 @@ function RunComparePanel({ runs }: { runs: Sandbox[] }) {
       </div>
     </div>
   );
+}
+
+function RunTraceComparePanel({ runs, traces }: { runs: Sandbox[]; traces: Record<string, TraceSpan[]> }) {
+  const traceDurations = runs.map((run) => traceWindow(traces[run.id] ?? []));
+  const maxTraceDuration = Math.max(...traceDurations, 1);
+  const failedRuns = runs.filter((run) => run.status === 'failed').length;
+
+  return (
+    <div className="compare-panel trace-compare-panel">
+      <div className="table-titlebar">
+        <div>
+          <strong>Compare startup waterfalls</strong>
+          <span>Selected runs rendered with their startup trace spans for side-by-side inspection.</span>
+        </div>
+        <div className="column-pills">
+          <span>trace</span>
+          <span>startup</span>
+          <span>outliers</span>
+        </div>
+      </div>
+      <div className="compare-summary-grid">
+        <SummaryCard label="Selected runs" value={String(runs.length)} caption="trace comparison set" />
+        <SummaryCard label="Failed" value={String(failedRuns)} caption="runs with startup errors" tone={failedRuns > 0 ? 'danger' : undefined} />
+        <SummaryCard label="Slowest trace" value={formatDuration(maxTraceDuration)} caption="widest startup trace window" />
+        <SummaryCard label="Max startup" value={formatDuration(Math.max(...runs.map((run) => run.startupDurationMs), 1))} caption="slowest selected run" tone={Math.max(...runs.map((run) => run.startupDurationMs), 1) > 7000 ? 'warning' : undefined} />
+      </div>
+      <div className="trace-compare-grid">
+        {runs.map((run) => {
+          const runTraces = traces[run.id] ?? [];
+          const traceDuration = traceWindow(runTraces);
+
+          return (
+            <article className="panel-card trace-compare-card" key={run.id}>
+              <div className="trace-compare-header">
+                <div className="compare-run-header">
+                  <span className="run-color" style={{ background: runtimeColors[run.runtimeType] }} />
+                  <div>
+                    <strong>{run.id}</strong>
+                    <small>{run.runtimeType} · {run.nodeId} · {run.workloadName}</small>
+                  </div>
+                </div>
+                <div className="trace-compare-meta">
+                  <span>{formatDuration(run.startupDurationMs)} startup</span>
+                  <span>{formatDuration(traceDuration)} trace window</span>
+                </div>
+              </div>
+              <TraceWaterfall spans={runTraces} />
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function traceWindow(spans: TraceSpan[]) {
+  if (spans.length === 0) return 0;
+
+  const start = Math.min(...spans.map((span) => toMs(span.startTime)));
+  const end = Math.max(...spans.map((span) => toMs(span.endTime)));
+  return Math.max(end - start, 1);
 }
 
 function CompareMetric({ label, value, percent, hot }: { label: string; value: string; percent: number; hot?: boolean }) {

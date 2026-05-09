@@ -39,7 +39,7 @@ Next UI improvements:
 - Multiple-run comparison overlays. Implemented for selected runs in the Runs table.
 - Resizable metric panels. Implemented with compact, standard, and expanded chart layouts.
 - Metric group pinning. Implemented for metrics tab chart ordering and pinned state.
-- Run selection and bulk compare.
+- Run selection and bulk compare. Implemented for startup metrics and trace waterfall comparison.
 - Trace span detail panel. Implemented for startup waterfall spans.
 - Profile artifact preview panel.
 - Saved views for common expert workflows. Implemented for explorer filters and selection state.

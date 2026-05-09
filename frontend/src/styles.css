@@ -1162,6 +1162,10 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   box-shadow: var(--shadow);
 }
 
+.trace-compare-panel {
+  margin-top: 16px;
+}
+
 .compare-summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1175,6 +1179,37 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   padding: 14px;
+}
+
+.trace-compare-grid {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.trace-compare-card {
+  display: grid;
+  gap: 12px;
+}
+
+.trace-compare-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.trace-compare-meta {
+  display: grid;
+  gap: 5px;
+  justify-items: end;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.trace-compare-meta span {
+  display: inline-flex;
+  justify-content: flex-end;
 }
 
 .compare-run {
