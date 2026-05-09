@@ -1,0 +1,10 @@
+services:
+  runtimepulse-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: runtimepulse/frontend:dev
+    container_name: runtimepulse-frontend
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
