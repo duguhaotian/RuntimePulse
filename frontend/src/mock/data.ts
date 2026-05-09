@@ -1,5 +1,6 @@
 import type {
   EventRecord,
+  FlamegraphFrame,
   Image,
   MetricSeries,
   Node,
@@ -139,6 +140,7 @@ export function profilesForSandbox(sandboxId: string): ProfileArtifact[] {
       durationMs: 30_000,
       sampleCount: target.runtimeType === 'gvisor' ? 18_200 : 7_400,
       objectUri: `s3://runtimepulse/profiles/${target.id}/cpu.pprof`,
+      flamegraph: cpuFlamegraph(target.runtimeType, role),
     },
     {
       id: `profile-${target.id}-io`,
@@ -149,8 +151,62 @@ export function profilesForSandbox(sandboxId: string): ProfileArtifact[] {
       durationMs: 30_000,
       sampleCount: target.nodeId === 'node-b' ? 12_300 : 3_900,
       objectUri: `s3://runtimepulse/profiles/${target.id}/block-io.pprof`,
+      flamegraph: ioFlamegraph(target.nodeId === 'node-b'),
     },
   ];
+}
+
+function cpuFlamegraph(runtimeType: RuntimeType, role: string): FlamegraphFrame {
+  if (runtimeType === 'gvisor') {
+    return frame(`${role}:root`, 100, [
+      frame('sentry/syscalls.handle', 42, [
+        frame('fs/gofer.walk', 17),
+        frame('netstack/tcp.dispatch', 14),
+        frame('security/seccomp.check', 11),
+      ]),
+      frame('runtime.schedule', 24, [frame('goroutine.scan', 13), frame('timer.run', 6), frame('gc.assist', 5)]),
+      frame('application.proxy', 21, [frame('http.parse', 9), frame('json.encode', 7), frame('tls.write', 5)]),
+      frame('kernel.copy_user', 13),
+    ]);
+  }
+
+  if (runtimeType === 'kata') {
+    return frame(`${role}:root`, 100, [
+      frame('qemu/vcpu_loop', 34, [frame('kvm.run', 19), frame('virtio.queue_notify', 9), frame('irq.inject', 6)]),
+      frame('virtiofsd.fuse_read', 27, [frame('metadata.lookup', 12), frame('page_cache.fill', 10), frame('copy_to_guest', 5)]),
+      frame('guest.agent.rpc', 18, [frame('grpc.recv', 8), frame('sandbox.status', 6), frame('json.decode', 4)]),
+      frame('runtime.schedule', 21),
+    ]);
+  }
+
+  if (runtimeType === 'firecracker') {
+    return frame(`${role}:root`, 100, [
+      frame('vmm.run_vcpu', 39, [frame('kvm.vmexit', 18), frame('virtio-mmio.handle', 13), frame('irqfd.signal', 8)]),
+      frame('jailer.io_proxy', 22, [frame('read_pipe', 11), frame('write_pipe', 7), frame('epoll.wait', 4)]),
+      frame('guest.boot.wait', 24, [frame('agent.handshake', 15), frame('block.init', 9)]),
+      frame('metrics.flush', 15),
+    ]);
+  }
+
+  return frame(`${role}:root`, 100, [
+    frame('container.init', 28, [frame('namespace.setup', 11), frame('cgroup.apply', 9), frame('seccomp.load', 8)]),
+    frame('application.work', 36, [frame('http.serve', 16), frame('db.query', 12), frame('json.encode', 8)]),
+    frame('runtime.schedule', 21),
+    frame('kernel.syscall', 15),
+  ]);
+}
+
+function ioFlamegraph(highPressure: boolean): FlamegraphFrame {
+  return frame('block_io:root', 100, [
+    frame('overlayfs.read_iter', highPressure ? 34 : 20, [frame('lookup_fast', 9), frame('copy_page_to_iter', 8), frame('xattr.read', highPressure ? 17 : 3)]),
+    frame('snapshotter.fetch', highPressure ? 28 : 17, [frame('remote.block.get', 13), frame('decompress.chunk', 9), frame('verify.digest', 6)]),
+    frame('page_cache.readahead', highPressure ? 21 : 34, [frame('bio.submit', 18), frame('cache.hit', highPressure ? 3 : 16)]),
+    frame('blk_mq.dispatch', highPressure ? 17 : 29),
+  ]);
+}
+
+function frame(name: string, value: number, children?: FlamegraphFrame[]): FlamegraphFrame {
+  return { name, value, children };
 }
 
 export const runtimeComparison: RuntimeCompareRow[] = [

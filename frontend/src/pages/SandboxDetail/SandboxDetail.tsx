@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
-import type { EventRecord, Image, MetricSeries, Node, ProfileArtifact, Sandbox, TraceSpan } from '../../domain/model';
+import type { EventRecord, FlamegraphFrame, Image, MetricSeries, Node, ProfileArtifact, Sandbox, TraceSpan } from '../../domain/model';
 import { MetricChart } from '../../components/charts/MetricChart';
 import { EventTimeline } from '../../components/timeline/EventTimeline';
 import { TraceWaterfall } from '../../components/trace/TraceWaterfall';
@@ -156,32 +156,112 @@ function Info({ label, value, hot }: { label: string; value: string; hot?: boole
 }
 
 function ProfileTable({ profiles }: { profiles: ProfileArtifact[] }) {
+  const [expandedProfileId, setExpandedProfileId] = useState(profiles[0]?.id ?? '');
+  const selectedProfile = profiles.find((profile) => profile.id === expandedProfileId) ?? profiles[0];
+
   return (
-    <div className="table-card">
-      <div className="table-titlebar">
-        <div>
-          <strong>Profile artifacts</strong>
-          <span>pprof-compatible profiling outputs</span>
+    <div className="profile-viewer-grid">
+      <div className="table-card profile-list-card">
+        <div className="table-titlebar">
+          <div>
+            <strong>Profile artifacts</strong>
+            <span>Click a profile to open the flame graph preview</span>
+          </div>
         </div>
+        <table>
+          <thead>
+            <tr><th>Profile</th><th>Type</th><th>Process Role</th><th>Duration</th><th>Samples</th><th>View</th></tr>
+          </thead>
+          <tbody>
+            {profiles.map((profile) => {
+              const selected = selectedProfile?.id === profile.id;
+              return (
+                <tr className={selected ? 'selected-row' : ''} key={profile.id} onClick={() => setExpandedProfileId(profile.id)}>
+                  <td><strong>{profile.id}</strong><small>{formatDateTime(profile.timestamp)}</small></td>
+                  <td>{profile.profileType}</td>
+                  <td>{profile.processRole}</td>
+                  <td>{formatDuration(profile.durationMs)}</td>
+                  <td>{profile.sampleCount.toLocaleString()}</td>
+                  <td><button className="inline-action">{selected ? 'Open' : 'Preview'}</button></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
-      <table>
-        <thead>
-          <tr><th>Profile</th><th>Type</th><th>Process Role</th><th>Timestamp</th><th>Duration</th><th>Samples</th><th>Object</th></tr>
-        </thead>
-        <tbody>
-          {profiles.map((profile) => (
-            <tr key={profile.id}>
-              <td><strong>{profile.id}</strong></td>
-              <td>{profile.profileType}</td>
-              <td>{profile.processRole}</td>
-              <td>{formatDateTime(profile.timestamp)}</td>
-              <td>{formatDuration(profile.durationMs)}</td>
-              <td>{profile.sampleCount.toLocaleString()}</td>
-              <td className="truncate">{profile.objectUri}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+
+      {selectedProfile && (
+        <div className="panel-card flamegraph-card">
+          <div className="flamegraph-header">
+            <div>
+              <h3>Flame graph preview</h3>
+              <p>{selectedProfile.id} · {selectedProfile.profileType} · {selectedProfile.objectUri}</p>
+            </div>
+            <span>{selectedProfile.sampleCount.toLocaleString()} samples</span>
+          </div>
+          {selectedProfile.flamegraph ? <FlameGraph root={selectedProfile.flamegraph} /> : <div className="empty-state">No flame graph data available.</div>}
+        </div>
+      )}
     </div>
   );
+}
+
+function FlameGraph({ root }: { root: FlamegraphFrame }) {
+  const rows = useMemo(() => layoutFlamegraph(root), [root]);
+  const maxDepth = Math.max(...rows.map((row) => row.depth), 0);
+  const height = (maxDepth + 1) * 30 + 18;
+
+  return (
+    <div className="flamegraph-scroll">
+      <svg className="flamegraph-svg" viewBox={`0 0 1000 ${height}`} preserveAspectRatio="none" role="img" aria-label="Flame graph preview">
+        {rows.map((row) => (
+          <g key={`${row.depth}-${row.x}-${row.frame.name}`}>
+            <rect
+              className="flame-frame"
+              x={row.x}
+              y={height - (row.depth + 1) * 30}
+              width={Math.max(row.width, 2)}
+              height="24"
+              rx="4"
+            />
+            {row.width > 70 && (
+              <text x={row.x + 7} y={height - (row.depth + 1) * 30 + 16} className="flame-label">
+                {row.frame.name} ({row.frame.value})
+              </text>
+            )}
+            <title>{row.frame.name}: {row.frame.value} samples</title>
+          </g>
+        ))}
+      </svg>
+      <div className="flamegraph-footer">
+        <span>Root on bottom, callees stack upward.</span>
+        <span>Mock preview; real pprof/flamegraph artifacts will use the same panel.</span>
+      </div>
+    </div>
+  );
+}
+
+type FlameRow = {
+  frame: FlamegraphFrame;
+  depth: number;
+  x: number;
+  width: number;
+};
+
+function layoutFlamegraph(root: FlamegraphFrame): FlameRow[] {
+  const rows: FlameRow[] = [];
+  const visit = (frame: FlamegraphFrame, depth: number, x: number, width: number) => {
+    rows.push({ frame, depth, x, width });
+    const children = frame.children ?? [];
+    const total = children.reduce((sum, child) => sum + child.value, 0) || frame.value;
+    let cursor = x;
+    children.forEach((child) => {
+      const childWidth = width * (child.value / total);
+      visit(child, depth + 1, cursor, childWidth);
+      cursor += childWidth;
+    });
+  };
+
+  visit(root, 0, 0, 1000);
+  return rows;
 }

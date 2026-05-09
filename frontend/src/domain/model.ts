@@ -101,6 +101,12 @@ export type TraceSpan = {
   attributes: Record<string, unknown>;
 };
 
+export type FlamegraphFrame = {
+  name: string;
+  value: number;
+  children?: FlamegraphFrame[];
+};
+
 export type ProfileArtifact = {
   id: string;
   timestamp: string;
@@ -110,6 +116,7 @@ export type ProfileArtifact = {
   durationMs: number;
   sampleCount: number;
   objectUri: string;
+  flamegraph?: FlamegraphFrame;
 };
 
 export type SandboxQuery = {
