@@ -462,6 +462,62 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   gap: 16px;
 }
 
+.metric-panel-grid.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.metric-panel-grid.expanded {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.metric-panel-toolbar {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  background: rgba(13, 18, 25, 0.82);
+}
+
+.metric-panel-toolbar strong {
+  display: block;
+  color: #e5edf8;
+  font-size: 13px;
+}
+
+.metric-panel-toolbar span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.segmented-control {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 12px;
+  background: rgba(5, 8, 12, 0.5);
+}
+
+.segmented-control button {
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 850;
+  padding: 7px 10px;
+}
+
+.segmented-control button.active {
+  background: rgba(246, 195, 68, 0.14);
+  color: #ffe29a;
+}
+
 .chart-header {
   display: flex;
   gap: 16px;

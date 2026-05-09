@@ -15,6 +15,19 @@ type SandboxDetailProps = {
 };
 
 type Tab = 'overview' | 'metrics' | 'timeline' | 'trace' | 'profiles' | 'raw';
+type MetricPanelSize = 'compact' | 'standard' | 'expanded';
+
+const metricPanelHeights: Record<MetricPanelSize, number> = {
+  compact: 170,
+  standard: 220,
+  expanded: 310,
+};
+
+const metricPanelLabels: Record<MetricPanelSize, string> = {
+  compact: 'Compact',
+  standard: 'Standard',
+  expanded: 'Expanded',
+};
 
 export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [tab, setTab] = useState<Tab>('overview');
@@ -28,6 +41,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [selectedSpan, setSelectedSpan] = useState<TraceSpan>();
   const [selectedEvent, setSelectedEvent] = useState<EventRecord>();
   const [pinnedMetricGroups, setPinnedMetricGroups] = useState<string[]>([]);
+  const [metricPanelSize, setMetricPanelSize] = useState<MetricPanelSize>('standard');
 
   useEffect(() => {
     let mounted = true;
@@ -158,11 +172,13 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       )}
 
       {tab === 'metrics' && (
-        <div className="chart-grid">
+        <div className={`chart-grid metric-panel-grid ${metricPanelSize}`}>
+          <MetricPanelToolbar size={metricPanelSize} onSizeChange={setMetricPanelSize} />
           {selectedEvent && <SelectedEventContext event={selectedEvent} onClear={() => setSelectedEvent(undefined)} />}
           {pinnedMetricGroups.length > 0 && <PinnedMetricSummary pinnedGroups={pinnedMetricGroups} onClear={() => setPinnedMetricGroups([])} />}
           {metricGroups.map(([group, groupSeries]) => (
             <MetricChart
+              height={metricPanelHeights[metricPanelSize]}
               key={group}
               markerLabel={selectedEvent?.eventName}
               markerTime={selectedEvent?.timestamp}
@@ -184,6 +200,22 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {tab === 'profiles' && <ProfileTable profiles={profiles} />}
       {tab === 'raw' && <pre className="raw-json">{JSON.stringify({ sandbox, node, image, events, spans, profiles }, null, 2)}</pre>}
     </section>
+  );
+}
+
+function MetricPanelToolbar({ size, onSizeChange }: { size: MetricPanelSize; onSizeChange: (size: MetricPanelSize) => void }) {
+  return (
+    <div className="metric-panel-toolbar">
+      <div>
+        <strong>Metric panel size</strong>
+        <span>Resize charts for dense scanning or deep inspection.</span>
+      </div>
+      <div className="segmented-control" role="group" aria-label="Metric panel size">
+        {(['compact', 'standard', 'expanded'] as MetricPanelSize[]).map((item) => (
+          <button className={size === item ? 'active' : ''} key={item} onClick={() => onSizeChange(item)}>{metricPanelLabels[item]}</button>
+        ))}
+      </div>
+    </div>
   );
 }
 
