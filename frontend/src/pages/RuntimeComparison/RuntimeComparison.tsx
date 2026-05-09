@@ -25,6 +25,11 @@ type AggregateComparisonRow = {
   color: string;
 };
 
+type StartupTemperatureRow = AggregateComparisonRow & {
+  temperature: 'cold' | 'warm';
+  description: string;
+};
+
 export function RuntimeComparison({ api }: RuntimeComparisonProps) {
   const [rows, setRows] = useState<RuntimeCompareRow[]>([]);
   const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
@@ -64,6 +69,8 @@ export function RuntimeComparison({ api }: RuntimeComparisonProps) {
     if (scope === 'runtime') return [];
     return buildAggregateRows(sandboxes, scope, nodeLabels);
   }, [sandboxes, scope, nodeLabels]);
+
+  const startupTemperatureRows = useMemo(() => buildStartupTemperatureRows(sandboxes), [sandboxes]);
 
   const currentRows = scope === 'runtime'
     ? rows.map((row) => ({
@@ -164,6 +171,7 @@ export function RuntimeComparison({ api }: RuntimeComparisonProps) {
           </tbody>
         </table>
       </div>
+      <StartupTemperaturePanel rows={startupTemperatureRows} />
     </section>
   );
 }
@@ -194,6 +202,53 @@ function ComparisonBars({ rows }: { rows: AggregateComparisonRow[] }) {
           <div className="runtime-stat">Mem {formatBytes(row.memoryValueBytes)}</div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function StartupTemperaturePanel({ rows }: { rows: StartupTemperatureRow[] }) {
+  const maxStartup = Math.max(...rows.map((row) => row.startupP95Ms), 1);
+  const cold = rows.find((row) => row.temperature === 'cold');
+  const warm = rows.find((row) => row.temperature === 'warm');
+  const improvement = cold && warm && cold.startupP95Ms > 0 ? 1 - warm.startupP95Ms / cold.startupP95Ms : undefined;
+
+  return (
+    <div className="compare-panel startup-temperature-panel">
+      <div className="table-titlebar">
+        <div>
+          <strong>Cold vs warm start</strong>
+          <span>Mock cache model: first observed run per image is cold, later runs reuse image/cache state.</span>
+        </div>
+        <div className="column-pills">
+          <span>cache</span>
+          <span>startup</span>
+        </div>
+      </div>
+      <div className="compare-summary-grid">
+        <SummaryCard label="Cold samples" value={String(cold?.sampleCount ?? 0)} caption="first run per image" />
+        <SummaryCard label="Warm samples" value={String(warm?.sampleCount ?? 0)} caption="reused image/cache" />
+        <SummaryCard label="Warm delta" value={improvement === undefined ? '-' : formatRatio(improvement)} caption="P95 improvement estimate" tone={improvement !== undefined && improvement < 0 ? 'warning' : undefined} />
+        <SummaryCard label="Cold P95" value={cold ? formatDuration(cold.startupP95Ms) : '-'} caption="cold-cache startup" tone={cold && cold.startupP95Ms > 10_000 ? 'warning' : undefined} />
+      </div>
+      <div className="startup-temperature-grid">
+        {rows.map((row) => (
+          <article className="startup-temperature-card" key={row.key}>
+            <div>
+              <strong>{row.label}</strong>
+              <span>{row.description}</span>
+            </div>
+            <div className="temperature-bar-track">
+              <i style={{ width: `${Math.max(5, (row.startupP95Ms / maxStartup) * 100)}%`, background: row.color }} />
+            </div>
+            <dl>
+              <div><dt>Samples</dt><dd>{row.sampleCount}</dd></div>
+              <div><dt>P50</dt><dd>{formatDuration(row.startupP50Ms)}</dd></div>
+              <div><dt>P95</dt><dd className={row.startupP95Ms > 10_000 ? 'hot-value' : ''}>{formatDuration(row.startupP95Ms)}</dd></div>
+              <div><dt>Failure</dt><dd>{formatRatio(row.failureRate)}</dd></div>
+            </dl>
+          </article>
+        ))}
+      </div>
     </div>
   );
 }
@@ -230,6 +285,46 @@ function buildAggregateRows(sandboxes: Sandbox[], scope: Exclude<ComparisonScope
       color: chartPalette[index % chartPalette.length],
     };
   }).sort((left, right) => right.startupP95Ms - left.startupP95Ms);
+}
+
+function buildStartupTemperatureRows(sandboxes: Sandbox[]): StartupTemperatureRow[] {
+  const seenImages = new Set<string>();
+  const buckets: Record<StartupTemperatureRow['temperature'], Sandbox[]> = {
+    cold: [],
+    warm: [],
+  };
+
+  [...sandboxes].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)).forEach((sandbox) => {
+    const temperature = seenImages.has(sandbox.imageId) ? 'warm' : 'cold';
+    buckets[temperature].push(sandbox);
+    seenImages.add(sandbox.imageId);
+  });
+
+  return ([
+    ['cold', 'Cold start', 'First observed run for each image; image/cache state likely cold.', '#f97316'],
+    ['warm', 'Warm start', 'Subsequent runs for images that have already appeared.', '#34d399'],
+  ] as const).map(([temperature, label, description, color]) => {
+    const group = buckets[temperature];
+    const startupValues = group.map((sandbox) => sandbox.startupDurationMs).sort((left, right) => left - right);
+    const cpuValues = group.map((sandbox) => sandbox.cpuAvg);
+    const memoryValues = group.map((sandbox) => sandbox.memoryPeakBytes);
+    const failures = group.filter((sandbox) => sandbox.status === 'failed').length;
+
+    return {
+      key: temperature,
+      label,
+      detail: temperature,
+      temperature,
+      description,
+      sampleCount: group.length,
+      startupP50Ms: percentile(startupValues, 0.5),
+      startupP95Ms: percentile(startupValues, 0.95),
+      cpuValue: average(cpuValues),
+      memoryValueBytes: Math.max(...memoryValues, 1),
+      failureRate: failures / Math.max(group.length, 1),
+      color,
+    };
+  });
 }
 
 function percentile(values: number[], ratio: number) {
