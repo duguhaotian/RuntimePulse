@@ -35,7 +35,7 @@ Implemented:
 
 Next UI improvements:
 
-- Metric hover tooltip.
+- Metric hover tooltip. Implemented with per-point hover cards and chart crosshair.
 - Multiple-run comparison overlays. Implemented for selected runs in the Runs table.
 - Resizable metric panels.
 - Metric group pinning.

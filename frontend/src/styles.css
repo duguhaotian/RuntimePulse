@@ -447,6 +447,10 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   padding: 16px;
 }
 
+.metric-chart-card {
+  position: relative;
+}
+
 .chart-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -482,6 +486,58 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
 .metric-svg {
   width: 100%;
   height: auto;
+}
+
+.hover-marker-line {
+  stroke: rgba(246, 195, 68, 0.58);
+  stroke-dasharray: 2 4;
+  stroke-width: 1.5;
+}
+
+.hover-point {
+  stroke: #0b1017;
+  stroke-width: 2;
+}
+
+.metric-tooltip {
+  position: absolute;
+  top: 66px;
+  transform: translateX(-50%);
+  display: grid;
+  gap: 7px;
+  min-width: 220px;
+  max-width: 280px;
+  padding: 10px 12px;
+  border: 1px solid rgba(246, 195, 68, 0.24);
+  border-radius: 14px;
+  background: rgba(8, 12, 18, 0.96);
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.metric-tooltip strong {
+  color: #fff2c8;
+  font-size: 12px;
+}
+
+.metric-tooltip span {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  color: #cbd5e1;
+  font-size: 11px;
+}
+
+.metric-tooltip i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.metric-tooltip b {
+  font-weight: 700;
 }
 
 .axis { stroke: rgba(148, 163, 184, 0.36); }
