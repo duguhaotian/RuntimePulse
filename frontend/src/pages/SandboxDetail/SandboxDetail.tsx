@@ -494,9 +494,8 @@ function ImageDownloadTimeline({ image }: { image: Image }) {
           <span>download path</span>
         </div>
       </div>
-      <div className="image-temporal-grid">
+      <div className="image-temporal-grid single">
         <MetricChart height={180} series={[downloadSeries.duration]} />
-        <MetricChart height={180} series={[downloadSeries.bytes]} />
       </div>
       <div className="download-timeline">
         {steps.map((step) => (
@@ -587,7 +586,7 @@ function lazyImageCacheSeries(image: Image): { hitRatio: MetricSeries; remoteRea
   };
 }
 
-function eagerImageDownloadSeries(image: Image): { duration: MetricSeries; bytes: MetricSeries } {
+function eagerImageDownloadSeries(image: Image): { duration: MetricSeries } {
   const steps = image.downloadTimeline ?? [];
   const start = Date.now() - Math.max(imageDownloadDuration(image), 1);
   let cursor = start;
@@ -597,8 +596,8 @@ function eagerImageDownloadSeries(image: Image): { duration: MetricSeries; bytes
     const stepEnd = cursor + step.durationMs;
     cursor = stepEnd;
     return [
-      { timestamp: new Date(stepStart).toISOString(), duration: step.durationMs, bytes: 0 },
-      { timestamp: new Date(stepEnd).toISOString(), duration: step.durationMs, bytes: step.bytes ?? 0 },
+      { timestamp: new Date(stepStart).toISOString(), duration: step.durationMs },
+      { timestamp: new Date(stepEnd).toISOString(), duration: step.durationMs },
     ];
   });
 
@@ -610,14 +609,6 @@ function eagerImageDownloadSeries(image: Image): { duration: MetricSeries; bytes
       unit: 'ms',
       group: 'startup',
       points: points.map((point) => ({ timestamp: point.timestamp, value: point.duration })),
-    },
-    bytes: {
-      id: `${image.id}-eager-download-bytes`,
-      name: 'image.eager.download_bytes',
-      label: 'Downloaded bytes',
-      unit: 'bytes',
-      group: 'io',
-      points: points.map((point) => ({ timestamp: point.timestamp, value: point.bytes })),
     },
   };
 }

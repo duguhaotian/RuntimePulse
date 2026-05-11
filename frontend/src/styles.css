@@ -1706,6 +1706,10 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   gap: 12px;
 }
 
+.image-temporal-grid.single {
+  grid-template-columns: 1fr;
+}
+
 .image-temporal-grid .metric-chart-card {
   min-width: 0;
   box-shadow: none;
