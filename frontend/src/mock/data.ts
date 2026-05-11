@@ -19,10 +19,10 @@ export const nodes: Node[] = [
 ];
 
 export const images: Image[] = [
-  { id: 'img-api', ref: 'registry.local/api:v42', digest: 'sha256:api42', sizeBytes: 810 * 1024 ** 2, layerCount: 18 },
-  { id: 'img-ml-heavy', ref: 'registry.local/ml-heavy:v8', digest: 'sha256:mlheavy8', sizeBytes: 4.6 * 1024 ** 3, layerCount: 91 },
-  { id: 'img-worker', ref: 'registry.local/worker:v17', digest: 'sha256:worker17', sizeBytes: 1.4 * 1024 ** 3, layerCount: 34 },
-  { id: 'img-edge', ref: 'registry.local/edge-proxy:v5', digest: 'sha256:edge5', sizeBytes: 380 * 1024 ** 2, layerCount: 12 },
+  { id: 'img-api', ref: 'registry.local/api:v42', digest: 'sha256:api42', sizeBytes: 810 * 1024 ** 2, layerCount: 18, layers: imageLayers('img-api', 810 * 1024 ** 2, 18, 0.78, 2_800) },
+  { id: 'img-ml-heavy', ref: 'registry.local/ml-heavy:v8', digest: 'sha256:mlheavy8', sizeBytes: 4.6 * 1024 ** 3, layerCount: 91, layers: imageLayers('img-ml-heavy', 4.6 * 1024 ** 3, 91, 0.34, 13_400) },
+  { id: 'img-worker', ref: 'registry.local/worker:v17', digest: 'sha256:worker17', sizeBytes: 1.4 * 1024 ** 3, layerCount: 34, layers: imageLayers('img-worker', 1.4 * 1024 ** 3, 34, 0.62, 5_500) },
+  { id: 'img-edge', ref: 'registry.local/edge-proxy:v5', digest: 'sha256:edge5', sizeBytes: 380 * 1024 ** 2, layerCount: 12, layers: imageLayers('img-edge', 380 * 1024 ** 2, 12, 0.86, 1_600) },
 ];
 
 export const sandboxes: Sandbox[] = [
@@ -259,6 +259,27 @@ function imageById(id: string): Image {
   const image = images.find((item) => item.id === id);
   if (!image) throw new Error(`Missing mock image: ${id}`);
   return image;
+}
+
+function imageLayers(imageId: string, imageSizeBytes: number, layerCount: number, cacheHitRatio: number, startupCostMs: number): Image['layers'] {
+  const commands = ['FROM base runtime', 'RUN install packages', 'COPY application bundle', 'RUN dependency restore', 'COPY model/assets', 'RUN user permissions'];
+
+  return commands.map((command, index) => {
+    const weight = index === 4 ? 0.32 : index === 2 ? 0.2 : index === 3 ? 0.18 : 0.075;
+    const cacheHit = index / commands.length < cacheHitRatio;
+    const sizeBytes = Math.max(8 * 1024 ** 2, imageSizeBytes * weight);
+    const layerShare = sizeBytes / imageSizeBytes;
+    const coldPenalty = cacheHit ? 0.28 : 1;
+
+    return {
+      id: `${imageId}-layer-${index + 1}`,
+      command,
+      sizeBytes,
+      cacheHit,
+      pullDurationMs: startupCostMs * layerShare * coldPenalty * 0.55,
+      unpackDurationMs: startupCostMs * layerShare * coldPenalty * 0.45 * (layerCount > 60 ? 1.5 : 1),
+    };
+  });
 }
 
 function series(

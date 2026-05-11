@@ -31,6 +31,16 @@ export type Image = {
   digest: string;
   sizeBytes: number;
   layerCount: number;
+  layers?: ImageLayer[];
+};
+
+export type ImageLayer = {
+  id: string;
+  command: string;
+  sizeBytes: number;
+  cacheHit: boolean;
+  pullDurationMs: number;
+  unpackDurationMs: number;
 };
 
 export type Sandbox = {

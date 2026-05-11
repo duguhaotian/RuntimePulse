@@ -113,7 +113,7 @@ Potential features:
 - Compare runtime overhead across images and nodes. Implemented in Runtime Comparison scope switcher.
 - Compare cold start vs warm start. Implemented in Runtime Comparison with mock cache buckets.
 - Add node-level IO pressure and PSI overlays.
-- Add image layer breakdown and cache hit visualizations.
+- Add image layer breakdown and cache hit visualizations. Implemented in run overview with mock layer timings.
 
 ## Phase 5: Rules and AI Analysis
 

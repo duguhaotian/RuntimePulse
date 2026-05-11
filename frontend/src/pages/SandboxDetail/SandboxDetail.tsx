@@ -159,15 +159,18 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       </div>
 
       {tab === 'overview' && (
-        <div className="two-column">
-          <div className="panel-card">
-            <h3>Lifecycle Timeline</h3>
-            <EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
+        <div className="overview-stack">
+          <div className="two-column">
+            <div className="panel-card">
+              <h3>Lifecycle Timeline</h3>
+              <EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
+            </div>
+            <div className="panel-card">
+              <h3>Startup Trace</h3>
+              <TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} />
+            </div>
           </div>
-          <div className="panel-card">
-            <h3>Startup Trace</h3>
-            <TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} />
-          </div>
+          {image && <ImageLayerPanel image={image} />}
         </div>
       )}
 
@@ -290,6 +293,55 @@ function Info({ label, value, hot }: { label: string; value: string; hot?: boole
       <span>{label}</span>
       <strong>{value}</strong>
       <em>summary</em>
+    </div>
+  );
+}
+
+function ImageLayerPanel({ image }: { image: Image }) {
+  const layers = image.layers ?? [];
+  const totalDuration = layers.reduce((sum, layer) => sum + layer.pullDurationMs + layer.unpackDurationMs, 0);
+  const cacheHits = layers.filter((layer) => layer.cacheHit).length;
+  const cacheHitRatio = layers.length === 0 ? 0 : cacheHits / layers.length;
+  const largestLayer = layers.reduce((largest, layer) => (layer.sizeBytes > largest.sizeBytes ? layer : largest), layers[0]);
+
+  return (
+    <div className="panel-card image-layer-panel">
+      <div className="image-layer-header">
+        <div>
+          <h3>Image layer breakdown</h3>
+          <p>{image.ref} · {formatBytes(image.sizeBytes)} · {image.layerCount} layers</p>
+        </div>
+        <div className="image-cache-summary">
+          <strong>{formatRatio(cacheHitRatio)}</strong>
+          <span>cache hit estimate</span>
+        </div>
+      </div>
+      <div className="image-layer-summary">
+        <Info label="Layer Samples" value={String(layers.length)} />
+        <Info label="Pull+Unpack" value={formatDuration(totalDuration)} hot={totalDuration > 7000} />
+        <Info label="Largest Layer" value={largestLayer ? formatBytes(largestLayer.sizeBytes) : '-'} hot={(largestLayer?.sizeBytes ?? 0) > 1024 ** 3} />
+      </div>
+      <div className="image-layer-list">
+        {layers.map((layer) => {
+          const layerDuration = layer.pullDurationMs + layer.unpackDurationMs;
+          const sizeWidth = Math.max(6, (layer.sizeBytes / image.sizeBytes) * 100);
+          const durationWidth = totalDuration > 0 ? Math.max(6, (layerDuration / totalDuration) * 100) : 6;
+
+          return (
+            <article className="image-layer-row" key={layer.id}>
+              <div>
+                <strong>{layer.command}</strong>
+                <span>{formatBytes(layer.sizeBytes)} · pull {formatDuration(layer.pullDurationMs)} · unpack {formatDuration(layer.unpackDurationMs)}</span>
+              </div>
+              <div className="image-layer-bars">
+                <div className="image-layer-track"><i style={{ width: `${sizeWidth}%` }} /></div>
+                <div className="image-layer-track duration"><i style={{ width: `${durationWidth}%` }} /></div>
+              </div>
+              <span className={`cache-pill ${layer.cacheHit ? 'hit' : 'miss'}`}>{layer.cacheHit ? 'cache hit' : 'cache miss'}</span>
+            </article>
+          );
+        })}
+      </div>
     </div>
   );
 }
