@@ -41,7 +41,7 @@ Next UI improvements:
 - Metric group pinning. Implemented for metrics tab chart ordering and pinned state.
 - Run selection and bulk compare. Implemented for startup metrics and trace waterfall comparison.
 - Trace span detail panel. Implemented for startup waterfall spans.
-- Profile artifact preview panel.
+- Profile artifact preview panel. Implemented with flamegraph preview and selected profile details.
 - Saved views for common expert workflows. Implemented for explorer filters and selection state.
 
 ## Phase 2: Query API and Storage Design
@@ -109,10 +109,10 @@ Goals:
 Potential features:
 
 - Correlate event timestamp with metrics window. Implemented via event-to-metrics jump marker.
-- Compare startup waterfall across multiple runs.
+- Compare startup waterfall across multiple runs. Implemented in selected run comparison panel.
 - Compare runtime overhead across images and nodes. Implemented in Runtime Comparison scope switcher.
 - Compare cold start vs warm start. Implemented in Runtime Comparison with mock cache buckets.
-- Add node-level IO pressure and PSI overlays.
+- Add node-level IO pressure and PSI overlays. Implemented in run overview with IO/PSI overlay chart.
 - Add image layer breakdown and cache hit visualizations. Implemented in run overview with mock layer timings.
 
 ## Phase 5: Rules and AI Analysis

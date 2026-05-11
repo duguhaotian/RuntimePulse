@@ -560,6 +560,113 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   gap: 14px;
 }
 
+.node-pressure-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.node-pressure-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+}
+
+.node-pressure-header h3,
+.node-pressure-header p {
+  margin: 0;
+}
+
+.node-pressure-header p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pressure-badge {
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 900;
+  padding: 6px 9px;
+  white-space: nowrap;
+}
+
+.pressure-badge.normal {
+  background: rgba(52, 211, 153, 0.12);
+  color: #a7f3d0;
+}
+
+.pressure-badge.hot {
+  background: rgba(246, 195, 68, 0.14);
+  color: #ffe29a;
+}
+
+.node-pressure-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pressure-overlay-chart {
+  display: grid;
+  grid-template-columns: repeat(48, minmax(3px, 1fr));
+  gap: 3px;
+  align-items: end;
+  min-height: 118px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 13px;
+  background: linear-gradient(180deg, rgba(10, 14, 20, 0.64), rgba(10, 14, 20, 0.36));
+}
+
+.pressure-sample {
+  position: relative;
+  height: 96px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.pressure-sample i {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 999px;
+}
+
+.pressure-sample .io {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.84), rgba(56, 189, 248, 0.2));
+}
+
+.pressure-sample .psi {
+  right: 28%;
+  left: 28%;
+  background: linear-gradient(180deg, rgba(246, 195, 68, 0.95), rgba(246, 195, 68, 0.24));
+  box-shadow: 0 0 12px rgba(246, 195, 68, 0.16);
+}
+
+.pressure-legend {
+  display: flex;
+  gap: 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pressure-legend span {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.pressure-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.pressure-legend .io { background: #38bdf8; }
+.pressure-legend .psi { background: #f6c344; }
+
 .image-layer-header {
   display: flex;
   justify-content: space-between;

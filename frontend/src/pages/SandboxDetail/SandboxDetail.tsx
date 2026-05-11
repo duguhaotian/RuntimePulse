@@ -90,6 +90,12 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
     });
   }, [metricsByGroup, pinnedMetricGroups]);
 
+  const pressureSeries = useMemo(() => {
+    const psi = metrics.find((item) => item.name === 'node.psi.io.some');
+    const io = metrics.find((item) => item.name === 'sandbox.io.read_bytes');
+    return { io, psi };
+  }, [metrics]);
+
   function toggleMetricPin(group: string) {
     setPinnedMetricGroups((current) => current.includes(group) ? current.filter((item) => item !== group) : [...current, group]);
   }
@@ -170,6 +176,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
               <TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} />
             </div>
           </div>
+          {node && <NodePressureOverlay node={node} ioSeries={pressureSeries.io} psiSeries={pressureSeries.psi} />}
           {image && <ImageLayerPanel image={image} />}
         </div>
       )}
@@ -295,6 +302,55 @@ function Info({ label, value, hot }: { label: string; value: string; hot?: boole
       <em>summary</em>
     </div>
   );
+}
+
+function NodePressureOverlay({ node, ioSeries, psiSeries }: { node: Node; ioSeries?: MetricSeries; psiSeries?: MetricSeries }) {
+  const maxIo = Math.max(...(ioSeries?.points.map((point) => point.value) ?? [0]), 1);
+  const maxPsi = Math.max(...(psiSeries?.points.map((point) => point.value) ?? [0]), 1);
+  const avgPsi = averageMetricValue(psiSeries);
+  const avgIo = averageMetricValue(ioSeries);
+  const hotPressure = avgPsi > 0.25 || node.status === 'degraded';
+  const points = psiSeries?.points ?? [];
+
+  return (
+    <div className="panel-card node-pressure-panel">
+      <div className="node-pressure-header">
+        <div>
+          <h3>Node IO pressure overlay</h3>
+          <p>{node.name} · {node.cpuCores} cores · {formatBytes(node.memoryBytes)} memory · {node.kernelVersion}</p>
+        </div>
+        <span className={`pressure-badge ${hotPressure ? 'hot' : 'normal'}`}>{hotPressure ? 'pressure elevated' : 'pressure normal'}</span>
+      </div>
+      <div className="node-pressure-summary">
+        <Info label="Node Status" value={node.status} hot={node.status === 'degraded'} />
+        <Info label="Avg PSI IO" value={formatRatio(avgPsi)} hot={avgPsi > 0.25} />
+        <Info label="Avg IO Read" value={formatBytes(avgIo)} hot={avgIo > 32 * 1024 ** 2} />
+      </div>
+      <div className="pressure-overlay-chart">
+        {points.map((point, index) => {
+          const ioPoint = ioSeries?.points[index];
+          const psiHeight = Math.max(4, (point.value / maxPsi) * 100);
+          const ioHeight = ioPoint ? Math.max(4, (ioPoint.value / maxIo) * 100) : 4;
+
+          return (
+            <div className="pressure-sample" key={point.timestamp} title={`${formatDateTime(point.timestamp)} · PSI ${formatRatio(point.value)} · IO ${formatBytes(ioPoint?.value ?? 0)}`}>
+              <i className="io" style={{ height: `${ioHeight}%` }} />
+              <i className="psi" style={{ height: `${psiHeight}%` }} />
+            </div>
+          );
+        })}
+      </div>
+      <div className="pressure-legend">
+        <span><i className="io" />IO read throughput</span>
+        <span><i className="psi" />node.psi.io.some</span>
+      </div>
+    </div>
+  );
+}
+
+function averageMetricValue(series?: MetricSeries) {
+  if (!series || series.points.length === 0) return 0;
+  return series.points.reduce((sum, point) => sum + point.value, 0) / series.points.length;
 }
 
 function ImageLayerPanel({ image }: { image: Image }) {
