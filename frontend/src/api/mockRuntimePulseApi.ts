@@ -1,6 +1,7 @@
 import type { RuntimePulseApi } from './RuntimePulseApi';
 import type { SandboxQuery } from '../domain/model';
 import {
+  clusters,
   eventsForSandbox,
   images,
   metricsForSandbox,
@@ -22,6 +23,15 @@ function filterSandboxes(query?: SandboxQuery) {
 }
 
 export const mockRuntimePulseApi: RuntimePulseApi = {
+  async listClusters() {
+    return clusters;
+  },
+  async listNodes() {
+    return nodes;
+  },
+  async listImages() {
+    return images;
+  },
   async listSandboxes(query) {
     return filterSandboxes(query);
   },

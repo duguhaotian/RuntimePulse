@@ -1,5 +1,6 @@
 import type {
   EventRecord,
+  Cluster,
   Image,
   MetricSeries,
   Node,
@@ -12,6 +13,9 @@ import type {
 } from '../domain/model';
 
 export interface RuntimePulseApi {
+  listClusters(): Promise<Cluster[]>;
+  listNodes(): Promise<Node[]>;
+  listImages(): Promise<Image[]>;
   listSandboxes(query?: SandboxQuery): Promise<Sandbox[]>;
   getSandbox(id: string): Promise<Sandbox | undefined>;
   getNode(id: string): Promise<Node | undefined>;

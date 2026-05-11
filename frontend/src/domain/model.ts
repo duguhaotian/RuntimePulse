@@ -29,18 +29,34 @@ export type Image = {
   id: string;
   ref: string;
   digest: string;
+  loadingMode: 'lazy' | 'eager';
   sizeBytes: number;
   layerCount: number;
   layers?: ImageLayer[];
+  downloadTimeline?: ImageDownloadStep[];
 };
 
 export type ImageLayer = {
   id: string;
   command: string;
   sizeBytes: number;
-  cacheHit: boolean;
+  blockSizeBytes: number;
+  blockCount: number;
+  requestedBlockCount: number;
+  cacheHitBlockCount: number;
+  localReadBytes: number;
+  remoteReadBytes: number;
   pullDurationMs: number;
   unpackDurationMs: number;
+};
+
+export type ImageDownloadStep = {
+  id: string;
+  name: string;
+  phase: 'resolve' | 'pull' | 'verify' | 'unpack' | 'snapshot';
+  durationMs: number;
+  bytes?: number;
+  detail: string;
 };
 
 export type Sandbox = {

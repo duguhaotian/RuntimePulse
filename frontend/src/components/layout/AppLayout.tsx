@@ -7,7 +7,7 @@ type AppLayoutProps = {
 };
 
 const pageMeta: Record<string, { title: string; scope: string }> = {
-  explorer: { title: 'Runs', scope: 'sandbox-lab' },
+  explorer: { title: 'Clusters', scope: 'sandbox-lab' },
   runtime: { title: 'Reports', scope: 'sandbox-lab' },
 };
 
@@ -33,7 +33,7 @@ export function AppLayout({ activePage, onNavigate, children }: AppLayoutProps) 
         <nav className="nav" aria-label="Primary navigation">
           <button className={activePage === 'explorer' ? 'active' : ''} onClick={() => onNavigate('explorer')}>
             <span className="nav-icon">▦</span>
-            <span>Runs</span>
+            <span>Clusters</span>
           </button>
           <button className={activePage === 'runtime' ? 'active' : ''} onClick={() => onNavigate('runtime')}>
             <span className="nav-icon">◫</span>
@@ -70,7 +70,7 @@ export function AppLayout({ activePage, onNavigate, children }: AppLayoutProps) 
             <h1>{meta.title}</h1>
           </div>
           <div className="topbar-actions">
-            <div className="topbar-search">⌘K&nbsp;&nbsp;Search runs, images, nodes</div>
+            <div className="topbar-search">⌘K&nbsp;&nbsp;Search clusters, nodes, sandboxes</div>
             <button className="topbar-button">Last 1h</button>
             <button className="topbar-button primary">Compare</button>
             <span className="data-pill">Mock telemetry</span>

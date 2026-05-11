@@ -23,5 +23,6 @@ export function formatMetricValue(value: number, unit: string): string {
   if (unit === 'ratio') return formatRatio(value);
   if (unit === 'ms') return formatDuration(value);
   if (unit === 'bytes/s') return `${formatBytes(value)}/s`;
+  if (unit === 'count') return String(Math.round(value));
   return `${value.toFixed(2)} ${unit}`.trim();
 }

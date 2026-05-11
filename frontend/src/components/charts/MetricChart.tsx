@@ -11,11 +11,26 @@ type MetricChartProps = {
   markerLabel?: string;
   pinned?: boolean;
   onTogglePin?: () => void;
+  selectable?: boolean;
+  selectedRange?: { from: string; to: string };
+  onSelectRange?: (range: { from: string; to: string }) => void;
 };
 
-export function MetricChart({ series, height = 220, markerTime, markerLabel, pinned = false, onTogglePin }: MetricChartProps) {
+export function MetricChart({
+  height = 220,
+  markerLabel,
+  markerTime,
+  onSelectRange,
+  onTogglePin,
+  pinned = false,
+  selectable = false,
+  selectedRange,
+  series,
+}: MetricChartProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [dragStartIndex, setDragStartIndex] = useState<number | null>(null);
+  const [dragEndIndex, setDragEndIndex] = useState<number | null>(null);
   const width = 760;
   const padding = { top: 18, right: 22, bottom: 28, left: 58 };
   const allPoints = series.flatMap((item) => item.points.map((point) => point.value));
@@ -34,23 +49,73 @@ export function MetricChart({ series, height = 220, markerTime, markerLabel, pin
   const hoverPoint = hoverIndex === null ? undefined : firstSeries?.points[hoverIndex];
   const hoverX = hoverIndex === null || pointCount === 0 ? undefined : x(hoverIndex, pointCount);
   const tooltipLeft = hoverX === undefined ? 0 : Math.min(Math.max((hoverX / width) * 100, 18), 82);
+  const countAxis = firstSeries?.unit === 'count';
+  const yTicks = buildTicks(minValue, maxValue, countAxis);
+  const selectedRangeX = selectedRange && endTime > startTime
+    ? {
+      from: padding.left + ((toMs(selectedRange.from) - startTime) / (endTime - startTime)) * (width - padding.left - padding.right),
+      to: padding.left + ((toMs(selectedRange.to) - startTime) / (endTime - startTime)) * (width - padding.left - padding.right),
+    }
+    : undefined;
+  const dragRangeX = dragStartIndex !== null && dragEndIndex !== null && pointCount > 0
+    ? {
+      from: x(Math.min(dragStartIndex, dragEndIndex), pointCount),
+      to: x(Math.max(dragStartIndex, dragEndIndex), pointCount),
+    }
+    : undefined;
 
-  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!chartRef.current || pointCount === 0) return;
-
+  const indexFromPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!chartRef.current || pointCount === 0) return undefined;
     const bounds = chartRef.current.getBoundingClientRect();
     const relativeX = ((event.clientX - bounds.left) / bounds.width) * width;
     const plotStart = padding.left;
     const plotEnd = width - padding.right;
     const clampedX = Math.min(Math.max(relativeX, plotStart), plotEnd);
     const ratio = (clampedX - plotStart) / Math.max(plotEnd - plotStart, 1);
-    const nextIndex = Math.round(ratio * Math.max(pointCount - 1, 0));
+    return Math.round(ratio * Math.max(pointCount - 1, 0));
+  };
+
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const nextIndex = indexFromPointer(event);
+    if (nextIndex === undefined) return;
 
     setHoverIndex(nextIndex);
+    if (dragStartIndex !== null) setDragEndIndex(nextIndex);
+  };
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!selectable) return;
+    const nextIndex = indexFromPointer(event);
+    if (nextIndex === undefined) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragStartIndex(nextIndex);
+    setDragEndIndex(nextIndex);
+  };
+
+  const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!selectable || dragStartIndex === null || dragEndIndex === null || !firstSeries) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    const fromIndex = Math.min(dragStartIndex, dragEndIndex);
+    const toIndex = Math.max(dragStartIndex, dragEndIndex);
+    const from = firstSeries.points[fromIndex]?.timestamp;
+    const to = firstSeries.points[toIndex]?.timestamp;
+    setDragStartIndex(null);
+    setDragEndIndex(null);
+    if (from && to && from !== to) onSelectRange?.({ from, to });
   };
 
   return (
-    <div ref={chartRef} className={`chart-card metric-chart-card ${pinned ? 'pinned' : ''}`} onPointerMove={handlePointerMove} onPointerLeave={() => setHoverIndex(null)}>
+    <div
+      ref={chartRef}
+      className={`chart-card metric-chart-card ${pinned ? 'pinned' : ''} ${selectable ? 'selectable' : ''}`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerLeave={() => {
+        setHoverIndex(null);
+        if (dragStartIndex !== null) setDragEndIndex(dragStartIndex);
+      }}
+    >
       <div className="chart-header">
         <div>
           <h3>{firstSeries?.group.toUpperCase() ?? 'Metrics'}</h3>
@@ -68,11 +133,10 @@ export function MetricChart({ series, height = 220, markerTime, markerLabel, pin
       <svg viewBox={`0 0 ${width} ${height}`} className="metric-svg" role="img">
         <line x1={padding.left} y1={padding.top} x2={padding.left} y2={height - padding.bottom} className="axis" />
         <line x1={padding.left} y1={height - padding.bottom} x2={width - padding.right} y2={height - padding.bottom} className="axis" />
-        {[0, 0.5, 1].map((tick) => {
-          const value = minValue + (maxValue - minValue) * tick;
+        {yTicks.map((value) => {
           const yPos = y(value);
           return (
-            <g key={tick}>
+            <g key={value}>
               <line x1={padding.left} y1={yPos} x2={width - padding.right} y2={yPos} className="grid-line" />
               <text x={padding.left - 10} y={yPos + 4} textAnchor="end" className="axis-label">{formatMetricValue(value, firstSeries?.unit ?? '')}</text>
             </g>
@@ -90,6 +154,20 @@ export function MetricChart({ series, height = 220, markerTime, markerLabel, pin
             </text>
           </g>
         )}
+        {[selectedRangeX, dragRangeX].filter((range): range is { from: number; to: number } => Boolean(range)).map((range, index) => {
+          const left = Math.max(padding.left, Math.min(range.from, range.to));
+          const right = Math.min(width - padding.right, Math.max(range.from, range.to));
+          return (
+            <rect
+              key={index}
+              x={left}
+              y={padding.top}
+              width={Math.max(right - left, 0)}
+              height={height - padding.top - padding.bottom}
+              className={index === 0 ? 'selected-range-fill' : 'drag-range-fill'}
+            />
+          );
+        })}
         {hoverX !== undefined && (
           <line x1={hoverX} y1={padding.top} x2={hoverX} y2={height - padding.bottom} className="hover-marker-line" />
         )}
@@ -132,4 +210,13 @@ export function MetricChart({ series, height = 220, markerTime, markerLabel, pin
       )}
     </div>
   );
+}
+
+function buildTicks(minValue: number, maxValue: number, countAxis: boolean) {
+  if (!countAxis) return [0, 0.5, 1].map((tick) => minValue + (maxValue - minValue) * tick);
+
+  const min = Math.floor(Math.max(0, minValue));
+  const max = Math.ceil(maxValue);
+  const step = Math.max(1, Math.ceil((max - min) / 2));
+  return Array.from(new Set([min, min + step, max])).filter((tick) => tick <= max);
 }

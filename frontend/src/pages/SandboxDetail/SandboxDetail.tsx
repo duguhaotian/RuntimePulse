@@ -63,7 +63,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       setEvents(nextEvents);
       setSelectedEvent(undefined);
       setSpans(nextSpans);
-      setSelectedSpan(nextSpans[0]);
+      setSelectedSpan(undefined);
       setProfiles(nextProfiles);
     });
     return () => {
@@ -91,9 +91,9 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   }, [metricsByGroup, pinnedMetricGroups]);
 
   const pressureSeries = useMemo(() => {
-    const psi = metrics.find((item) => item.name === 'node.psi.io.some');
     const io = metrics.find((item) => item.name === 'sandbox.io.read_bytes');
-    return { io, psi };
+    const network = metrics.find((item) => item.name === 'sandbox.network.rx_bytes');
+    return { io, network };
   }, [metrics]);
 
   function toggleMetricPin(group: string) {
@@ -142,6 +142,8 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
         <Info label="Image Layers" value={String(image?.layerCount ?? '-')} hot={(image?.layerCount ?? 0) > 60} />
       </div>
 
+      <DetailDataSections sandbox={sandbox} node={node} image={image} events={events} metrics={metrics} />
+
       <div className="run-layout-grid">
         <div className="panel-card run-notes">
           <h3>Run notes</h3>
@@ -166,7 +168,8 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 
       {tab === 'overview' && (
         <div className="overview-stack">
-          <div className="two-column">
+          {image && <ContainerImageAccessPanel sandbox={sandbox} image={image} ioSeries={pressureSeries.io} networkSeries={pressureSeries.network} />}
+          <div className="overview-timeline-stack">
             <div className="panel-card">
               <h3>Lifecycle Timeline</h3>
               <EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
@@ -176,8 +179,6 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
               <TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} />
             </div>
           </div>
-          {node && <NodePressureOverlay node={node} ioSeries={pressureSeries.io} psiSeries={pressureSeries.psi} />}
-          {image && <ImageLayerPanel image={image} />}
         </div>
       )}
 
@@ -202,14 +203,76 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 
       {tab === 'timeline' && <div className="panel-card"><EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} /></div>}
       {tab === 'trace' && (
-        <div className="trace-detail-grid">
+        <div className="trace-full-width">
           <div className="panel-card"><TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} /></div>
-          <SpanDetailPanel span={selectedSpan} />
         </div>
       )}
       {tab === 'profiles' && <ProfileTable profiles={profiles} />}
       {tab === 'raw' && <pre className="raw-json">{JSON.stringify({ sandbox, node, image, events, spans, profiles }, null, 2)}</pre>}
+      {selectedSpan && <TraceSpanDetailModal span={selectedSpan} onClose={() => setSelectedSpan(undefined)} />}
     </section>
+  );
+}
+
+function DetailDataSections({
+  sandbox,
+  node,
+  image,
+  events,
+  metrics,
+}: {
+  sandbox: Sandbox;
+  node?: Node;
+  image?: Image;
+  events: EventRecord[];
+  metrics: MetricSeries[];
+}) {
+  const latestMetricAt = metrics.flatMap((series) => series.points).sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0]?.timestamp;
+  const warningEvents = events.filter((event) => event.severity !== 'info').length;
+
+  return (
+    <div className="detail-data-sections">
+      <section className="data-section dynamic">
+        <div className="data-section-header">
+          <span>Dynamic</span>
+          <strong>运行时变化数据</strong>
+        </div>
+        <div className="data-section-grid">
+          <Info label="Current status" value={sandbox.status} />
+          <Info label="CPU Avg" value={formatRatio(sandbox.cpuAvg)} />
+          <Info label="Memory Peak" value={formatBytes(sandbox.memoryPeakBytes)} />
+          <Info label="Events" value={`${events.length} total / ${warningEvents} warning+`} hot={warningEvents > 0} />
+          <Info label="Startup" value={formatDuration(sandbox.startupDurationMs)} hot={sandbox.startupDurationMs > 7000} />
+          <Info label="Latest metric" value={latestMetricAt ? formatDateTime(latestMetricAt) : '-'} />
+        </div>
+      </section>
+
+      <section className="data-section static">
+        <div className="data-section-header">
+          <span>Static</span>
+          <strong>配置与不可变元数据</strong>
+        </div>
+        <div className="static-facts-grid">
+          <Fact label="Cluster" value={sandbox.clusterId} />
+          <Fact label="Runtime" value={`${sandbox.runtimeType} / ${sandbox.runtimeVersion}`} />
+          <Fact label="Node" value={`${node?.name ?? sandbox.nodeId} · ${node?.kernelVersion ?? 'kernel unknown'}`} />
+          <Fact label="Node capacity" value={node ? `${node.cpuCores} cores / ${formatBytes(node.memoryBytes)}` : '-'} />
+          <Fact label="Image" value={sandbox.imageRef} />
+          <Fact label="Image digest" value={image?.digest ?? '-'} />
+          <Fact label="Image size" value={image ? `${formatBytes(image.sizeBytes)} / ${image.layerCount} layers` : '-'} />
+          <Fact label="Workload" value={`${sandbox.namespace} / ${sandbox.workloadName}`} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="static-fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -294,6 +357,23 @@ function SpanDetailPanel({ span }: { span?: TraceSpan }) {
   );
 }
 
+function TraceSpanDetailModal({ onClose, span }: { onClose: () => void; span: TraceSpan }) {
+  return (
+    <div className="trace-span-modal-backdrop" role="presentation" onClick={onClose}>
+      <section className="trace-span-modal" role="dialog" aria-modal="true" aria-label="Trace span detail" onClick={(event) => event.stopPropagation()}>
+        <div className="trace-span-modal-header">
+          <div>
+            <h3>Trace span detail</h3>
+            <p>{span.spanName} · {span.spanId}</p>
+          </div>
+          <button onClick={onClose}>Close</button>
+        </div>
+        <SpanDetailPanel span={span} />
+      </section>
+    </div>
+  );
+}
+
 function Info({ label, value, hot }: { label: string; value: string; hot?: boolean }) {
   return (
     <div className={`summary-card ${hot ? 'warning' : ''}`}>
@@ -304,45 +384,131 @@ function Info({ label, value, hot }: { label: string; value: string; hot?: boole
   );
 }
 
-function NodePressureOverlay({ node, ioSeries, psiSeries }: { node: Node; ioSeries?: MetricSeries; psiSeries?: MetricSeries }) {
-  const maxIo = Math.max(...(ioSeries?.points.map((point) => point.value) ?? [0]), 1);
-  const maxPsi = Math.max(...(psiSeries?.points.map((point) => point.value) ?? [0]), 1);
-  const avgPsi = averageMetricValue(psiSeries);
+function ContainerImageAccessPanel({
+  sandbox,
+  image,
+  ioSeries,
+  networkSeries,
+}: {
+  sandbox: Sandbox;
+  image: Image;
+  ioSeries?: MetricSeries;
+  networkSeries?: MetricSeries;
+}) {
+  const layers = image.layers ?? [];
   const avgIo = averageMetricValue(ioSeries);
-  const hotPressure = avgPsi > 0.25 || node.status === 'degraded';
-  const points = psiSeries?.points ?? [];
+  const peakIo = Math.max(...(ioSeries?.points.map((point) => point.value) ?? [0]), 0);
+  const avgNetwork = averageMetricValue(networkSeries);
+  const requestedBlocks = imageRequestedBlocks(image);
+  const blockHitRatio = imageBlockHitRatio(image);
+  const remoteReadBytes = imageRemoteReadBytes(image);
+  const downloadDuration = imageDownloadDuration(image);
 
   return (
-    <div className="panel-card node-pressure-panel">
-      <div className="node-pressure-header">
+    <div className="panel-card container-image-panel">
+      <div className="image-layer-header">
         <div>
-          <h3>Node IO pressure overlay</h3>
-          <p>{node.name} · {node.cpuCores} cores · {formatBytes(node.memoryBytes)} memory · {node.kernelVersion}</p>
+          <h3>Container image and IO access</h3>
+          <p>{sandbox.workloadName} uses {image.ref}</p>
         </div>
-        <span className={`pressure-badge ${hotPressure ? 'hot' : 'normal'}`}>{hotPressure ? 'pressure elevated' : 'pressure normal'}</span>
+        <div className="image-cache-summary">
+          <strong>{formatBytes(avgIo)}</strong>
+          <span>avg read throughput</span>
+        </div>
       </div>
-      <div className="node-pressure-summary">
-        <Info label="Node Status" value={node.status} hot={node.status === 'degraded'} />
-        <Info label="Avg PSI IO" value={formatRatio(avgPsi)} hot={avgPsi > 0.25} />
-        <Info label="Avg IO Read" value={formatBytes(avgIo)} hot={avgIo > 32 * 1024 ** 2} />
+      <div className="container-image-grid">
+        <div className="container-image-facts">
+          <Fact label="Image ref" value={image.ref} />
+          <Fact label="Digest" value={image.digest} />
+          <Fact label="Loading mode" value={image.loadingMode === 'lazy' ? 'lazy-load' : 'non-lazy'} />
+          <Fact label="Image size" value={formatBytes(image.sizeBytes)} />
+          <Fact label="Layers" value={String(image.layerCount)} />
+          {image.loadingMode === 'lazy' ? (
+            <>
+              <Fact label="Requested blocks" value={String(requestedBlocks)} />
+              <Fact label="Block hit ratio" value={formatRatio(blockHitRatio)} />
+              <Fact label="Remote read" value={formatBytes(remoteReadBytes)} />
+            </>
+          ) : (
+            <Fact label="Download time" value={formatDuration(downloadDuration)} />
+          )}
+        </div>
+        <div className="container-io-summary">
+          <Info label="Avg IO Read" value={formatBytes(avgIo)} hot={avgIo > 32 * 1024 ** 2} />
+          <Info label="Peak IO Read" value={formatBytes(peakIo)} hot={peakIo > 64 * 1024 ** 2} />
+          <Info label="Avg Network RX" value={formatBytes(avgNetwork)} />
+        </div>
       </div>
-      <div className="pressure-overlay-chart">
-        {points.map((point, index) => {
-          const ioPoint = ioSeries?.points[index];
-          const psiHeight = Math.max(4, (point.value / maxPsi) * 100);
-          const ioHeight = ioPoint ? Math.max(4, (ioPoint.value / maxIo) * 100) : 4;
+      {image.loadingMode === 'lazy' ? (
+        <LazyImageTemporalPanel image={image} />
+      ) : (
+        <ImageDownloadTimeline image={image} />
+      )}
+    </div>
+  );
+}
 
-          return (
-            <div className="pressure-sample" key={point.timestamp} title={`${formatDateTime(point.timestamp)} · PSI ${formatRatio(point.value)} · IO ${formatBytes(ioPoint?.value ?? 0)}`}>
-              <i className="io" style={{ height: `${ioHeight}%` }} />
-              <i className="psi" style={{ height: `${psiHeight}%` }} />
-            </div>
-          );
-        })}
+function LazyImageTemporalPanel({ image }: { image: Image }) {
+  const layers = image.layers ?? [];
+  const cacheSeries = lazyImageCacheSeries(image);
+
+  return (
+    <div className="container-layer-access">
+      <div className="image-temporal-grid">
+        <MetricChart height={180} series={[cacheSeries.hitRatio]} />
+        <MetricChart height={180} series={[cacheSeries.remoteRead]} />
       </div>
-      <div className="pressure-legend">
-        <span><i className="io" />IO read throughput</span>
-        <span><i className="psi" />node.psi.io.some</span>
+      {layers.map((layer) => {
+        return (
+          <article className="image-layer-row" key={layer.id}>
+            <div>
+              <strong>{layer.command}</strong>
+              <span>{layer.cacheHitBlockCount}/{layer.requestedBlockCount} blocks hit · remote {formatBytes(layer.remoteReadBytes)} · pull {formatDuration(layer.pullDurationMs)}</span>
+            </div>
+            <div className="image-layer-bars">
+              <div className="image-layer-track"><i style={{ width: `${Math.max(6, layerBlockHitRatio(layer) * 100)}%` }} /></div>
+            </div>
+            <span className="cache-pill hit">{formatRatio(layerBlockHitRatio(layer))}</span>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function ImageDownloadTimeline({ image }: { image: Image }) {
+  const steps = image.downloadTimeline ?? [];
+  const totalDuration = imageDownloadDuration(image);
+  const maxDuration = Math.max(...steps.map((step) => step.durationMs), 1);
+  const downloadSeries = eagerImageDownloadSeries(image);
+
+  return (
+    <div className="image-download-panel">
+      <div className="image-layer-header">
+        <div>
+          <h3>Image download timeline</h3>
+          <p>{image.ref} · non-lazy pull before container start</p>
+        </div>
+        <div className="image-cache-summary">
+          <strong>{formatDuration(totalDuration)}</strong>
+          <span>download path</span>
+        </div>
+      </div>
+      <div className="image-temporal-grid">
+        <MetricChart height={180} series={[downloadSeries.duration]} />
+        <MetricChart height={180} series={[downloadSeries.bytes]} />
+      </div>
+      <div className="download-timeline">
+        {steps.map((step) => (
+          <article className="download-step" key={step.id}>
+            <div>
+              <strong>{step.name}</strong>
+              <span>{step.detail}</span>
+            </div>
+            <div className="download-step-track"><i className={step.phase} style={{ width: `${Math.max(6, step.durationMs / maxDuration * 100)}%` }} /></div>
+            <em>{formatDuration(step.durationMs)}{step.bytes ? ` · ${formatBytes(step.bytes)}` : ''}</em>
+          </article>
+        ))}
       </div>
     </div>
   );
@@ -353,66 +519,123 @@ function averageMetricValue(series?: MetricSeries) {
   return series.points.reduce((sum, point) => sum + point.value, 0) / series.points.length;
 }
 
-function ImageLayerPanel({ image }: { image: Image }) {
+function imageRequestedBlocks(image: Image) {
+  return (image.layers ?? []).reduce((sum, layer) => sum + layer.requestedBlockCount, 0);
+}
+
+function imageHitBlocks(image: Image) {
+  return (image.layers ?? []).reduce((sum, layer) => sum + layer.cacheHitBlockCount, 0);
+}
+
+function imageRemoteReadBytes(image: Image) {
+  return (image.layers ?? []).reduce((sum, layer) => sum + layer.remoteReadBytes, 0);
+}
+
+function imageDownloadDuration(image: Image) {
+  return (image.downloadTimeline ?? []).reduce((sum, step) => sum + step.durationMs, 0);
+}
+
+function imageBlockHitRatio(image: Image) {
+  return ratio(imageHitBlocks(image), imageRequestedBlocks(image));
+}
+
+function layerBlockHitRatio(layer: NonNullable<Image['layers']>[number]) {
+  return ratio(layer.cacheHitBlockCount, layer.requestedBlockCount);
+}
+
+function lazyImageCacheSeries(image: Image): { hitRatio: MetricSeries; remoteRead: MetricSeries } {
   const layers = image.layers ?? [];
-  const totalDuration = layers.reduce((sum, layer) => sum + layer.pullDurationMs + layer.unpackDurationMs, 0);
-  const cacheHits = layers.filter((layer) => layer.cacheHit).length;
-  const cacheHitRatio = layers.length === 0 ? 0 : cacheHits / layers.length;
-  const largestLayer = layers.reduce((largest, layer) => (layer.sizeBytes > largest.sizeBytes ? layer : largest), layers[0]);
+  const start = Date.now() - 47 * 60_000;
+  const points = Array.from({ length: 48 }, (_, index) => {
+    const requested = layers.reduce((sum, layer, layerIndex) => {
+      const activation = Math.max(0, Math.sin((index + layerIndex * 3) / 8));
+      return sum + layer.requestedBlockCount * (0.18 + activation * 0.82);
+    }, 0);
+    const hit = layers.reduce((sum, layer, layerIndex) => {
+      const drift = 0.88 + Math.sin((index + layerIndex) / 6) * 0.08;
+      return sum + layer.cacheHitBlockCount * drift;
+    }, 0);
+    const remote = layers.reduce((sum, layer, layerIndex) => {
+      const burst = 0.35 + Math.max(0, Math.sin((index - layerIndex * 4) / 5)) * 0.9;
+      return sum + layer.remoteReadBytes * burst;
+    }, 0);
 
-  return (
-    <div className="panel-card image-layer-panel">
-      <div className="image-layer-header">
-        <div>
-          <h3>Image layer breakdown</h3>
-          <p>{image.ref} · {formatBytes(image.sizeBytes)} · {image.layerCount} layers</p>
-        </div>
-        <div className="image-cache-summary">
-          <strong>{formatRatio(cacheHitRatio)}</strong>
-          <span>cache hit estimate</span>
-        </div>
-      </div>
-      <div className="image-layer-summary">
-        <Info label="Layer Samples" value={String(layers.length)} />
-        <Info label="Pull+Unpack" value={formatDuration(totalDuration)} hot={totalDuration > 7000} />
-        <Info label="Largest Layer" value={largestLayer ? formatBytes(largestLayer.sizeBytes) : '-'} hot={(largestLayer?.sizeBytes ?? 0) > 1024 ** 3} />
-      </div>
-      <div className="image-layer-list">
-        {layers.map((layer) => {
-          const layerDuration = layer.pullDurationMs + layer.unpackDurationMs;
-          const sizeWidth = Math.max(6, (layer.sizeBytes / image.sizeBytes) * 100);
-          const durationWidth = totalDuration > 0 ? Math.max(6, (layerDuration / totalDuration) * 100) : 6;
+    return {
+      hitRatio: ratio(hit, Math.max(requested, 1)),
+      remote,
+      timestamp: new Date(start + index * 60_000).toISOString(),
+    };
+  });
 
-          return (
-            <article className="image-layer-row" key={layer.id}>
-              <div>
-                <strong>{layer.command}</strong>
-                <span>{formatBytes(layer.sizeBytes)} · pull {formatDuration(layer.pullDurationMs)} · unpack {formatDuration(layer.unpackDurationMs)}</span>
-              </div>
-              <div className="image-layer-bars">
-                <div className="image-layer-track"><i style={{ width: `${sizeWidth}%` }} /></div>
-                <div className="image-layer-track duration"><i style={{ width: `${durationWidth}%` }} /></div>
-              </div>
-              <span className={`cache-pill ${layer.cacheHit ? 'hit' : 'miss'}`}>{layer.cacheHit ? 'cache hit' : 'cache miss'}</span>
-            </article>
-          );
-        })}
-      </div>
-    </div>
-  );
+  return {
+    hitRatio: {
+      id: `${image.id}-lazy-cache-hit-ratio`,
+      name: 'image.lazy.cache_hit_ratio',
+      label: 'Block cache hit ratio',
+      unit: 'ratio',
+      group: 'io',
+      points: points.map((point) => ({ timestamp: point.timestamp, value: point.hitRatio })),
+    },
+    remoteRead: {
+      id: `${image.id}-lazy-remote-read`,
+      name: 'image.lazy.remote_read_bytes',
+      label: 'Remote read bytes',
+      unit: 'bytes',
+      group: 'io',
+      points: points.map((point) => ({ timestamp: point.timestamp, value: point.remote })),
+    },
+  };
+}
+
+function eagerImageDownloadSeries(image: Image): { duration: MetricSeries; bytes: MetricSeries } {
+  const steps = image.downloadTimeline ?? [];
+  const start = Date.now() - Math.max(imageDownloadDuration(image), 1);
+  let cursor = start;
+
+  const points = steps.flatMap((step) => {
+    const stepStart = cursor;
+    const stepEnd = cursor + step.durationMs;
+    cursor = stepEnd;
+    return [
+      { timestamp: new Date(stepStart).toISOString(), duration: step.durationMs, bytes: 0 },
+      { timestamp: new Date(stepEnd).toISOString(), duration: step.durationMs, bytes: step.bytes ?? 0 },
+    ];
+  });
+
+  return {
+    duration: {
+      id: `${image.id}-eager-download-duration`,
+      name: 'image.eager.download_stage_ms',
+      label: 'Stage duration',
+      unit: 'ms',
+      group: 'startup',
+      points: points.map((point) => ({ timestamp: point.timestamp, value: point.duration })),
+    },
+    bytes: {
+      id: `${image.id}-eager-download-bytes`,
+      name: 'image.eager.download_bytes',
+      label: 'Downloaded bytes',
+      unit: 'bytes',
+      group: 'io',
+      points: points.map((point) => ({ timestamp: point.timestamp, value: point.bytes })),
+    },
+  };
+}
+
+function ratio(numerator: number, denominator: number) {
+  return denominator === 0 ? 0 : numerator / denominator;
 }
 
 function ProfileTable({ profiles }: { profiles: ProfileArtifact[] }) {
-  const [expandedProfileId, setExpandedProfileId] = useState(profiles[0]?.id ?? '');
-  const selectedProfile = profiles.find((profile) => profile.id === expandedProfileId) ?? profiles[0];
+  const [activeProfile, setActiveProfile] = useState<ProfileArtifact>();
 
   return (
-    <div className="profile-viewer-grid">
+    <div className="profile-viewer-grid single">
       <div className="table-card profile-list-card">
         <div className="table-titlebar">
           <div>
             <strong>Profile artifacts</strong>
-            <span>Click a profile to open the flame graph preview</span>
+            <span>Click a profile to inspect the flame graph in a larger view</span>
           </div>
         </div>
         <table>
@@ -420,33 +643,35 @@ function ProfileTable({ profiles }: { profiles: ProfileArtifact[] }) {
             <tr><th>Profile</th><th>Type</th><th>Process Role</th><th>Duration</th><th>Samples</th><th>View</th></tr>
           </thead>
           <tbody>
-            {profiles.map((profile) => {
-              const selected = selectedProfile?.id === profile.id;
-              return (
-                <tr className={selected ? 'selected-row' : ''} key={profile.id} onClick={() => setExpandedProfileId(profile.id)}>
-                  <td><strong>{profile.id}</strong><small>{formatDateTime(profile.timestamp)}</small></td>
-                  <td>{profile.profileType}</td>
-                  <td>{profile.processRole}</td>
-                  <td>{formatDuration(profile.durationMs)}</td>
-                  <td>{profile.sampleCount.toLocaleString()}</td>
-                  <td><button className="inline-action">{selected ? 'Open' : 'Preview'}</button></td>
-                </tr>
-              );
-            })}
+            {profiles.map((profile) => (
+              <tr key={profile.id} onClick={() => setActiveProfile(profile)}>
+                <td><strong>{profile.id}</strong><small>{formatDateTime(profile.timestamp)}</small></td>
+                <td>{profile.profileType}</td>
+                <td>{profile.processRole}</td>
+                <td>{formatDuration(profile.durationMs)}</td>
+                <td>{profile.sampleCount.toLocaleString()}</td>
+                <td><button className="inline-action" onClick={(event) => { event.stopPropagation(); setActiveProfile(profile); }}>Open</button></td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
 
-      {selectedProfile && (
-        <div className="panel-card flamegraph-card">
+      {activeProfile && (
+        <div className="profile-modal-backdrop" role="presentation" onClick={() => setActiveProfile(undefined)}>
+          <section className="profile-modal" role="dialog" aria-modal="true" aria-label="Flame graph detail" onClick={(event) => event.stopPropagation()}>
           <div className="flamegraph-header">
             <div>
-              <h3>Flame graph preview</h3>
-              <p>{selectedProfile.id} · {selectedProfile.profileType} · {selectedProfile.objectUri}</p>
+              <h3>Flame graph detail</h3>
+              <p>{activeProfile.id} · {activeProfile.profileType} · {activeProfile.objectUri}</p>
             </div>
-            <span>{selectedProfile.sampleCount.toLocaleString()} samples</span>
+            <div className="profile-modal-actions">
+              <span>{activeProfile.sampleCount.toLocaleString()} samples</span>
+              <button onClick={() => setActiveProfile(undefined)}>Close</button>
+            </div>
           </div>
-          {selectedProfile.flamegraph ? <FlameGraph root={selectedProfile.flamegraph} /> : <div className="empty-state">No flame graph data available.</div>}
+          {activeProfile.flamegraph ? <FlameGraph root={activeProfile.flamegraph} /> : <div className="empty-state">No flame graph data available.</div>}
+          </section>
         </div>
       )}
     </div>

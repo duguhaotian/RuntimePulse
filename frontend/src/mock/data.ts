@@ -1,4 +1,5 @@
 import type {
+  Cluster,
   EventRecord,
   FlamegraphFrame,
   Image,
@@ -12,6 +13,10 @@ import type {
 } from '../domain/model';
 import { minutesAgo } from '../utils/time';
 
+export const clusters: Cluster[] = [
+  { id: 'cluster-prod', name: 'runtimepulse-prod', environment: 'production' },
+];
+
 export const nodes: Node[] = [
   { id: 'node-a', name: 'rp-node-a', clusterId: 'cluster-prod', kernelVersion: '6.8.0', cpuCores: 64, memoryBytes: 256 * 1024 ** 3, status: 'ready' },
   { id: 'node-b', name: 'rp-node-b', clusterId: 'cluster-prod', kernelVersion: '6.8.0', cpuCores: 48, memoryBytes: 192 * 1024 ** 3, status: 'degraded' },
@@ -19,10 +24,10 @@ export const nodes: Node[] = [
 ];
 
 export const images: Image[] = [
-  { id: 'img-api', ref: 'registry.local/api:v42', digest: 'sha256:api42', sizeBytes: 810 * 1024 ** 2, layerCount: 18, layers: imageLayers('img-api', 810 * 1024 ** 2, 18, 0.78, 2_800) },
-  { id: 'img-ml-heavy', ref: 'registry.local/ml-heavy:v8', digest: 'sha256:mlheavy8', sizeBytes: 4.6 * 1024 ** 3, layerCount: 91, layers: imageLayers('img-ml-heavy', 4.6 * 1024 ** 3, 91, 0.34, 13_400) },
-  { id: 'img-worker', ref: 'registry.local/worker:v17', digest: 'sha256:worker17', sizeBytes: 1.4 * 1024 ** 3, layerCount: 34, layers: imageLayers('img-worker', 1.4 * 1024 ** 3, 34, 0.62, 5_500) },
-  { id: 'img-edge', ref: 'registry.local/edge-proxy:v5', digest: 'sha256:edge5', sizeBytes: 380 * 1024 ** 2, layerCount: 12, layers: imageLayers('img-edge', 380 * 1024 ** 2, 12, 0.86, 1_600) },
+  image('img-api', 'registry.local/api:v42', 'sha256:api42', 'eager', 810 * 1024 ** 2, 18, 0.78, 2_800),
+  image('img-ml-heavy', 'registry.local/ml-heavy:v8', 'sha256:mlheavy8', 'lazy', 4.6 * 1024 ** 3, 91, 0.34, 13_400),
+  image('img-worker', 'registry.local/worker:v17', 'sha256:worker17', 'lazy', 1.4 * 1024 ** 3, 34, 0.62, 5_500),
+  image('img-edge', 'registry.local/edge-proxy:v5', 'sha256:edge5', 'eager', 380 * 1024 ** 2, 12, 0.86, 1_600),
 ];
 
 export const sandboxes: Sandbox[] = [
@@ -261,23 +266,73 @@ function imageById(id: string): Image {
   return image;
 }
 
-function imageLayers(imageId: string, imageSizeBytes: number, layerCount: number, cacheHitRatio: number, startupCostMs: number): Image['layers'] {
+function image(
+  id: string,
+  ref: string,
+  digest: string,
+  loadingMode: Image['loadingMode'],
+  sizeBytes: number,
+  layerCount: number,
+  warmBlockRatio: number,
+  startupCostMs: number,
+): Image {
+  return {
+    id,
+    ref,
+    digest,
+    loadingMode,
+    sizeBytes,
+    layerCount,
+    layers: imageLayers(id, sizeBytes, layerCount, warmBlockRatio, startupCostMs),
+    downloadTimeline: loadingMode === 'eager' ? imageDownloadTimeline(id, sizeBytes, layerCount, startupCostMs) : undefined,
+  };
+}
+
+function imageDownloadTimeline(imageId: string, imageSizeBytes: number, layerCount: number, startupCostMs: number): Image['downloadTimeline'] {
+  const manifestMs = Math.max(90, startupCostMs * 0.08);
+  const pullMs = Math.max(600, startupCostMs * 0.52);
+  const verifyMs = Math.max(120, startupCostMs * 0.1);
+  const unpackMs = Math.max(500, startupCostMs * (layerCount > 30 ? 0.42 : 0.28));
+  const snapshotMs = Math.max(80, startupCostMs * 0.06);
+
+  return [
+    { id: `${imageId}-resolve`, name: 'Resolve manifest', phase: 'resolve', durationMs: manifestMs, detail: 'Resolve tag and image manifest from registry.' },
+    { id: `${imageId}-pull`, name: 'Download layers', phase: 'pull', durationMs: pullMs, bytes: imageSizeBytes, detail: `${layerCount} layers downloaded before container start.` },
+    { id: `${imageId}-verify`, name: 'Verify digests', phase: 'verify', durationMs: verifyMs, bytes: imageSizeBytes, detail: 'Verify layer digests and image config.' },
+    { id: `${imageId}-unpack`, name: 'Unpack layers', phase: 'unpack', durationMs: unpackMs, bytes: imageSizeBytes, detail: 'Unpack layer tar streams into snapshotter storage.' },
+    { id: `${imageId}-snapshot`, name: 'Prepare snapshot', phase: 'snapshot', durationMs: snapshotMs, detail: 'Prepare rootfs snapshot for container create.' },
+  ];
+}
+
+function imageLayers(imageId: string, imageSizeBytes: number, layerCount: number, warmBlockRatio: number, startupCostMs: number): Image['layers'] {
   const commands = ['FROM base runtime', 'RUN install packages', 'COPY application bundle', 'RUN dependency restore', 'COPY model/assets', 'RUN user permissions'];
 
   return commands.map((command, index) => {
     const weight = index === 4 ? 0.32 : index === 2 ? 0.2 : index === 3 ? 0.18 : 0.075;
-    const cacheHit = index / commands.length < cacheHitRatio;
     const sizeBytes = Math.max(8 * 1024 ** 2, imageSizeBytes * weight);
+    const blockSizeBytes = 256 * 1024;
+    const blockCount = Math.max(1, Math.ceil(sizeBytes / blockSizeBytes));
+    const requestRatio = index === 4 ? 0.46 : index === 2 ? 0.38 : index === 3 ? 0.3 : 0.18;
+    const requestedBlockCount = Math.max(1, Math.ceil(blockCount * requestRatio));
+    const layerWarmth = Math.max(0.05, Math.min(0.96, warmBlockRatio - index * 0.07 + (index % 2) * 0.05));
+    const cacheHitBlockCount = Math.floor(requestedBlockCount * layerWarmth);
+    const localReadBytes = cacheHitBlockCount * blockSizeBytes;
+    const remoteReadBytes = Math.max(0, requestedBlockCount - cacheHitBlockCount) * blockSizeBytes;
     const layerShare = sizeBytes / imageSizeBytes;
-    const coldPenalty = cacheHit ? 0.28 : 1;
+    const remotePenalty = 0.25 + (requestedBlockCount === 0 ? 0 : (requestedBlockCount - cacheHitBlockCount) / requestedBlockCount);
 
     return {
       id: `${imageId}-layer-${index + 1}`,
       command,
       sizeBytes,
-      cacheHit,
-      pullDurationMs: startupCostMs * layerShare * coldPenalty * 0.55,
-      unpackDurationMs: startupCostMs * layerShare * coldPenalty * 0.45 * (layerCount > 60 ? 1.5 : 1),
+      blockSizeBytes,
+      blockCount,
+      requestedBlockCount,
+      cacheHitBlockCount,
+      localReadBytes,
+      remoteReadBytes,
+      pullDurationMs: startupCostMs * layerShare * remotePenalty * 0.55,
+      unpackDurationMs: startupCostMs * layerShare * remotePenalty * 0.45 * (layerCount > 60 ? 1.5 : 1),
     };
   });
 }
