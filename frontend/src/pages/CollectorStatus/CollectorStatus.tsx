@@ -21,6 +21,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
   const [error, setError] = useState<string>();
   const [lastRefreshAt, setLastRefreshAt] = useState<string>();
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -36,6 +37,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
           setStatus(nextStatus);
           setError(undefined);
           setLastRefreshAt(refreshedAt);
+          setRefreshTick((current) => current + 1);
           setSnapshots((current) => [
             ...current,
             {
@@ -63,6 +65,9 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
   const totalRecords = useMemo(() => status ? totalCount(status.totals) : 0, [status]);
   const batchDelta = useMemo(() => deltaFor(snapshots, 'acceptedBatches'), [snapshots]);
   const recordDelta = useMemo(() => deltaFor(snapshots, 'totalRecords'), [snapshots]);
+  const latestBatchDelta = useMemo(() => latestDeltaFor(snapshots, 'acceptedBatches'), [snapshots]);
+  const latestRecordDelta = useMemo(() => latestDeltaFor(snapshots, 'totalRecords'), [snapshots]);
+  const lastBatchAge = status?.lastAcceptedBatch ? ageText(status.lastAcceptedBatch.acceptedAt, refreshTick) : 'no batch';
   const health = !status ? 'unknown' : status.rejectedBatches > 0 ? 'warning' : status.acceptedBatches > 0 ? 'ready' : 'unknown';
 
   if (error) {
@@ -120,6 +125,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
         <div className="summary-card">
           <span>Accepted batches</span>
           <strong>{status.acceptedBatches.toLocaleString()}</strong>
+          <em>{formatSigned(latestBatchDelta)} last refresh</em>
         </div>
         <div className={status.rejectedBatches > 0 ? 'summary-card warning' : 'summary-card'}>
           <span>Rejected batches</span>
@@ -128,10 +134,12 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
         <div className="summary-card">
           <span>Records accepted</span>
           <strong>{totalRecords.toLocaleString()}</strong>
+          <em>{formatSigned(latestRecordDelta)} last refresh</em>
         </div>
         <div className="summary-card">
-          <span>Sources</span>
-          <strong>{status.sources.length.toLocaleString()}</strong>
+          <span>Last batch age</span>
+          <strong>{lastBatchAge}</strong>
+          <em>{status.sources.length.toLocaleString()} source</em>
         </div>
       </section>
 
@@ -144,8 +152,8 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
           <span>Last {snapshots.length} samples</span>
         </div>
         <div className="collector-trend-grid">
-          <TrendPreview label="Accepted batches" snapshots={snapshots} field="acceptedBatches" delta={batchDelta} />
-          <TrendPreview label="Accepted records" snapshots={snapshots} field="totalRecords" delta={recordDelta} />
+          <TrendPreview label="Accepted batches" snapshots={snapshots} field="acceptedBatches" delta={batchDelta} latestDelta={latestBatchDelta} />
+          <TrendPreview label="Accepted records" snapshots={snapshots} field="totalRecords" delta={recordDelta} latestDelta={latestRecordDelta} />
         </div>
       </section>
 
@@ -276,16 +284,23 @@ function deltaFor(snapshots: Snapshot[], field: 'acceptedBatches' | 'totalRecord
   return snapshots[snapshots.length - 1][field] - snapshots[0][field];
 }
 
+function latestDeltaFor(snapshots: Snapshot[], field: 'acceptedBatches' | 'totalRecords') {
+  if (snapshots.length < 2) return 0;
+  return snapshots[snapshots.length - 1][field] - snapshots[snapshots.length - 2][field];
+}
+
 function TrendPreview({
   label,
   snapshots,
   field,
   delta,
+  latestDelta,
 }: {
   label: string;
   snapshots: Snapshot[];
   field: 'acceptedBatches' | 'totalRecords';
   delta: number;
+  latestDelta: number;
 }) {
   const values = snapshots.map((snapshot) => snapshot[field]);
   const min = Math.min(...values, 0);
@@ -297,6 +312,7 @@ function TrendPreview({
       <div>
         <span>{label}</span>
         <strong>{delta > 0 ? `+${delta.toLocaleString()}` : delta.toLocaleString()}</strong>
+        <em>{formatSigned(latestDelta)} last refresh</em>
       </div>
       <div className="collector-spark-bars" aria-label={`${label} trend`}>
         {snapshots.length === 0 ? (
@@ -310,6 +326,19 @@ function TrendPreview({
       </div>
     </div>
   );
+}
+
+function formatSigned(value: number) {
+  return value > 0 ? `+${value.toLocaleString()}` : value.toLocaleString();
+}
+
+function ageText(timestamp: string, tick: number) {
+  void tick;
+  const ageMs = Date.now() - Date.parse(timestamp);
+  if (!Number.isFinite(ageMs) || ageMs < 0) return 'now';
+  if (ageMs < 1000) return 'now';
+  if (ageMs < 60_000) return `${Math.round(ageMs / 1000)}s`;
+  return `${Math.round(ageMs / 60_000)}m`;
 }
 
 function healthLabel(health: 'ready' | 'warning' | 'unknown') {

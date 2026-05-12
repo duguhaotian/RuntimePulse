@@ -113,6 +113,7 @@ Implemented:
 - In-memory ingest status endpoint: `GET /api/ingest/status` exposes accepted/rejected batch counters, totals, sources, and last batch summaries.
 - Frontend Collectors page that visualizes ingest acceptance counters, per-source totals, and latest batch status.
 - Collectors page auto-refresh and short activity trend preview for accepted batches and records.
+- Mock collector interval aligned with the frontend refresh interval so status counters visibly update during local validation.
 
 Collector candidates:
 

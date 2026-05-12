@@ -20,7 +20,7 @@ services:
     environment:
       INGEST_URL: http://runtimepulse-query-api:8081/api/ingest/batch
       COLLECTOR_NODE_ID: node-a
-      COLLECTOR_INTERVAL_MS: 15000
+      COLLECTOR_INTERVAL_MS: 5000
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://runtimepulse-query-api:8081/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s

@@ -301,6 +301,7 @@ h3 {
 
 .summary-card span { color: var(--muted); font-size: 12px; font-weight: 700; }
 .summary-card strong { color: #f8fafc; font-size: 24px; letter-spacing: -0.04em; }
+.summary-card em { color: var(--muted-2); font-size: 11px; font-style: normal; font-weight: 750; }
 .summary-card.warning { border-color: rgba(246, 195, 68, 0.48); }
 .summary-card.danger { border-color: rgba(255, 93, 115, 0.48); }
 .summary-card.warning::after { background: var(--accent); opacity: 0.75; }
@@ -407,6 +408,13 @@ h3 {
 .collector-trend-card strong {
   color: #f8fafc;
   font-size: 22px;
+}
+
+.collector-trend-card em {
+  color: #a7f3d0;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
 }
 
 .collector-spark-bars {
