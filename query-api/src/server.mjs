@@ -1,5 +1,11 @@
 import { createServer } from 'node:http';
-import { validateIngestBatch } from './ingest.mjs';
+import {
+  createIngestStatus,
+  ingestStatusSnapshot,
+  recordAcceptedIngestBatch,
+  recordRejectedIngestBatch,
+  validateIngestBatch,
+} from './ingest.mjs';
 import {
   clusters,
   eventsForSandbox,
@@ -15,6 +21,7 @@ import {
 
 const port = Number(process.env.PORT ?? 8081);
 const maxBodyBytes = 1024 * 1024;
+const ingestStatus = createIngestStatus();
 
 const server = createServer((request, response) => {
   handleRequest(request, response).catch((error) => {
@@ -42,6 +49,7 @@ async function handleRequest(request, response) {
   if (request.method === 'POST' && path === '/ingest/batch') return handleIngestBatch(request, response);
   if (request.method !== 'GET') return sendJson(response, 405, { error: 'method_not_allowed' });
 
+  if (path === '/ingest/status') return sendData(response, ingestStatusSnapshot(ingestStatus));
   if (path === '/clusters') return sendData(response, clusters);
   if (path === '/nodes') return sendData(response, nodes);
   if (path === '/images') return sendData(response, images);
@@ -66,12 +74,15 @@ async function handleIngestBatch(request, response) {
   const result = validateIngestBatch(payload);
 
   if (!result.ok) {
+    recordRejectedIngestBatch(ingestStatus, payload, result);
     return sendJson(response, 400, {
       error: 'invalid_ingest_batch',
       message: 'Ingest batch did not match the collector payload contract.',
       details: result.errors,
     });
   }
+
+  recordAcceptedIngestBatch(ingestStatus, payload, result);
 
   return sendJson(response, 202, {
     data: {

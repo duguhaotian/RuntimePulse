@@ -40,6 +40,7 @@ The frontend proxies `/api/*` to the local Query API container. The Query API is
 http://localhost:8081/health
 http://localhost:8081/api/sandboxes
 http://localhost:8081/api/ingest/batch
+http://localhost:8081/api/ingest/status
 ```
 
 Stop it with:

@@ -211,6 +211,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /ingest/status:
+    get:
+      summary: Get validation-only ingest status
+      description: Returns in-memory ingest counters for collector smoke testing. Values reset when the Query API process restarts.
+      responses:
+        '200':
+          description: Ingest status snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestStatusResponse'
 components:
   parameters:
     Id:
@@ -550,6 +561,56 @@ components:
           enum: [validation_only]
         counts:
           $ref: '#/components/schemas/IngestCounts'
+    IngestBatchSummary:
+      type: object
+      required: [source, acceptedAt, counts]
+      properties:
+        source: { type: string }
+        observedAt: { type: string, format: date-time }
+        acceptedAt: { type: string, format: date-time }
+        counts:
+          $ref: '#/components/schemas/IngestCounts'
+    IngestRejectedSummary:
+      type: object
+      required: [rejectedAt, errors]
+      properties:
+        source: { type: string }
+        rejectedAt: { type: string, format: date-time }
+        errors:
+          type: array
+          items:
+            type: string
+    IngestSourceStatus:
+      type: object
+      required: [source, acceptedBatches, totals, firstAcceptedAt, lastAcceptedAt]
+      properties:
+        source: { type: string }
+        acceptedBatches: { type: integer }
+        totals:
+          $ref: '#/components/schemas/IngestCounts'
+        firstAcceptedAt: { type: string, format: date-time }
+        lastAcceptedAt: { type: string, format: date-time }
+        lastObservedAt: { type: string, format: date-time }
+    IngestStatus:
+      type: object
+      required: [mode, startedAt, acceptedBatches, rejectedBatches, totals, sources]
+      properties:
+        mode:
+          type: string
+          enum: [validation_only]
+        startedAt: { type: string, format: date-time }
+        acceptedBatches: { type: integer }
+        rejectedBatches: { type: integer }
+        totals:
+          $ref: '#/components/schemas/IngestCounts'
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestSourceStatus'
+        lastAcceptedBatch:
+          $ref: '#/components/schemas/IngestBatchSummary'
+        lastRejectedBatch:
+          $ref: '#/components/schemas/IngestRejectedSummary'
     ErrorResponse:
       type: object
       required: [error]
@@ -586,6 +647,8 @@ components:
       $ref: '#/components/schemas/DataResponse_RuntimeCompareRowArray'
     IngestAcceptedResponse:
       $ref: '#/components/schemas/DataResponse_IngestAccepted'
+    IngestStatusResponse:
+      $ref: '#/components/schemas/DataResponse_IngestStatus'
     DataResponse_ClusterArray:
       type: object
       required: [data]
@@ -682,3 +745,9 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/IngestAccepted'
+    DataResponse_IngestStatus:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/IngestStatus'

@@ -2,6 +2,19 @@ const maxPreviewErrors = 20;
 
 const metadataCollections = ['clusters', 'nodes', 'images', 'sandboxes'];
 
+export function createIngestStatus() {
+  return {
+    mode: 'validation_only',
+    startedAt: new Date().toISOString(),
+    acceptedBatches: 0,
+    rejectedBatches: 0,
+    totals: emptyCounts(),
+    sources: new Map(),
+    lastAcceptedBatch: undefined,
+    lastRejectedBatch: undefined,
+  };
+}
+
 export function validateIngestBatch(payload) {
   const errors = [];
 
@@ -47,6 +60,74 @@ export function validateIngestBatch(payload) {
   };
 }
 
+export function recordAcceptedIngestBatch(status, payload, result) {
+  const acceptedAt = new Date().toISOString();
+  const source = payload.source;
+  const observedAt = typeof payload.observedAt === 'string' ? payload.observedAt : undefined;
+  const batch = {
+    source,
+    observedAt,
+    acceptedAt,
+    counts: result.counts,
+  };
+
+  status.acceptedBatches += 1;
+  mergeCounts(status.totals, result.counts);
+  status.lastAcceptedBatch = batch;
+
+  const sourceStatus = status.sources.get(source) ?? {
+    source,
+    acceptedBatches: 0,
+    totals: emptyCounts(),
+    firstAcceptedAt: acceptedAt,
+    lastAcceptedAt: acceptedAt,
+    lastObservedAt: observedAt,
+  };
+
+  sourceStatus.acceptedBatches += 1;
+  sourceStatus.lastAcceptedAt = acceptedAt;
+  sourceStatus.lastObservedAt = observedAt;
+  mergeCounts(sourceStatus.totals, result.counts);
+  status.sources.set(source, sourceStatus);
+
+  return batch;
+}
+
+export function recordRejectedIngestBatch(status, payload, result) {
+  const rejectedAt = new Date().toISOString();
+  const source = isPlainObject(payload) && typeof payload.source === 'string' ? payload.source : undefined;
+
+  status.rejectedBatches += 1;
+  status.lastRejectedBatch = {
+    source,
+    rejectedAt,
+    errors: result.errors,
+  };
+}
+
+export function ingestStatusSnapshot(status) {
+  return {
+    mode: status.mode,
+    startedAt: status.startedAt,
+    acceptedBatches: status.acceptedBatches,
+    rejectedBatches: status.rejectedBatches,
+    totals: cloneCounts(status.totals),
+    sources: Array.from(status.sources.values())
+      .sort((left, right) => right.lastAcceptedAt.localeCompare(left.lastAcceptedAt))
+      .map((source) => ({
+        ...source,
+        totals: cloneCounts(source.totals),
+      })),
+    lastAcceptedBatch: status.lastAcceptedBatch
+      ? {
+          ...status.lastAcceptedBatch,
+          counts: cloneCounts(status.lastAcceptedBatch.counts),
+        }
+      : undefined,
+    lastRejectedBatch: status.lastRejectedBatch,
+  };
+}
+
 function emptyCounts() {
   return {
     metadata: {
@@ -60,6 +141,27 @@ function emptyCounts() {
     traces: 0,
     profiles: 0,
   };
+}
+
+function cloneCounts(counts) {
+  return {
+    metadata: { ...counts.metadata },
+    metrics: counts.metrics,
+    events: counts.events,
+    traces: counts.traces,
+    profiles: counts.profiles,
+  };
+}
+
+function mergeCounts(target, increment) {
+  for (const name of metadataCollections) {
+    target.metadata[name] += increment.metadata[name] ?? 0;
+  }
+
+  target.metrics += increment.metrics;
+  target.events += increment.events;
+  target.traces += increment.traces;
+  target.profiles += increment.profiles;
 }
 
 function validateArray(payload, field, errors, counts, validator) {

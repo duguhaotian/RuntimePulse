@@ -227,7 +227,7 @@ The API owns joins, authorization, tenant scoping, downsampling, and time-range 
 
 Collectors should write through future ingest endpoints or streaming pipelines, not the Query API.
 
-The Phase 3 skeleton exposes `POST /api/ingest/batch` as a validation-only collector contract. It accepts metadata, metrics, events, traces, and profile artifact indexes, returns accepted counts, and intentionally does not persist records yet.
+The Phase 3 skeleton exposes `POST /api/ingest/batch` as a validation-only collector contract. It accepts metadata, metrics, events, traces, and profile artifact indexes, returns accepted counts, and intentionally does not persist records yet. `GET /api/ingest/status` exposes in-memory acceptance counters for collector smoke testing; those counters reset when the Query API process restarts.
 
 - Metadata writes are idempotent by stable ids such as cluster id, node id, image digest, sandbox id, and profile id.
 - Metric points are idempotent by series identity plus timestamp.
