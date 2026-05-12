@@ -7,30 +7,62 @@ type CollectorStatusProps = {
   api: RuntimePulseApi;
 };
 
+type Snapshot = {
+  timestamp: string;
+  acceptedBatches: number;
+  totalRecords: number;
+};
+
+const refreshIntervalMs = 5000;
+const maxSnapshots = 12;
+
 export function CollectorStatus({ api }: CollectorStatusProps) {
   const [status, setStatus] = useState<IngestStatus>();
   const [error, setError] = useState<string>();
+  const [lastRefreshAt, setLastRefreshAt] = useState<string>();
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
 
   useEffect(() => {
     let active = true;
+    let timer: number | undefined;
 
-    api.getIngestStatus()
-      .then((nextStatus) => {
-        if (!active) return;
-        setStatus(nextStatus);
-        setError(undefined);
-      })
-      .catch((nextError) => {
-        if (!active) return;
-        setError(nextError instanceof Error ? nextError.message : String(nextError));
-      });
+    const refresh = () => {
+      api.getIngestStatus()
+        .then((nextStatus) => {
+          if (!active) return;
+          const refreshedAt = new Date().toISOString();
+          const nextTotalRecords = totalCount(nextStatus.totals);
+
+          setStatus(nextStatus);
+          setError(undefined);
+          setLastRefreshAt(refreshedAt);
+          setSnapshots((current) => [
+            ...current,
+            {
+              timestamp: refreshedAt,
+              acceptedBatches: nextStatus.acceptedBatches,
+              totalRecords: nextTotalRecords,
+            },
+          ].slice(-maxSnapshots));
+        })
+        .catch((nextError) => {
+          if (!active) return;
+          setError(nextError instanceof Error ? nextError.message : String(nextError));
+        });
+    };
+
+    refresh();
+    timer = window.setInterval(refresh, refreshIntervalMs);
 
     return () => {
       active = false;
+      if (timer) window.clearInterval(timer);
     };
   }, [api]);
 
   const totalRecords = useMemo(() => status ? totalCount(status.totals) : 0, [status]);
+  const batchDelta = useMemo(() => deltaFor(snapshots, 'acceptedBatches'), [snapshots]);
+  const recordDelta = useMemo(() => deltaFor(snapshots, 'totalRecords'), [snapshots]);
   const health = !status ? 'unknown' : status.rejectedBatches > 0 ? 'warning' : status.acceptedBatches > 0 ? 'ready' : 'unknown';
 
   if (error) {
@@ -80,6 +112,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
         <div className={`collector-health ${health}`}>
           <span className={`status-dot ${health}`} />
           <strong>{healthLabel(health)}</strong>
+          {lastRefreshAt && <em>{formatDateTime(lastRefreshAt)}</em>}
         </div>
       </header>
 
@@ -99,6 +132,20 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
         <div className="summary-card">
           <span>Sources</span>
           <strong>{status.sources.length.toLocaleString()}</strong>
+        </div>
+      </section>
+
+      <section className="panel-card collector-panel">
+        <div className="section-heading">
+          <div>
+            <h3>Ingest activity</h3>
+            <p>Auto-refreshes every 5 seconds from the Query API status endpoint.</p>
+          </div>
+          <span>Last {snapshots.length} samples</span>
+        </div>
+        <div className="collector-trend-grid">
+          <TrendPreview label="Accepted batches" snapshots={snapshots} field="acceptedBatches" delta={batchDelta} />
+          <TrendPreview label="Accepted records" snapshots={snapshots} field="totalRecords" delta={recordDelta} />
         </div>
       </section>
 
@@ -222,6 +269,47 @@ function totalCount(counts: IngestCounts) {
     + counts.events
     + counts.traces
     + counts.profiles;
+}
+
+function deltaFor(snapshots: Snapshot[], field: 'acceptedBatches' | 'totalRecords') {
+  if (snapshots.length < 2) return 0;
+  return snapshots[snapshots.length - 1][field] - snapshots[0][field];
+}
+
+function TrendPreview({
+  label,
+  snapshots,
+  field,
+  delta,
+}: {
+  label: string;
+  snapshots: Snapshot[];
+  field: 'acceptedBatches' | 'totalRecords';
+  delta: number;
+}) {
+  const values = snapshots.map((snapshot) => snapshot[field]);
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 1);
+  const span = Math.max(1, max - min);
+
+  return (
+    <div className="collector-trend-card">
+      <div>
+        <span>{label}</span>
+        <strong>{delta > 0 ? `+${delta.toLocaleString()}` : delta.toLocaleString()}</strong>
+      </div>
+      <div className="collector-spark-bars" aria-label={`${label} trend`}>
+        {snapshots.length === 0 ? (
+          <i style={{ height: '12%' }} />
+        ) : snapshots.map((snapshot, index) => (
+          <i
+            key={`${snapshot.timestamp}-${field}-${index}`}
+            style={{ height: `${Math.max(12, ((snapshot[field] - min) / span) * 88 + 12)}%` }}
+          />
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function healthLabel(health: 'ready' | 'warning' | 'unknown') {

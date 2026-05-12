@@ -112,6 +112,7 @@ Implemented:
 - Mock node collector container that periodically posts node, sandbox, metric, event, and trace samples to the ingest boundary.
 - In-memory ingest status endpoint: `GET /api/ingest/status` exposes accepted/rejected batch counters, totals, sources, and last batch summaries.
 - Frontend Collectors page that visualizes ingest acceptance counters, per-source totals, and latest batch status.
+- Collectors page auto-refresh and short activity trend preview for accepted batches and records.
 
 Collector candidates:
 

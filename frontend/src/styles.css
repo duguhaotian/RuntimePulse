@@ -319,6 +319,13 @@ h3 {
   padding: 8px 11px;
 }
 
+.collector-health em {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+}
+
 .collector-health.ready {
   border-color: rgba(52, 211, 153, 0.28);
   color: #a7f3d0;
@@ -367,6 +374,54 @@ h3 {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.collector-trend-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.collector-trend-card {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.32fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: end;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 12px;
+}
+
+.collector-trend-card > div:first-child {
+  display: grid;
+  gap: 6px;
+}
+
+.collector-trend-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.collector-trend-card strong {
+  color: #f8fafc;
+  font-size: 22px;
+}
+
+.collector-spark-bars {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(8px, 1fr));
+  align-items: end;
+  gap: 5px;
+  height: 54px;
+}
+
+.collector-spark-bars i {
+  display: block;
+  min-height: 8px;
+  border-radius: 999px 999px 3px 3px;
+  background: linear-gradient(180deg, rgba(52, 211, 153, 0.92), rgba(75, 163, 255, 0.72));
 }
 
 .count-tile {
