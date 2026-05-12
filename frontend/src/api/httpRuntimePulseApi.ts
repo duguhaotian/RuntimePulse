@@ -2,6 +2,7 @@ import type {
   EventRecord,
   Cluster,
   Image,
+  IngestStatus,
   MetricSeries,
   Node,
   ProfileArtifact,
@@ -54,6 +55,9 @@ export function createHttpRuntimePulseApi(baseUrl: string): RuntimePulseApi {
     },
     compareRuntimes(range) {
       return request<RuntimeCompareRow[]>('/runtimes/compare', timeRangeParams(range));
+    },
+    getIngestStatus() {
+      return request<IngestStatus>('/ingest/status');
     },
   };
 }

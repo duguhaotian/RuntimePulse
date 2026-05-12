@@ -2,6 +2,7 @@ import type {
   EventRecord,
   Cluster,
   Image,
+  IngestStatus,
   MetricSeries,
   Node,
   ProfileArtifact,
@@ -25,4 +26,5 @@ export interface RuntimePulseApi {
   getSandboxTrace(id: string): Promise<TraceSpan[]>;
   getSandboxProfiles(id: string): Promise<ProfileArtifact[]>;
   compareRuntimes(range?: TimeRange): Promise<RuntimeCompareRow[]>;
+  getIngestStatus(): Promise<IngestStatus>;
 }

@@ -2,13 +2,14 @@ import type { ReactNode } from 'react';
 
 type AppLayoutProps = {
   activePage: string;
-  onNavigate: (page: 'explorer' | 'runtime') => void;
+  onNavigate: (page: 'explorer' | 'runtime' | 'collectors') => void;
   children: ReactNode;
 };
 
 const pageMeta: Record<string, { title: string; scope: string }> = {
   explorer: { title: 'Clusters', scope: 'sandbox-lab' },
   runtime: { title: 'Reports', scope: 'sandbox-lab' },
+  collectors: { title: 'Collectors', scope: 'sandbox-lab' },
 };
 
 export function AppLayout({ activePage, onNavigate, children }: AppLayoutProps) {
@@ -38,6 +39,10 @@ export function AppLayout({ activePage, onNavigate, children }: AppLayoutProps) 
           <button className={activePage === 'runtime' ? 'active' : ''} onClick={() => onNavigate('runtime')}>
             <span className="nav-icon">◫</span>
             <span>Reports</span>
+          </button>
+          <button className={activePage === 'collectors' ? 'active' : ''} onClick={() => onNavigate('collectors')}>
+            <span className="nav-icon">⇄</span>
+            <span>Collectors</span>
           </button>
           <button disabled>
             <span className="nav-icon">◇</span>

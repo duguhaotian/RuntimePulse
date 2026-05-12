@@ -111,6 +111,7 @@ Implemented:
 - OpenAPI contract now includes the ingest batch request, accepted response, and validation error shape.
 - Mock node collector container that periodically posts node, sandbox, metric, event, and trace samples to the ingest boundary.
 - In-memory ingest status endpoint: `GET /api/ingest/status` exposes accepted/rejected batch counters, totals, sources, and last batch summaries.
+- Frontend Collectors page that visualizes ingest acceptance counters, per-source totals, and latest batch status.
 
 Collector candidates:
 

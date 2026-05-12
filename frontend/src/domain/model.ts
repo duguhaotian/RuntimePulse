@@ -160,3 +160,49 @@ export type RuntimeCompareRow = {
   memoryOverheadBytes: number;
   failureRate: number;
 };
+
+export type IngestCounts = {
+  metadata: {
+    clusters: number;
+    nodes: number;
+    images: number;
+    sandboxes: number;
+  };
+  metrics: number;
+  events: number;
+  traces: number;
+  profiles: number;
+};
+
+export type IngestBatchSummary = {
+  source: string;
+  observedAt?: string;
+  acceptedAt: string;
+  counts: IngestCounts;
+};
+
+export type IngestRejectedSummary = {
+  source?: string;
+  rejectedAt: string;
+  errors: string[];
+};
+
+export type IngestSourceStatus = {
+  source: string;
+  acceptedBatches: number;
+  totals: IngestCounts;
+  firstAcceptedAt: string;
+  lastAcceptedAt: string;
+  lastObservedAt?: string;
+};
+
+export type IngestStatus = {
+  mode: 'validation_only';
+  startedAt: string;
+  acceptedBatches: number;
+  rejectedBatches: number;
+  totals: IngestCounts;
+  sources: IngestSourceStatus[];
+  lastAcceptedBatch?: IngestBatchSummary;
+  lastRejectedBatch?: IngestRejectedSummary;
+};

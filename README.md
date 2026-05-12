@@ -7,6 +7,7 @@ RuntimePulse is an early-stage sandbox runtime metrics platform prototype. Phase
 - Sandbox Explorer with runtime/status/search filters.
 - Sandbox Detail with metrics, lifecycle events, startup trace, profiles, and raw data.
 - Runtime Comparison for runc, gVisor, Kata, and Firecracker.
+- Collector status page for ingest acceptance counters and source health.
 - Mock API adapter that can later be replaced by a real HTTP API without rewriting pages.
 - Lightweight Query API container that serves the same mock telemetry over HTTP for frontend/backend contract validation.
 - Mock node collector container that periodically validates collector payloads through the ingest API.

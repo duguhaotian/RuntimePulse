@@ -6,8 +6,9 @@ import { NodeDetail } from './pages/NodeDetail/NodeDetail';
 import { SandboxExplorer } from './pages/SandboxExplorer/SandboxExplorer';
 import { SandboxDetail } from './pages/SandboxDetail/SandboxDetail';
 import { RuntimeComparison } from './pages/RuntimeComparison/RuntimeComparison';
+import { CollectorStatus } from './pages/CollectorStatus/CollectorStatus';
 
-type Page = 'explorer' | 'node' | 'detail' | 'runtime';
+type Page = 'explorer' | 'node' | 'detail' | 'runtime' | 'collectors';
 
 export function App() {
   const api = useMemo(() => {
@@ -42,6 +43,7 @@ export function App() {
       )}
       {page === 'detail' && <SandboxDetail api={api} sandboxId={selectedSandboxId} onBack={() => setPage('node')} />}
       {page === 'runtime' && <RuntimeComparison api={api} />}
+      {page === 'collectors' && <CollectorStatus api={api} />}
     </AppLayout>
   );
 }
