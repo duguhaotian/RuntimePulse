@@ -27,6 +27,7 @@ import {
   liveNodes,
   liveProfilesForSandbox,
   liveSandboxes,
+  liveStoreSnapshot,
   liveTraceForSandbox,
   recordLiveBatch,
 } from './liveData.mjs';
@@ -62,7 +63,10 @@ async function handleRequest(request, response) {
   if (request.method === 'POST' && path === '/ingest/batch') return handleIngestBatch(request, response);
   if (request.method !== 'GET') return sendJson(response, 405, { error: 'method_not_allowed' });
 
-  if (path === '/ingest/status') return sendData(response, ingestStatusSnapshot(ingestStatus));
+  if (path === '/ingest/status') return sendData(response, {
+    ...ingestStatusSnapshot(ingestStatus),
+    liveStore: liveStoreSnapshot(liveStore),
+  });
   if (path === '/ingest/recent') return sendData(response, ingestRecentSnapshot(ingestStatus));
   if (path === '/clusters') return sendData(response, mergeById(clusters, liveClusters(liveStore)));
   if (path === '/nodes') return sendData(response, mergeById(nodes, liveNodes(liveStore)));

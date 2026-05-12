@@ -602,6 +602,25 @@ components:
         firstAcceptedAt: { type: string, format: date-time }
         lastAcceptedAt: { type: string, format: date-time }
         lastObservedAt: { type: string, format: date-time }
+    LiveStoreStatus:
+      type: object
+      required: [clusters, nodes, images, sandboxes, metricSeries, metricPoints, events, traces, profiles, limits]
+      properties:
+        clusters: { type: integer }
+        nodes: { type: integer }
+        images: { type: integer }
+        sandboxes: { type: integer }
+        metricSeries: { type: integer }
+        metricPoints: { type: integer }
+        events: { type: integer }
+        traces: { type: integer }
+        profiles: { type: integer }
+        limits:
+          type: object
+          required: [metricPointsPerSeries, rowsPerKind]
+          properties:
+            metricPointsPerSeries: { type: integer }
+            rowsPerKind: { type: integer }
     IngestStatus:
       type: object
       required: [mode, startedAt, acceptedBatches, rejectedBatches, totals, sources]
@@ -618,6 +637,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/IngestSourceStatus'
+        liveStore:
+          $ref: '#/components/schemas/LiveStoreStatus'
         lastAcceptedBatch:
           $ref: '#/components/schemas/IngestBatchSummary'
         lastRejectedBatch:

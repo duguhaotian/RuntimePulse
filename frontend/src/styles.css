@@ -391,6 +391,26 @@ h3 {
   gap: 10px;
 }
 
+.live-store-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.store-limit-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.store-limit-row span {
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  padding: 6px 9px;
+}
+
 .collector-trend-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

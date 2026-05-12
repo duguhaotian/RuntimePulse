@@ -209,6 +209,33 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
         </div>
       </section>
 
+      {status.liveStore && (
+        <section className="panel-card collector-panel">
+          <div className="section-heading">
+            <div>
+              <h3>Live query store</h3>
+              <p>In-memory query objects currently merged into cluster, node, sandbox, runtime, and detail API responses.</p>
+            </div>
+            <span>{status.liveStore.metricPoints.toLocaleString()} points</span>
+          </div>
+          <div className="collector-count-grid live-store-grid">
+            <CountTile label="Clusters" value={status.liveStore.clusters} />
+            <CountTile label="Nodes" value={status.liveStore.nodes} />
+            <CountTile label="Images" value={status.liveStore.images} />
+            <CountTile label="Sandboxes" value={status.liveStore.sandboxes} />
+            <CountTile label="Metric series" value={status.liveStore.metricSeries} />
+            <CountTile label="Metric points" value={status.liveStore.metricPoints} />
+            <CountTile label="Events" value={status.liveStore.events} />
+            <CountTile label="Traces" value={status.liveStore.traces} />
+            <CountTile label="Profiles" value={status.liveStore.profiles} />
+          </div>
+          <div className="store-limit-row">
+            <span>Metric point retention: {status.liveStore.limits.metricPointsPerSeries.toLocaleString()} per series</span>
+            <span>Event/profile retention: {status.liveStore.limits.rowsPerKind.toLocaleString()} rows per kind</span>
+          </div>
+        </section>
+      )}
+
       <section className="table-card">
         <div className="table-header">
           <h3>Collector sources</h3>

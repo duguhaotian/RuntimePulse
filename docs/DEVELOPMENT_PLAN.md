@@ -123,6 +123,7 @@ Implemented:
 - Query API keeps accepted collector payloads in an in-memory live query store and merges them into cluster, node, sandbox, metric, event, trace, and profile GET responses.
 - Cluster, node, and sandbox detail pages auto-refresh query data so live collector updates are visible outside the Collectors page.
 - Runtime comparison aggregates now refresh from live Query API sandbox data instead of staying fixed to static mock rows.
+- Collectors page shows live query store occupancy for in-memory entities, metric series, points, events, traces, and profiles.
 
 Collector candidates:
 

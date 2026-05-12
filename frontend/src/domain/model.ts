@@ -196,6 +196,22 @@ export type IngestSourceStatus = {
   lastObservedAt?: string;
 };
 
+export type LiveStoreStatus = {
+  clusters: number;
+  nodes: number;
+  images: number;
+  sandboxes: number;
+  metricSeries: number;
+  metricPoints: number;
+  events: number;
+  traces: number;
+  profiles: number;
+  limits: {
+    metricPointsPerSeries: number;
+    rowsPerKind: number;
+  };
+};
+
 export type IngestStatus = {
   mode: 'validation_only';
   startedAt: string;
@@ -203,6 +219,7 @@ export type IngestStatus = {
   rejectedBatches: number;
   totals: IngestCounts;
   sources: IngestSourceStatus[];
+  liveStore?: LiveStoreStatus;
   lastAcceptedBatch?: IngestBatchSummary;
   lastRejectedBatch?: IngestRejectedSummary;
 };

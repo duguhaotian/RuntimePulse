@@ -57,6 +57,29 @@ export function liveProfilesForSandbox(store, sandboxId) {
   return store.profilesBySandbox.get(sandboxId) ?? [];
 }
 
+export function liveStoreSnapshot(store) {
+  const metricSeries = Array.from(store.metricsBySandbox.values()).reduce((sum, seriesMap) => sum + seriesMap.size, 0);
+  const metricPoints = Array.from(store.metricsBySandbox.values()).reduce((sum, seriesMap) => {
+    return sum + Array.from(seriesMap.values()).reduce((seriesSum, series) => seriesSum + series.points.length, 0);
+  }, 0);
+
+  return {
+    clusters: store.clusters.size,
+    nodes: store.nodes.size,
+    images: store.images.size,
+    sandboxes: store.sandboxes.size,
+    metricSeries,
+    metricPoints,
+    events: rowCount(store.eventsBySandbox),
+    traces: rowCount(store.tracesBySandbox),
+    profiles: rowCount(store.profilesBySandbox),
+    limits: {
+      metricPointsPerSeries: maxMetricPointsPerSeries,
+      rowsPerKind: maxRowsPerKind,
+    },
+  };
+}
+
 function rememberMetadata(store, metadata) {
   for (const cluster of array(metadata?.clusters)) {
     if (!cluster.id) continue;
@@ -267,4 +290,8 @@ function array(value) {
 
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function rowCount(collection) {
+  return Array.from(collection.values()).reduce((sum, rows) => sum + rows.length, 0);
 }
