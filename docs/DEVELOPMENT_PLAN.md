@@ -118,6 +118,7 @@ Implemented:
 - Collectors page recent sample preview for latest ingested metrics, events, and trace spans.
 - Collectors page tabbed recent sample browser for metrics, events, and trace spans.
 - Docker Compose runs two mock node collectors to validate multi-source ingest aggregation.
+- Collectors page source filter for recent samples, so multi-node ingest can be inspected per source.
 
 Collector candidates:
 

@@ -27,6 +27,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [refreshTick, setRefreshTick] = useState(0);
   const [recentTab, setRecentTab] = useState<RecentTab>('metrics');
+  const [selectedSource, setSelectedSource] = useState('all');
 
   useEffect(() => {
     let active = true;
@@ -75,6 +76,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
   const latestRecordDelta = useMemo(() => latestDeltaFor(snapshots, 'totalRecords'), [snapshots]);
   const lastBatchAge = status?.lastAcceptedBatch ? ageText(status.lastAcceptedBatch.acceptedAt, refreshTick) : 'no batch';
   const health = !status ? 'unknown' : status.rejectedBatches > 0 ? 'warning' : status.acceptedBatches > 0 ? 'ready' : 'unknown';
+  const visibleRecent = useMemo(() => recent ? filterRecentBySource(recent, selectedSource) : undefined, [recent, selectedSource]);
 
   if (error) {
     return (
@@ -260,22 +262,33 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
               <h3>Recent ingest samples</h3>
               <p>Bounded in-memory preview of the latest accepted collector payloads.</p>
             </div>
-            <span>{recent.recentBatches.length} batches</span>
+            <span>{visibleRecent?.recentBatches.length ?? 0} batches</span>
+          </div>
+          <div className="recent-toolbar">
+            <label>
+              Source
+              <select value={selectedSource} onChange={(event) => setSelectedSource(event.target.value)}>
+                <option value="all">All sources</option>
+                {status.sources.map((source) => (
+                  <option key={source.source} value={source.source}>{source.source}</option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="recent-tab-bar" role="tablist" aria-label="Recent ingest sample kind">
             <button className={recentTab === 'metrics' ? 'active' : ''} onClick={() => setRecentTab('metrics')}>
-              Metrics <span>{recent.recentMetrics.length}</span>
+              Metrics <span>{visibleRecent?.recentMetrics.length ?? 0}</span>
             </button>
             <button className={recentTab === 'events' ? 'active' : ''} onClick={() => setRecentTab('events')}>
-              Events <span>{recent.recentEvents.length}</span>
+              Events <span>{visibleRecent?.recentEvents.length ?? 0}</span>
             </button>
             <button className={recentTab === 'traces' ? 'active' : ''} onClick={() => setRecentTab('traces')}>
-              Trace spans <span>{recent.recentTraces.length}</span>
+              Trace spans <span>{visibleRecent?.recentTraces.length ?? 0}</span>
             </button>
           </div>
-          {recentTab === 'metrics' && <RecentMetricList recent={recent} />}
-          {recentTab === 'events' && <RecentEventList recent={recent} />}
-          {recentTab === 'traces' && <RecentTraceList recent={recent} />}
+          {visibleRecent && recentTab === 'metrics' && <RecentMetricList recent={visibleRecent} />}
+          {visibleRecent && recentTab === 'events' && <RecentEventList recent={visibleRecent} />}
+          {visibleRecent && recentTab === 'traces' && <RecentTraceList recent={visibleRecent} />}
         </section>
       )}
     </div>
@@ -385,6 +398,18 @@ function RecentTraceList({ recent }: { recent: IngestRecent }) {
       </table>
     </div>
   );
+}
+
+function filterRecentBySource(recent: IngestRecent, source: string): IngestRecent {
+  if (source === 'all') return recent;
+
+  return {
+    ...recent,
+    recentBatches: recent.recentBatches.filter((batch) => batch.source === source),
+    recentMetrics: recent.recentMetrics.filter((metric) => metric.source === source),
+    recentEvents: recent.recentEvents.filter((event) => event.source === source),
+    recentTraces: recent.recentTraces.filter((span) => span.source === source),
+  };
 }
 
 function totalCount(counts: IngestCounts) {
