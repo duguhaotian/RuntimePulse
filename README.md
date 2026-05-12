@@ -10,7 +10,7 @@ RuntimePulse is an early-stage sandbox runtime metrics platform prototype. Phase
 - Collector status page for ingest acceptance counters, source health, short activity trends, and per-refresh deltas.
 - Mock API adapter that can later be replaced by a real HTTP API without rewriting pages.
 - Lightweight Query API container that serves the same mock telemetry over HTTP for frontend/backend contract validation.
-- Mock node collector container that periodically validates collector payloads through the ingest API.
+- Mock node collector containers that periodically validate multi-node payloads through the ingest API.
 - Container-first deployment for local validation and later platform packaging.
 
 ## Documentation
@@ -78,7 +78,7 @@ frontend/src/components Reusable visualization/layout components
 frontend/src/pages      Expert analysis pages
 frontend/src/utils      Time, unit, and color helpers
 query-api               Minimal HTTP Query API backed by mock telemetry
-collector               Mock node collector that posts validation-only ingest batches
+collector               Mock node collector image used for multi-node validation-only ingest batches
 ```
 
 ## Mock Scenarios

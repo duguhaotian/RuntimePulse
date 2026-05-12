@@ -1,9 +1,10 @@
 const ingestUrl = process.env.INGEST_URL ?? 'http://runtimepulse-query-api:8081/api/ingest/batch';
 const nodeId = process.env.COLLECTOR_NODE_ID ?? 'node-a';
 const intervalMs = Number(process.env.COLLECTOR_INTERVAL_MS ?? 15_000);
+const startSequence = Number(process.env.COLLECTOR_START_SEQUENCE ?? 0);
 const source = `mock-node-collector/${nodeId}`;
 
-let sequence = 0;
+let sequence = Number.isFinite(startSequence) && startSequence >= 0 ? Math.floor(startSequence) : 0;
 
 await sendLoop();
 setInterval(() => {
@@ -34,6 +35,7 @@ async function sendLoop() {
     message: 'ingest_batch_accepted',
     status: response.status,
     sequence: sequence - 1,
+    nodeId,
     body: safeJson(body),
   }));
 }

@@ -117,6 +117,7 @@ Implemented:
 - Recent ingest sample endpoint: `GET /api/ingest/recent` keeps bounded in-memory previews of recent batches, metrics, events, and trace spans for debugging.
 - Collectors page recent sample preview for latest ingested metrics, events, and trace spans.
 - Collectors page tabbed recent sample browser for metrics, events, and trace spans.
+- Docker Compose runs two mock node collectors to validate multi-source ingest aggregation.
 
 Collector candidates:
 

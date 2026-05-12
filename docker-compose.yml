@@ -9,18 +9,39 @@ services:
       - "8081:8081"
     restart: unless-stopped
 
-  runtimepulse-mock-node-collector:
+  runtimepulse-mock-node-collector-a:
     build:
       context: ./collector
       dockerfile: Dockerfile
     image: runtimepulse/mock-node-collector:dev
-    container_name: runtimepulse-mock-node-collector
+    container_name: runtimepulse-mock-node-collector-a
     depends_on:
       - runtimepulse-query-api
     environment:
       INGEST_URL: http://runtimepulse-query-api:8081/api/ingest/batch
       COLLECTOR_NODE_ID: node-a
       COLLECTOR_INTERVAL_MS: 5000
+      COLLECTOR_START_SEQUENCE: 0
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://runtimepulse-query-api:8081/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  runtimepulse-mock-node-collector-b:
+    build:
+      context: ./collector
+      dockerfile: Dockerfile
+    image: runtimepulse/mock-node-collector:dev
+    container_name: runtimepulse-mock-node-collector-b
+    depends_on:
+      - runtimepulse-query-api
+    environment:
+      INGEST_URL: http://runtimepulse-query-api:8081/api/ingest/batch
+      COLLECTOR_NODE_ID: node-b
+      COLLECTOR_INTERVAL_MS: 5000
+      COLLECTOR_START_SEQUENCE: 2
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://runtimepulse-query-api:8081/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
@@ -38,6 +59,8 @@ services:
     container_name: runtimepulse-frontend
     depends_on:
       - runtimepulse-query-api
+      - runtimepulse-mock-node-collector-a
+      - runtimepulse-mock-node-collector-b
     ports:
       - "8080:8080"
     restart: unless-stopped
