@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: RuntimePulse Query API
+  title: RuntimePulse Query and Ingest API
   version: 0.1.0
-  description: Query API contract for RuntimePulse frontend and future backend storage.
+  description: Query API contract for the RuntimePulse frontend plus the Phase 3 collector ingest boundary.
 servers:
   - url: /api
     description: Frontend-proxied local API
@@ -182,6 +182,35 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RuntimeCompareListResponse'
+  /ingest/batch:
+    post:
+      summary: Validate and accept a collector ingest batch
+      description: Phase 3 collector contract endpoint. The current mock service validates payload shape and returns accepted counts without persisting records.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestBatchRequest'
+      responses:
+        '202':
+          description: Batch accepted by the ingest boundary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestAcceptedResponse'
+        '400':
+          description: Invalid ingest batch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   parameters:
     Id:
@@ -430,12 +459,107 @@ components:
         cpuOverheadRatio: { type: number }
         memoryOverheadBytes: { type: number }
         failureRate: { type: number }
+    IngestMetadata:
+      type: object
+      properties:
+        clusters:
+          type: array
+          items:
+            $ref: '#/components/schemas/JsonObject'
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/JsonObject'
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/JsonObject'
+        sandboxes:
+          type: array
+          items:
+            $ref: '#/components/schemas/JsonObject'
+    IngestMetricSample:
+      type: object
+      required: [timestamp, name, value]
+      properties:
+        timestamp: { type: string, format: date-time }
+        name: { type: string }
+        value: { type: number }
+        unit: { type: string }
+        group: { type: string }
+        sandboxId: { type: string }
+        nodeId: { type: string }
+        imageId: { type: string }
+        runtimeType:
+          $ref: '#/components/schemas/RuntimeType'
+        attributes:
+          $ref: '#/components/schemas/JsonObject'
+    IngestBatchRequest:
+      type: object
+      required: [source]
+      properties:
+        source:
+          type: string
+          description: Collector identity, such as node-agent/node-a or containerd-collector.
+        observedAt:
+          type: string
+          format: date-time
+        metadata:
+          $ref: '#/components/schemas/IngestMetadata'
+        metrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestMetricSample'
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventRecord'
+        traces:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceSpan'
+        profiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProfileArtifact'
+    IngestCounts:
+      type: object
+      required: [metadata, metrics, events, traces, profiles]
+      properties:
+        metadata:
+          type: object
+          required: [clusters, nodes, images, sandboxes]
+          properties:
+            clusters: { type: integer }
+            nodes: { type: integer }
+            images: { type: integer }
+            sandboxes: { type: integer }
+        metrics: { type: integer }
+        events: { type: integer }
+        traces: { type: integer }
+        profiles: { type: integer }
+    IngestAccepted:
+      type: object
+      required: [status, mode, counts]
+      properties:
+        status:
+          type: string
+          enum: [accepted]
+        mode:
+          type: string
+          enum: [validation_only]
+        counts:
+          $ref: '#/components/schemas/IngestCounts'
     ErrorResponse:
       type: object
       required: [error]
       properties:
         error: { type: string }
         message: { type: string }
+        details:
+          type: array
+          items:
+            type: string
     ClusterListResponse:
       $ref: '#/components/schemas/DataResponse_ClusterArray'
     NodeListResponse:
@@ -460,6 +584,8 @@ components:
       $ref: '#/components/schemas/DataResponse_ProfileArtifactArray'
     RuntimeCompareListResponse:
       $ref: '#/components/schemas/DataResponse_RuntimeCompareRowArray'
+    IngestAcceptedResponse:
+      $ref: '#/components/schemas/DataResponse_IngestAccepted'
     DataResponse_ClusterArray:
       type: object
       required: [data]
@@ -550,3 +676,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RuntimeCompareRow'
+    DataResponse_IngestAccepted:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/IngestAccepted'

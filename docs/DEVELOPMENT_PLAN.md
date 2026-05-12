@@ -105,6 +105,11 @@ Goals:
 - Keep collectors independent from the frontend.
 - Support pluggable runtime collectors.
 
+Implemented:
+
+- Phase 3 ingest boundary skeleton: `POST /api/ingest/batch` validates collector batch payloads and returns accepted counts without persisting data yet.
+- OpenAPI contract now includes the ingest batch request, accepted response, and validation error shape.
+
 Collector candidates:
 
 - Host metrics collector.
