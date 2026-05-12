@@ -250,10 +250,24 @@ export type RecentTraceSample = {
   status: 'ok' | 'error';
 };
 
+export type RecentProfileSample = {
+  source: string;
+  acceptedAt: string;
+  id: string;
+  timestamp: string;
+  sandboxId: string;
+  profileType: ProfileArtifact['profileType'];
+  processRole: string;
+  durationMs: number;
+  sampleCount: number;
+  objectUri: string;
+};
+
 export type IngestRecent = {
   mode: 'validation_only';
   recentBatches: IngestBatchSummary[];
   recentMetrics: RecentMetricSample[];
   recentEvents: RecentEventSample[];
   recentTraces: RecentTraceSample[];
+  recentProfiles: RecentProfileSample[];
 };

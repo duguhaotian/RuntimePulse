@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
 import type { IngestCounts, IngestRecent, IngestStatus } from '../../domain/model';
 import { formatDateTime } from '../../utils/time';
-import { formatMetricValue } from '../../utils/units';
+import { formatDuration, formatMetricValue } from '../../utils/units';
 
 type CollectorStatusProps = {
   api: RuntimePulseApi;
@@ -14,7 +14,7 @@ type Snapshot = {
   totalRecords: number;
 };
 
-type RecentTab = 'metrics' | 'events' | 'traces';
+type RecentTab = 'metrics' | 'events' | 'traces' | 'profiles';
 
 const refreshIntervalMs = 5000;
 const maxSnapshots = 12;
@@ -200,6 +200,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
                 <CountPill label="metrics" value={status.lastAcceptedBatch.counts.metrics} />
                 <CountPill label="events" value={status.lastAcceptedBatch.counts.events} />
                 <CountPill label="traces" value={status.lastAcceptedBatch.counts.traces} />
+                <CountPill label="profiles" value={status.lastAcceptedBatch.counts.profiles} />
               </div>
             </div>
           ) : (
@@ -221,6 +222,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
               <th>Metrics</th>
               <th>Events</th>
               <th>Traces</th>
+              <th>Profiles</th>
               <th>Last accepted</th>
             </tr>
           </thead>
@@ -232,6 +234,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
                 <td>{source.totals.metrics.toLocaleString()}</td>
                 <td>{source.totals.events.toLocaleString()}</td>
                 <td>{source.totals.traces.toLocaleString()}</td>
+                <td>{source.totals.profiles.toLocaleString()}</td>
                 <td>{formatDateTime(source.lastAcceptedAt)}</td>
               </tr>
             ))}
@@ -285,10 +288,14 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
             <button className={recentTab === 'traces' ? 'active' : ''} onClick={() => setRecentTab('traces')}>
               Trace spans <span>{visibleRecent?.recentTraces.length ?? 0}</span>
             </button>
+            <button className={recentTab === 'profiles' ? 'active' : ''} onClick={() => setRecentTab('profiles')}>
+              Profiles <span>{visibleRecent?.recentProfiles.length ?? 0}</span>
+            </button>
           </div>
           {visibleRecent && recentTab === 'metrics' && <RecentMetricList recent={visibleRecent} />}
           {visibleRecent && recentTab === 'events' && <RecentEventList recent={visibleRecent} />}
           {visibleRecent && recentTab === 'traces' && <RecentTraceList recent={visibleRecent} />}
+          {visibleRecent && recentTab === 'profiles' && <RecentProfileList recent={visibleRecent} />}
         </section>
       )}
     </div>
@@ -400,6 +407,37 @@ function RecentTraceList({ recent }: { recent: IngestRecent }) {
   );
 }
 
+function RecentProfileList({ recent }: { recent: IngestRecent }) {
+  return (
+    <div className="recent-sample-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Profile</th>
+            <th>Type</th>
+            <th>Duration</th>
+            <th>Samples</th>
+            <th>Sandbox</th>
+            <th>Accepted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {recent.recentProfiles.slice(0, 18).map((profile) => (
+            <tr key={`${profile.id}-${profile.acceptedAt}`}>
+              <td><strong>{profile.processRole}</strong><small>{profile.objectUri}</small></td>
+              <td>{profile.profileType}</td>
+              <td>{formatDuration(profile.durationMs)}</td>
+              <td>{profile.sampleCount.toLocaleString()}</td>
+              <td>{profile.sandboxId}</td>
+              <td>{formatDateTime(profile.acceptedAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function filterRecentBySource(recent: IngestRecent, source: string): IngestRecent {
   if (source === 'all') return recent;
 
@@ -409,6 +447,7 @@ function filterRecentBySource(recent: IngestRecent, source: string): IngestRecen
     recentMetrics: recent.recentMetrics.filter((metric) => metric.source === source),
     recentEvents: recent.recentEvents.filter((event) => event.source === source),
     recentTraces: recent.recentTraces.filter((span) => span.source === source),
+    recentProfiles: recent.recentProfiles.filter((profile) => profile.source === source),
   };
 }
 

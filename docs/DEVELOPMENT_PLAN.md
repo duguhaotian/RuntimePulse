@@ -114,11 +114,12 @@ Implemented:
 - Frontend Collectors page that visualizes ingest acceptance counters, per-source totals, and latest batch status.
 - Collectors page auto-refresh and short activity trend preview for accepted batches and records.
 - Mock collector interval aligned with the frontend refresh interval so status counters visibly update during local validation.
-- Recent ingest sample endpoint: `GET /api/ingest/recent` keeps bounded in-memory previews of recent batches, metrics, events, and trace spans for debugging.
-- Collectors page recent sample preview for latest ingested metrics, events, and trace spans.
-- Collectors page tabbed recent sample browser for metrics, events, and trace spans.
+- Recent ingest sample endpoint: `GET /api/ingest/recent` keeps bounded in-memory previews of recent batches, metrics, events, trace spans, and profiles for debugging.
+- Collectors page recent sample preview for latest ingested metrics, events, trace spans, and profiles.
+- Collectors page tabbed recent sample browser for metrics, events, trace spans, and profiles.
 - Docker Compose runs two mock node collectors to validate multi-source ingest aggregation.
 - Collectors page source filter for recent samples, so multi-node ingest can be inspected per source.
+- Mock node collector emits profile artifacts so the ingest boundary exercises all frontend domain output types.
 
 Collector candidates:
 

@@ -77,7 +77,7 @@ const mockIngestStatus: IngestStatus = {
     metrics: 224,
     events: 28,
     traces: 140,
-    profiles: 0,
+    profiles: 28,
   },
   sources: [
     {
@@ -88,7 +88,7 @@ const mockIngestStatus: IngestStatus = {
         metrics: 224,
         events: 28,
         traces: 140,
-        profiles: 0,
+        profiles: 28,
       },
       firstAcceptedAt: '2026-05-09T03:52:00.000Z',
       lastAcceptedAt: '2026-05-09T04:00:00.000Z',
@@ -104,7 +104,7 @@ const mockIngestStatus: IngestStatus = {
       metrics: 8,
       events: 1,
       traces: 5,
-      profiles: 0,
+      profiles: 1,
     },
   },
   lastRejectedBatch: {
@@ -171,6 +171,20 @@ const mockIngestRecent: IngestRecent = {
       endTime: '2026-05-09T04:00:00.720Z',
       durationMs: 820,
       status: 'ok',
+    },
+  ],
+  recentProfiles: [
+    {
+      source: 'mock-node-collector/node-a',
+      acceptedAt: '2026-05-09T04:00:00.000Z',
+      id: 'collector-node-a-001-cpu-1',
+      timestamp: '2026-05-09T03:59:59.000Z',
+      sandboxId: 'collector-node-a-001',
+      profileType: 'cpu',
+      processRole: 'container-init',
+      durationMs: 720,
+      sampleCount: 451,
+      objectUri: 's3://runtimepulse/mock-profiles/node-a/collector-node-a-001/cpu.pprof',
     },
   ],
 };

@@ -673,9 +673,24 @@ components:
         durationMs: { type: number }
         status:
           $ref: '#/components/schemas/TraceStatus'
+    RecentProfileSample:
+      type: object
+      required: [source, acceptedAt, id, timestamp, sandboxId, profileType, processRole, durationMs, sampleCount, objectUri]
+      properties:
+        source: { type: string }
+        acceptedAt: { type: string, format: date-time }
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        sandboxId: { type: string }
+        profileType:
+          $ref: '#/components/schemas/ProfileType'
+        processRole: { type: string }
+        durationMs: { type: number }
+        sampleCount: { type: integer }
+        objectUri: { type: string }
     IngestRecent:
       type: object
-      required: [mode, recentBatches, recentMetrics, recentEvents, recentTraces]
+      required: [mode, recentBatches, recentMetrics, recentEvents, recentTraces, recentProfiles]
       properties:
         mode:
           type: string
@@ -696,6 +711,10 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RecentTraceSample'
+        recentProfiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentProfileSample'
     ErrorResponse:
       type: object
       required: [error]

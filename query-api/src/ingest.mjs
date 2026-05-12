@@ -17,6 +17,7 @@ export function createIngestStatus() {
     recentMetrics: [],
     recentEvents: [],
     recentTraces: [],
+    recentProfiles: [],
     lastAcceptedBatch: undefined,
     lastRejectedBatch: undefined,
   };
@@ -108,6 +109,7 @@ export function ingestRecentSnapshot(status) {
     recentMetrics: [...status.recentMetrics],
     recentEvents: [...status.recentEvents],
     recentTraces: [...status.recentTraces],
+    recentProfiles: [...status.recentProfiles],
   };
 }
 
@@ -231,6 +233,21 @@ function rememberRecentPayload(status, payload, batch) {
       endTime: row.endTime,
       durationMs: row.durationMs,
       status: row.status,
+    }, maxRecentRows);
+  }
+
+  for (const row of (Array.isArray(payload.profiles) ? payload.profiles : []).slice(0, maxRowsPerBatchKind)) {
+    prependBounded(status.recentProfiles, {
+      source: batch.source,
+      acceptedAt: batch.acceptedAt,
+      id: row.id,
+      timestamp: row.timestamp,
+      sandboxId: row.sandboxId,
+      profileType: row.profileType,
+      processRole: row.processRole,
+      durationMs: row.durationMs,
+      sampleCount: row.sampleCount,
+      objectUri: row.objectUri,
     }, maxRecentRows);
   }
 }

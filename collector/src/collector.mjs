@@ -100,7 +100,7 @@ function buildBatch(now, index) {
       },
     ],
     traces: traceSpans(timestamp, sandboxId, runtimeType, phaseDurations),
-    profiles: [],
+    profiles: profileArtifacts(timestamp, sandboxId, runtimeType, index, startupDurationMs),
   };
 }
 
@@ -139,6 +139,28 @@ function traceSpans(timestamp, sandboxId, runtimeType, phases) {
       attributes: { runtimeType, collector: source },
     };
   });
+}
+
+function profileArtifacts(timestamp, sandboxId, runtimeType, index, startupDurationMs) {
+  const profileType = index % 4 === 0 ? 'block_io' : runtimeType === 'kata' ? 'off_cpu' : 'cpu';
+  const sampleCount = profileType === 'block_io'
+    ? 300 + (index % 9) * 24
+    : runtimeType === 'kata'
+      ? 620 + (index % 6) * 55
+      : 420 + (index % 7) * 31;
+
+  return [
+    {
+      id: `${sandboxId}-${profileType}-${index}`,
+      timestamp,
+      sandboxId,
+      profileType,
+      processRole: runtimeType === 'kata' ? 'shim-v2' : 'container-init',
+      durationMs: Math.max(500, Math.round(startupDurationMs * 0.6)),
+      sampleCount,
+      objectUri: `s3://runtimepulse/mock-profiles/${nodeId}/${sandboxId}/${profileType}.pprof`,
+    },
+  ];
 }
 
 function metric(timestamp, name, value, unit, group, dimensions) {
