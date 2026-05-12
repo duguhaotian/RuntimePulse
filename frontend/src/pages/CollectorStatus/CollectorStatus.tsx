@@ -14,6 +14,8 @@ type Snapshot = {
   totalRecords: number;
 };
 
+type RecentTab = 'metrics' | 'events' | 'traces';
+
 const refreshIntervalMs = 5000;
 const maxSnapshots = 12;
 
@@ -24,6 +26,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
   const [lastRefreshAt, setLastRefreshAt] = useState<string>();
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [refreshTick, setRefreshTick] = useState(0);
+  const [recentTab, setRecentTab] = useState<RecentTab>('metrics');
 
   useEffect(() => {
     let active = true;
@@ -259,11 +262,20 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
             </div>
             <span>{recent.recentBatches.length} batches</span>
           </div>
-          <div className="recent-ingest-grid">
-            <RecentMetricList recent={recent} />
-            <RecentEventList recent={recent} />
-            <RecentTraceList recent={recent} />
+          <div className="recent-tab-bar" role="tablist" aria-label="Recent ingest sample kind">
+            <button className={recentTab === 'metrics' ? 'active' : ''} onClick={() => setRecentTab('metrics')}>
+              Metrics <span>{recent.recentMetrics.length}</span>
+            </button>
+            <button className={recentTab === 'events' ? 'active' : ''} onClick={() => setRecentTab('events')}>
+              Events <span>{recent.recentEvents.length}</span>
+            </button>
+            <button className={recentTab === 'traces' ? 'active' : ''} onClick={() => setRecentTab('traces')}>
+              Trace spans <span>{recent.recentTraces.length}</span>
+            </button>
           </div>
+          {recentTab === 'metrics' && <RecentMetricList recent={recent} />}
+          {recentTab === 'events' && <RecentEventList recent={recent} />}
+          {recentTab === 'traces' && <RecentTraceList recent={recent} />}
         </section>
       )}
     </div>
@@ -290,66 +302,87 @@ function CountPill({ label, value }: { label: string; value: number }) {
 
 function RecentMetricList({ recent }: { recent: IngestRecent }) {
   return (
-    <div className="recent-sample-card">
-      <div className="recent-sample-header">
-        <strong>Metrics</strong>
-        <span>{recent.recentMetrics.length}</span>
-      </div>
-      <div className="recent-sample-list">
-        {recent.recentMetrics.slice(0, 6).map((metric, index) => (
-          <div className="recent-sample-row" key={`${metric.acceptedAt}-${metric.name}-${index}`}>
-            <div>
-              <strong>{metric.name}</strong>
-              <span>{metric.sandboxId ?? metric.nodeId ?? metric.source}</span>
-            </div>
-            <b>{formatMetricValue(metric.value, metric.unit ?? '')}</b>
-          </div>
-        ))}
-      </div>
+    <div className="recent-sample-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Value</th>
+            <th>Scope</th>
+            <th>Group</th>
+            <th>Accepted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {recent.recentMetrics.slice(0, 18).map((metric, index) => (
+            <tr key={`${metric.acceptedAt}-${metric.name}-${index}`}>
+              <td><strong>{metric.name}</strong></td>
+              <td>{formatMetricValue(metric.value, metric.unit ?? '')}</td>
+              <td>{metric.sandboxId ?? metric.nodeId ?? metric.source}</td>
+              <td>{metric.group ?? '-'}</td>
+              <td>{formatDateTime(metric.acceptedAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
 
 function RecentEventList({ recent }: { recent: IngestRecent }) {
   return (
-    <div className="recent-sample-card">
-      <div className="recent-sample-header">
-        <strong>Events</strong>
-        <span>{recent.recentEvents.length}</span>
-      </div>
-      <div className="recent-sample-list">
-        {recent.recentEvents.slice(0, 6).map((event) => (
-          <div className="recent-sample-row" key={event.id}>
-            <div>
-              <strong>{event.eventName}</strong>
-              <span>{event.message}</span>
-            </div>
-            <b className={`severity-${event.severity}`}>{event.severity}</b>
-          </div>
-        ))}
-      </div>
+    <div className="recent-sample-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Event</th>
+            <th>Severity</th>
+            <th>Scope</th>
+            <th>Message</th>
+            <th>Accepted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {recent.recentEvents.slice(0, 18).map((event) => (
+            <tr key={event.id}>
+              <td><strong>{event.eventName}</strong></td>
+              <td><span className={`severity-pill severity-${event.severity}`}>{event.severity}</span></td>
+              <td>{event.sandboxId ?? event.nodeId ?? event.source}</td>
+              <td>{event.message}</td>
+              <td>{formatDateTime(event.acceptedAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
 
 function RecentTraceList({ recent }: { recent: IngestRecent }) {
   return (
-    <div className="recent-sample-card">
-      <div className="recent-sample-header">
-        <strong>Trace spans</strong>
-        <span>{recent.recentTraces.length}</span>
-      </div>
-      <div className="recent-sample-list">
-        {recent.recentTraces.slice(0, 6).map((span) => (
-          <div className="recent-sample-row" key={`${span.traceId}-${span.spanId}-${span.acceptedAt}`}>
-            <div>
-              <strong>{span.spanName}</strong>
-              <span>{span.sandboxId ?? span.traceId}</span>
-            </div>
-            <b>{formatMetricValue(span.durationMs, 'ms')}</b>
-          </div>
-        ))}
-      </div>
+    <div className="recent-sample-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Span</th>
+            <th>Duration</th>
+            <th>Sandbox</th>
+            <th>Status</th>
+            <th>Accepted</th>
+          </tr>
+        </thead>
+        <tbody>
+          {recent.recentTraces.slice(0, 18).map((span) => (
+            <tr key={`${span.traceId}-${span.spanId}-${span.acceptedAt}`}>
+              <td><strong>{span.spanName}</strong></td>
+              <td>{formatMetricValue(span.durationMs, 'ms')}</td>
+              <td>{span.sandboxId ?? span.traceId}</td>
+              <td>{span.status}</td>
+              <td>{formatDateTime(span.acceptedAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
