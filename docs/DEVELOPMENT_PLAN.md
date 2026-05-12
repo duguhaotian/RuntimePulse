@@ -58,6 +58,7 @@ Implemented:
 - Environment-based API switching with `VITE_RUNTIMEPULSE_API_BASE_URL`; empty value keeps the mock adapter.
 - Minimal `runtimepulse-query-api` service that serves mock telemetry through the planned HTTP endpoints.
 - Docker Compose wiring for frontend-to-query-api validation through `/api`.
+- Storage model and Query API boundary design: [`docs/STORAGE_DESIGN.md`](STORAGE_DESIGN.md)
 
 Query API contract:
 
@@ -89,11 +90,12 @@ Time-range capable endpoints accept optional ISO timestamp query parameters:
 - Events and profiles filter records by timestamp.
 - Trace spans are included when their `[startTime, endTime]` interval overlaps the requested range.
 
-Candidate storage split:
+Storage design:
 
 - PostgreSQL for metadata and object relationships.
-- ClickHouse for metrics, events, and trace spans.
+- ClickHouse for metrics, events, trace spans, and lifecycle stage samples.
 - Object storage for profiles, flamegraphs, and diagnostic bundles.
+- Query API composes storage data and keeps the frontend isolated from database-shaped records.
 
 ## Phase 3: Collector Integration
 

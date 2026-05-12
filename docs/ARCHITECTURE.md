@@ -54,6 +54,8 @@ Frontend Prototype
 
 The frontend depends on a stable TypeScript API contract rather than direct storage or collector details.
 
+The planned Query API and storage boundaries are documented in [`STORAGE_DESIGN.md`](STORAGE_DESIGN.md). That document defines the PostgreSQL metadata model, ClickHouse analytical model, object storage layout, and per-endpoint query ownership.
+
 ## Frontend Structure
 
 ```text

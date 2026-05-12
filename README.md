@@ -16,6 +16,8 @@ RuntimePulse is an early-stage sandbox runtime metrics platform prototype. Phase
 - [Architecture](docs/ARCHITECTURE.md)
 - [Development Plan](docs/DEVELOPMENT_PLAN.md)
 - [Git Workflow](docs/GIT_WORKFLOW.md)
+- [OpenAPI Contract](docs/openapi.yaml)
+- [Storage Design](docs/STORAGE_DESIGN.md)
 
 ## Container Deployment
 
