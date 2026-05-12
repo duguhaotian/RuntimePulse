@@ -10,7 +10,6 @@ import {
 import {
   clusters,
   eventsForSandbox,
-  filterSandboxes,
   images,
   metricsForSandbox,
   nodes,
@@ -19,10 +18,23 @@ import {
   sandboxes,
   traceForSandbox,
 } from './mockData.mjs';
+import {
+  createLiveStore,
+  liveClusters,
+  liveEventsForSandbox,
+  liveImages,
+  liveMetricsForSandbox,
+  liveNodes,
+  liveProfilesForSandbox,
+  liveSandboxes,
+  liveTraceForSandbox,
+  recordLiveBatch,
+} from './liveData.mjs';
 
 const port = Number(process.env.PORT ?? 8081);
 const maxBodyBytes = 1024 * 1024;
 const ingestStatus = createIngestStatus();
+const liveStore = createLiveStore();
 
 const server = createServer((request, response) => {
   handleRequest(request, response).catch((error) => {
@@ -52,10 +64,10 @@ async function handleRequest(request, response) {
 
   if (path === '/ingest/status') return sendData(response, ingestStatusSnapshot(ingestStatus));
   if (path === '/ingest/recent') return sendData(response, ingestRecentSnapshot(ingestStatus));
-  if (path === '/clusters') return sendData(response, clusters);
-  if (path === '/nodes') return sendData(response, nodes);
-  if (path === '/images') return sendData(response, images);
-  if (path === '/sandboxes') return sendData(response, filterSandboxes(Object.fromEntries(url.searchParams)));
+  if (path === '/clusters') return sendData(response, mergeById(clusters, liveClusters(liveStore)));
+  if (path === '/nodes') return sendData(response, mergeById(nodes, liveNodes(liveStore)));
+  if (path === '/images') return sendData(response, mergeById(images, liveImages(liveStore)));
+  if (path === '/sandboxes') return sendData(response, filterSandboxRows(allSandboxes(), Object.fromEntries(url.searchParams)));
   if (path === '/runtimes/compare') return sendData(response, runtimeComparison);
 
   const match = path.match(/^\/(sandboxes|nodes|images)\/([^/]+)(?:\/([^/]+))?$/);
@@ -64,8 +76,8 @@ async function handleRequest(request, response) {
   const [, resource, rawId, child] = match;
   const id = decodeURIComponent(rawId);
 
-  if (resource === 'nodes') return sendOptional(response, nodes.find((node) => node.id === id));
-  if (resource === 'images') return sendOptional(response, images.find((image) => image.id === id));
+  if (resource === 'nodes') return sendOptional(response, mergeById(nodes, liveNodes(liveStore)).find((node) => node.id === id));
+  if (resource === 'images') return sendOptional(response, mergeById(images, liveImages(liveStore)).find((image) => image.id === id));
   if (resource === 'sandboxes') return sendSandboxResource(response, id, child, timeRangeFromSearchParams(url.searchParams));
 
   return sendJson(response, 404, { error: 'not_found' });
@@ -85,6 +97,7 @@ async function handleIngestBatch(request, response) {
   }
 
   recordAcceptedIngestBatch(ingestStatus, payload, result);
+  recordLiveBatch(liveStore, payload);
 
   return sendJson(response, 202, {
     data: {
@@ -96,16 +109,82 @@ async function handleIngestBatch(request, response) {
 }
 
 function sendSandboxResource(response, id, child, range) {
-  const sandbox = sandboxes.find((item) => item.id === id);
+  const sandbox = allSandboxes().find((item) => item.id === id);
   if (!sandbox) return sendJson(response, 404, { error: 'not_found' });
 
   if (!child) return sendData(response, sandbox);
-  if (child === 'metrics') return sendData(response, filterMetricSeries(metricsForSandbox(id), range));
-  if (child === 'events') return sendData(response, filterTimestamped(eventsForSandbox(id), range, 'timestamp'));
-  if (child === 'trace') return sendData(response, filterTraceSpans(traceForSandbox(id), range));
-  if (child === 'profiles') return sendData(response, filterTimestamped(profilesForSandbox(id), range, 'timestamp'));
+  if (child === 'metrics') return sendData(response, filterMetricSeries(metricsForSandboxMerged(id), range));
+  if (child === 'events') return sendData(response, filterTimestamped(eventsForSandboxMerged(id), range, 'timestamp'));
+  if (child === 'trace') return sendData(response, filterTraceSpans(traceForSandboxMerged(id), range));
+  if (child === 'profiles') return sendData(response, filterTimestamped(profilesForSandboxMerged(id), range, 'timestamp'));
 
   return sendJson(response, 404, { error: 'not_found' });
+}
+
+function allSandboxes() {
+  return mergeById(sandboxes, liveSandboxes(liveStore));
+}
+
+function metricsForSandboxMerged(id) {
+  const base = mockSandboxExists(id) ? metricsForSandbox(id) : [];
+  const live = liveMetricsForSandbox(liveStore, id);
+  if (live.length > 0) return live;
+  return base;
+}
+
+function eventsForSandboxMerged(id) {
+  const base = mockSandboxExists(id) ? eventsForSandbox(id) : [];
+  return mergeById(base, liveEventsForSandbox(liveStore, id));
+}
+
+function traceForSandboxMerged(id) {
+  const base = mockSandboxExists(id) ? traceForSandbox(id) : [];
+  return mergeTraceSpans(base, liveTraceForSandbox(liveStore, id));
+}
+
+function profilesForSandboxMerged(id) {
+  const base = mockSandboxExists(id) ? profilesForSandbox(id) : [];
+  return mergeById(base, liveProfilesForSandbox(liveStore, id));
+}
+
+function mockSandboxExists(id) {
+  return sandboxes.some((sandbox) => sandbox.id === id);
+}
+
+function mergeById(baseRows, liveRows) {
+  const byId = new Map(baseRows.map((row) => [row.id, row]));
+  for (const row of liveRows) byId.set(row.id, mergeRows(byId.get(row.id), row));
+  return Array.from(byId.values());
+}
+
+function mergeRows(base, live) {
+  if (!base) return live;
+
+  return Object.fromEntries(
+    Object.entries({ ...base, ...live }).map(([key, value]) => {
+      if (value === 0 && typeof base[key] === 'number' && base[key] > 0) return [key, base[key]];
+      if (value === 'collector-observed' && typeof base[key] === 'string') return [key, base[key]];
+      if (value === undefined) return [key, base[key]];
+      return [key, value];
+    }),
+  );
+}
+
+function mergeTraceSpans(baseRows, liveRows) {
+  const byId = new Map(baseRows.map((row) => [`${row.traceId}:${row.spanId}`, row]));
+  for (const row of liveRows) byId.set(`${row.traceId}:${row.spanId}`, row);
+  return Array.from(byId.values());
+}
+
+function filterSandboxRows(rows, query) {
+  return rows.filter((sandbox) => {
+    const runtimeMatch = !query.runtimeType || sandbox.runtimeType === query.runtimeType;
+    const statusMatch = !query.status || sandbox.status === query.status;
+    const text = query.text?.trim().toLowerCase();
+    const textMatch = !text || [sandbox.id, sandbox.nodeId, sandbox.workloadName, sandbox.imageRef, sandbox.namespace]
+      .some((value) => String(value).toLowerCase().includes(text));
+    return runtimeMatch && statusMatch && textMatch;
+  });
 }
 
 function sendOptional(response, payload) {

@@ -44,9 +44,16 @@ function buildBatch(now, index) {
   const timestamp = now.toISOString();
   const sandboxId = `collector-${nodeId}-${String(index % 12).padStart(3, '0')}`;
   const runtimeType = index % 5 === 0 ? 'kata' : index % 3 === 0 ? 'gvisor' : 'runc';
+  const imageId = runtimeType === 'kata' ? 'img-worker' : 'img-api';
+  const imageRef = runtimeType === 'kata' ? 'registry.local/worker:v17' : 'registry.local/api:v42';
   const containerCount = 18 + (index % 7) + (runtimeType === 'kata' ? 2 : 0);
   const ioPressure = Number((0.08 + Math.sin(index / 3) * 0.04 + (runtimeType === 'kata' ? 0.12 : 0)).toFixed(3));
   const startupDurationMs = runtimeType === 'kata' ? 6400 + (index % 4) * 900 : runtimeType === 'gvisor' ? 2800 + (index % 3) * 360 : 940 + (index % 5) * 110;
+  const cpuAvg = runtimeType === 'gvisor' ? 0.28 : runtimeType === 'kata' ? 0.18 : 0.11;
+  const memoryPeakBytes = runtimeType === 'kata' ? 1.1 * 1024 ** 3 : runtimeType === 'gvisor' ? 780 * 1024 ** 2 : 360 * 1024 ** 2;
+  const ioReadBytes = runtimeType === 'kata' ? 38 * 1024 ** 2 : runtimeType === 'gvisor' ? 22 * 1024 ** 2 : 9 * 1024 ** 2;
+  const networkRxBytes = runtimeType === 'gvisor' ? 11 * 1024 ** 2 : 5 * 1024 ** 2;
+  const createdAt = new Date(now.getTime() - startupDurationMs).toISOString();
   const phaseDurations = lifecyclePhases(runtimeType, startupDurationMs);
 
   return {
@@ -65,17 +72,33 @@ function buildBatch(now, index) {
       sandboxes: [
         {
           id: sandboxId,
+          clusterId: 'cluster-prod',
           nodeId,
+          namespace: 'collector',
+          workloadId: `collector-smoke-${runtimeType}`,
           runtimeType,
-          imageRef: runtimeType === 'kata' ? 'registry.local/worker:v17' : 'registry.local/api:v42',
+          runtimeVersion: runtimeVersion(runtimeType),
+          imageId,
+          imageRef,
           workloadName: `collector-smoke-${runtimeType}`,
           status: 'running',
+          createdAt,
+          startedAt: timestamp,
+          startupDurationMs,
+          cpuAvg,
+          memoryPeakBytes,
+          labels: { app: 'collector-smoke', runtime: runtimeType },
+          attributes: { source },
         },
       ],
     },
     metrics: [
       metric(timestamp, 'node.container.count', containerCount, 'count', 'lifecycle', { nodeId }),
-      metric(timestamp, 'node.psi.io.some', ioPressure, 'ratio', 'pressure', { nodeId }),
+      metric(timestamp, 'node.psi.io.some', ioPressure, 'ratio', 'pressure', { nodeId, sandboxId, runtimeType }),
+      metric(timestamp, 'sandbox.cpu.usage_ratio', cpuAvg, 'ratio', 'cpu', { nodeId, sandboxId, runtimeType }),
+      metric(timestamp, 'sandbox.memory.working_set_bytes', memoryPeakBytes, 'bytes', 'memory', { nodeId, sandboxId, runtimeType }),
+      metric(timestamp, 'sandbox.io.read_bytes', ioReadBytes, 'bytes/s', 'io', { nodeId, sandboxId, runtimeType }),
+      metric(timestamp, 'sandbox.network.rx_bytes', networkRxBytes, 'bytes/s', 'network', { nodeId, sandboxId, runtimeType }),
       metric(timestamp, 'sandbox.startup.duration_ms', startupDurationMs, 'ms', 'startup', { nodeId, sandboxId, runtimeType }),
       ...phaseDurations.map((phase) => metric(timestamp, `sandbox.lifecycle.${phase.name}.duration_ms`, phase.durationMs, 'ms', 'lifecycle', {
         nodeId,
@@ -139,6 +162,12 @@ function traceSpans(timestamp, sandboxId, runtimeType, phases) {
       attributes: { runtimeType, collector: source },
     };
   });
+}
+
+function runtimeVersion(runtimeType) {
+  if (runtimeType === 'gvisor') return 'runsc-collector';
+  if (runtimeType === 'kata') return 'kata-collector';
+  return 'runc-collector';
 }
 
 function profileArtifacts(timestamp, sandboxId, runtimeType, index, startupDurationMs) {

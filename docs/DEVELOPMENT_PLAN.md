@@ -120,6 +120,7 @@ Implemented:
 - Docker Compose runs two mock node collectors to validate multi-source ingest aggregation.
 - Collectors page source filter for recent samples, so multi-node ingest can be inspected per source.
 - Mock node collector emits profile artifacts so the ingest boundary exercises all frontend domain output types.
+- Query API keeps accepted collector payloads in an in-memory live query store and merges them into cluster, node, sandbox, metric, event, trace, and profile GET responses.
 
 Collector candidates:
 
