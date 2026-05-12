@@ -721,7 +721,7 @@ function ImageDownloadTimeline({ image }: { image: Image }) {
         <SummaryCard label="Layers" value={String(image.layerCount)} caption="full layer pull" />
       </div>
       <div className="image-temporal-grid single">
-        <MetricChart height={180} series={[downloadSeries.duration]} />
+        <MetricChart height={210} series={downloadSeries} stacked />
       </div>
       <div className="download-timeline">
         {steps.map((step) => (
@@ -827,31 +827,28 @@ function lazyImageCacheSeries(image: Image): { hitRatio: MetricSeries; remoteRea
   };
 }
 
-function eagerImageDownloadSeries(image: Image): { duration: MetricSeries } {
+function eagerImageDownloadSeries(image: Image): MetricSeries[] {
   const steps = image.downloadTimeline ?? [];
   const start = Date.now() - Math.max(imageDownloadDuration(image), 1);
   let cursor = start;
+  const timeline = [{ timestamp: new Date(start).toISOString(), completedStepIndex: -1 }];
 
-  const points = steps.flatMap((step) => {
-    const stepStart = cursor;
-    const stepEnd = cursor + step.durationMs;
-    cursor = stepEnd;
-    return [
-      { timestamp: new Date(stepStart).toISOString(), duration: step.durationMs },
-      { timestamp: new Date(stepEnd).toISOString(), duration: step.durationMs },
-    ];
+  steps.forEach((step, index) => {
+    cursor += step.durationMs;
+    timeline.push({ timestamp: new Date(cursor).toISOString(), completedStepIndex: index });
   });
 
-  return {
-    duration: {
-      id: `${image.id}-eager-download-duration`,
-      name: 'image.eager.download_stage_ms',
-      label: 'Stage duration',
-      unit: 'ms',
-      group: 'startup',
-      points: points.map((point) => ({ timestamp: point.timestamp, value: point.duration })),
-    },
-  };
+  return steps.map((step, stepIndex) => ({
+    id: `${image.id}-eager-${step.phase}`,
+    name: `image.eager.${step.phase}_ms`,
+    label: step.name,
+    unit: 'ms',
+    group: 'startup',
+    points: timeline.map((point) => ({
+      timestamp: point.timestamp,
+      value: point.completedStepIndex >= stepIndex ? step.durationMs : 0,
+    })),
+  }));
 }
 
 function averageMetricValue(series?: MetricSeries) {

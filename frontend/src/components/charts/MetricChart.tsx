@@ -14,6 +14,7 @@ type MetricChartProps = {
   selectable?: boolean;
   selectedRange?: { from: string; to: string };
   onSelectRange?: (range: { from: string; to: string }) => void;
+  stacked?: boolean;
 };
 
 export function MetricChart({
@@ -26,6 +27,7 @@ export function MetricChart({
   selectable = false,
   selectedRange,
   series,
+  stacked = false,
 }: MetricChartProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
@@ -33,9 +35,10 @@ export function MetricChart({
   const [dragEndIndex, setDragEndIndex] = useState<number | null>(null);
   const width = 760;
   const padding = { top: 18, right: 22, bottom: 28, left: 58 };
-  const allPoints = series.flatMap((item) => item.points.map((point) => point.value));
+  const stackedTotals = stacked ? buildStackedTotals(series) : [];
+  const allPoints = stacked ? stackedTotals : series.flatMap((item) => item.points.map((point) => point.value));
   const maxValue = Math.max(...allPoints, 1);
-  const minValue = Math.min(...allPoints, 0);
+  const minValue = stacked ? 0 : Math.min(...allPoints, 0);
   const firstSeries = series[0];
   const startTime = firstSeries?.points[0] ? toMs(firstSeries.points[0].timestamp) : 0;
   const endTime = firstSeries?.points.at(-1) ? toMs(firstSeries.points.at(-1)!.timestamp) : startTime;
@@ -171,7 +174,7 @@ export function MetricChart({
         {hoverX !== undefined && (
           <line x1={hoverX} y1={padding.top} x2={hoverX} y2={height - padding.bottom} className="hover-marker-line" />
         )}
-        {series.map((item, index) => {
+        {stacked ? renderStackedSeries(series, y, x) : series.map((item, index) => {
           const color = chartPalette[index % chartPalette.length];
 
           return (
@@ -194,6 +197,13 @@ export function MetricChart({
       {hoverPoint && (
         <div className="metric-tooltip" style={{ left: `${tooltipLeft}%` }}>
           <strong>{formatDateTime(hoverPoint.timestamp)}</strong>
+          {stacked && (
+            <span>
+              <i style={{ background: '#f8fafc' }} />
+              <b>Total</b>
+              {formatMetricValue(series.reduce((sum, item) => sum + (item.points[hoverIndex ?? 0]?.value ?? 0), 0), firstSeries?.unit ?? '')}
+            </span>
+          )}
           {series.map((item, index) => {
             const point = item.points[hoverIndex ?? 0];
             if (!point) return null;
@@ -210,6 +220,45 @@ export function MetricChart({
       )}
     </div>
   );
+}
+
+function renderStackedSeries(
+  series: MetricSeries[],
+  y: (value: number) => number,
+  x: (index: number, count: number) => number,
+) {
+  const pointCount = series[0]?.points.length ?? 0;
+  const previous = Array.from({ length: pointCount }, () => 0);
+
+  return series.map((item, index) => {
+    const color = chartPalette[index % chartPalette.length];
+    const bottom = previous.map((value) => value);
+    const top = item.points.map((point, pointIndex) => {
+      previous[pointIndex] += point.value;
+      return previous[pointIndex];
+    });
+    const topPoints = top.map((value, pointIndex) => `${x(pointIndex, pointCount)},${y(value)}`).join(' ');
+    const bottomPoints = bottom.map((value, pointIndex) => `${x(pointIndex, pointCount)},${y(value)}`).reverse().join(' ');
+
+    return (
+      <g key={item.id}>
+        <polygon points={`${topPoints} ${bottomPoints}`} fill={color} opacity="0.28" />
+        <polyline
+          points={top.map((value, pointIndex) => `${x(pointIndex, pointCount)},${y(value)}`).join(' ')}
+          fill="none"
+          stroke={color}
+          strokeWidth="2.5"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      </g>
+    );
+  });
+}
+
+function buildStackedTotals(series: MetricSeries[]) {
+  const pointCount = series[0]?.points.length ?? 0;
+  return Array.from({ length: pointCount }, (_, pointIndex) => series.reduce((sum, item) => sum + (item.points[pointIndex]?.value ?? 0), 0));
 }
 
 function buildTicks(minValue: number, maxValue: number, countAxis: boolean) {
