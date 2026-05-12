@@ -38,7 +38,7 @@ const server = createServer((request, response) => {
 
     if (resource === 'nodes') return sendOptional(response, nodes.find((node) => node.id === id));
     if (resource === 'images') return sendOptional(response, images.find((image) => image.id === id));
-    if (resource === 'sandboxes') return sendSandboxResource(response, id, child);
+    if (resource === 'sandboxes') return sendSandboxResource(response, id, child, timeRangeFromSearchParams(url.searchParams));
 
     return sendJson(response, 404, { error: 'not_found' });
   } catch (error) {
@@ -50,15 +50,15 @@ server.listen(port, () => {
   console.log(`RuntimePulse query API listening on ${port}`);
 });
 
-function sendSandboxResource(response, id, child) {
+function sendSandboxResource(response, id, child, range) {
   const sandbox = sandboxes.find((item) => item.id === id);
   if (!sandbox) return sendJson(response, 404, { error: 'not_found' });
 
   if (!child) return sendData(response, sandbox);
-  if (child === 'metrics') return sendData(response, metricsForSandbox(id));
-  if (child === 'events') return sendData(response, eventsForSandbox(id));
-  if (child === 'trace') return sendData(response, traceForSandbox(id));
-  if (child === 'profiles') return sendData(response, profilesForSandbox(id));
+  if (child === 'metrics') return sendData(response, filterMetricSeries(metricsForSandbox(id), range));
+  if (child === 'events') return sendData(response, filterTimestamped(eventsForSandbox(id), range, 'timestamp'));
+  if (child === 'trace') return sendData(response, filterTraceSpans(traceForSandbox(id), range));
+  if (child === 'profiles') return sendData(response, filterTimestamped(profilesForSandbox(id), range, 'timestamp'));
 
   return sendJson(response, 404, { error: 'not_found' });
 }
@@ -95,4 +95,54 @@ function sendOptions(response) {
 
 function stripApiPrefix(pathname) {
   return pathname.startsWith('/api/') ? pathname.slice(4) : pathname;
+}
+
+function timeRangeFromSearchParams(searchParams) {
+  const from = searchParams.get('from');
+  const to = searchParams.get('to');
+  const fromMs = from ? Date.parse(from) : undefined;
+  const toMs = to ? Date.parse(to) : undefined;
+
+  return {
+    fromMs: Number.isFinite(fromMs) ? fromMs : undefined,
+    toMs: Number.isFinite(toMs) ? toMs : undefined,
+  };
+}
+
+function filterMetricSeries(seriesList, range) {
+  if (!hasRange(range)) return seriesList;
+
+  return seriesList.map((series) => ({
+    ...series,
+    points: series.points.filter((point) => timestampInRange(point.timestamp, range)),
+  }));
+}
+
+function filterTimestamped(rows, range, field) {
+  if (!hasRange(range)) return rows;
+  return rows.filter((row) => timestampInRange(row[field], range));
+}
+
+function filterTraceSpans(spans, range) {
+  if (!hasRange(range)) return spans;
+  return spans.filter((span) => intervalOverlapsRange(span.startTime, span.endTime, range));
+}
+
+function timestampInRange(timestamp, range) {
+  const value = Date.parse(timestamp);
+  if (range.fromMs !== undefined && value < range.fromMs) return false;
+  if (range.toMs !== undefined && value > range.toMs) return false;
+  return true;
+}
+
+function intervalOverlapsRange(startTime, endTime, range) {
+  const start = Date.parse(startTime);
+  const end = Date.parse(endTime);
+  if (range.fromMs !== undefined && end < range.fromMs) return false;
+  if (range.toMs !== undefined && start > range.toMs) return false;
+  return true;
+}
+
+function hasRange(range) {
+  return range.fromMs !== undefined || range.toMs !== undefined;
 }

@@ -76,6 +76,16 @@ GET /api/images/{id}
 GET /api/nodes/{id}
 ```
 
+Time-range capable endpoints accept optional ISO timestamp query parameters:
+
+```text
+?from=2026-05-09T03:00:00.000Z&to=2026-05-09T04:00:00.000Z
+```
+
+- Metrics filter individual points by timestamp.
+- Events and profiles filter records by timestamp.
+- Trace spans are included when their `[startTime, endTime]` interval overlaps the requested range.
+
 Candidate storage split:
 
 - PostgreSQL for metadata and object relationships.
