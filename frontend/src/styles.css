@@ -221,6 +221,20 @@ button { cursor: pointer; }
   padding: 7px 10px;
 }
 
+.refresh-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+  padding: 6px 9px;
+  white-space: nowrap;
+}
+
 .main-panel {
   padding: 24px 28px 40px;
   overflow: auto;

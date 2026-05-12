@@ -121,6 +121,7 @@ Implemented:
 - Collectors page source filter for recent samples, so multi-node ingest can be inspected per source.
 - Mock node collector emits profile artifacts so the ingest boundary exercises all frontend domain output types.
 - Query API keeps accepted collector payloads in an in-memory live query store and merges them into cluster, node, sandbox, metric, event, trace, and profile GET responses.
+- Cluster, node, and sandbox detail pages auto-refresh query data so live collector updates are visible outside the Collectors page.
 
 Collector candidates:
 

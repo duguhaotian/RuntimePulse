@@ -14,6 +14,8 @@ type NodeDetailProps = {
   onSelectSandbox: (id: string) => void;
 };
 
+const refreshIntervalMs = 5000;
+
 export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailProps) {
   const [node, setNode] = useState<Node>();
   const [cluster, setCluster] = useState<Cluster>();
@@ -21,37 +23,47 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
   const [images, setImages] = useState<Image[]>([]);
   const [metrics, setMetrics] = useState<Record<string, MetricSeries[]>>({});
   const [traces, setTraces] = useState<Record<string, TraceSpan[]>>({});
+  const [lastRefreshAt, setLastRefreshAt] = useState<string>();
   const [selectedLifecycleRange, setSelectedLifecycleRange] = useState<ContainerRange>();
   const [modal, setModal] = useState<{ type: 'image' | 'sandbox'; id: string }>();
 
   useEffect(() => {
     let mounted = true;
-    api.getNode(nodeId).then(async (nextNode) => {
-      if (!mounted || !nextNode) return;
+    let timer: number | undefined;
 
-      const [clusters, allImages, allSandboxes] = await Promise.all([
-        api.listClusters(),
-        api.listImages(),
-        api.listSandboxes(),
-      ]);
-      const nodeSandboxes = allSandboxes.filter((sandbox) => sandbox.nodeId === nextNode.id);
-      const nodeImages = allImages.filter((image) => nodeSandboxes.some((sandbox) => sandbox.imageId === image.id));
-      const [metricEntries, traceEntries] = await Promise.all([
-        Promise.all(nodeSandboxes.map(async (sandbox) => [sandbox.id, await api.getSandboxMetrics(sandbox.id)] as const)),
-        Promise.all(nodeSandboxes.map(async (sandbox) => [sandbox.id, await api.getSandboxTrace(sandbox.id)] as const)),
-      ]);
+    const refresh = () => {
+      api.getNode(nodeId).then(async (nextNode) => {
+        if (!mounted || !nextNode) return;
 
-      if (!mounted) return;
-      setNode(nextNode);
-      setCluster(clusters.find((item) => item.id === nextNode.clusterId));
-      setSandboxes(nodeSandboxes);
-      setImages(nodeImages);
-      setMetrics(Object.fromEntries(metricEntries));
-      setTraces(Object.fromEntries(traceEntries));
-    });
+        const [clusters, allImages, allSandboxes] = await Promise.all([
+          api.listClusters(),
+          api.listImages(),
+          api.listSandboxes(),
+        ]);
+        const nodeSandboxes = allSandboxes.filter((sandbox) => sandbox.nodeId === nextNode.id);
+        const nodeImages = allImages.filter((image) => nodeSandboxes.some((sandbox) => sandbox.imageId === image.id));
+        const [metricEntries, traceEntries] = await Promise.all([
+          Promise.all(nodeSandboxes.map(async (sandbox) => [sandbox.id, await api.getSandboxMetrics(sandbox.id)] as const)),
+          Promise.all(nodeSandboxes.map(async (sandbox) => [sandbox.id, await api.getSandboxTrace(sandbox.id)] as const)),
+        ]);
+
+        if (!mounted) return;
+        setNode(nextNode);
+        setCluster(clusters.find((item) => item.id === nextNode.clusterId));
+        setSandboxes(nodeSandboxes);
+        setImages(nodeImages);
+        setMetrics(Object.fromEntries(metricEntries));
+        setTraces(Object.fromEntries(traceEntries));
+        setLastRefreshAt(new Date().toISOString());
+      });
+    };
+
+    refresh();
+    timer = window.setInterval(refresh, refreshIntervalMs);
 
     return () => {
       mounted = false;
+      if (timer) window.clearInterval(timer);
     };
   }, [api, nodeId]);
 
@@ -117,6 +129,7 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
           <p>{cluster?.name ?? node.clusterId} / {node.id}。在此查看节点上的沙箱和镜像，并继续下钻到沙箱详情。</p>
         </div>
         <div className="header-actions">
+          {lastRefreshAt && <span className="refresh-pill">Updated {formatDateTime(lastRefreshAt)}</span>}
           <button>Export node</button>
           <button className="primary">Create report</button>
         </div>

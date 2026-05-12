@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
 import type { Cluster, Image, Node, RuntimeType, Sandbox } from '../../domain/model';
 import { runtimeColors } from '../../utils/colors';
+import { formatDateTime } from '../../utils/time';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
 
 type ClusterExplorerProps = {
@@ -9,24 +10,36 @@ type ClusterExplorerProps = {
   onSelectNode: (id: string) => void;
 };
 
+const refreshIntervalMs = 5000;
+
 export function SandboxExplorer({ api, onSelectNode }: ClusterExplorerProps) {
   const [clusters, setClusters] = useState<Cluster[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
   const [images, setImages] = useState<Image[]>([]);
   const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
+  const [lastRefreshAt, setLastRefreshAt] = useState<string>();
 
   useEffect(() => {
     let mounted = true;
-    Promise.all([api.listClusters(), api.listNodes(), api.listImages(), api.listSandboxes()]).then(([nextClusters, nextNodes, nextImages, nextSandboxes]) => {
-      if (!mounted) return;
-      setClusters(nextClusters);
-      setNodes(nextNodes);
-      setImages(nextImages);
-      setSandboxes(nextSandboxes);
-    });
+    let timer: number | undefined;
+
+    const refresh = () => {
+      Promise.all([api.listClusters(), api.listNodes(), api.listImages(), api.listSandboxes()]).then(([nextClusters, nextNodes, nextImages, nextSandboxes]) => {
+        if (!mounted) return;
+        setClusters(nextClusters);
+        setNodes(nextNodes);
+        setImages(nextImages);
+        setSandboxes(nextSandboxes);
+        setLastRefreshAt(new Date().toISOString());
+      });
+    };
+
+    refresh();
+    timer = window.setInterval(refresh, refreshIntervalMs);
 
     return () => {
       mounted = false;
+      if (timer) window.clearInterval(timer);
     };
   }, [api]);
 
@@ -47,6 +60,7 @@ export function SandboxExplorer({ api, onSelectNode }: ClusterExplorerProps) {
           <p>先从集群和节点入口观察全局状态，点击节点进入该节点的沙箱和镜像明细。</p>
         </div>
         <div className="header-actions">
+          {lastRefreshAt && <span className="refresh-pill">Updated {formatDateTime(lastRefreshAt)}</span>}
           <button>Export</button>
           <button className="primary">Create report</button>
         </div>
@@ -75,7 +89,7 @@ export function SandboxExplorer({ api, onSelectNode }: ClusterExplorerProps) {
                   <h3>{cluster.name}</h3>
                   <p>{cluster.environment} · {cluster.id}</p>
                 </div>
-                <span className="data-pill">Mock telemetry</span>
+                <span className="data-pill">Live query</span>
               </div>
 
               <DynamicStaticBlock

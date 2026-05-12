@@ -29,6 +29,8 @@ const metricPanelLabels: Record<MetricPanelSize, string> = {
   expanded: 'Expanded',
 };
 
+const refreshIntervalMs = 5000;
+
 export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [tab, setTab] = useState<Tab>('overview');
   const [sandbox, setSandbox] = useState<Sandbox>();
@@ -40,34 +42,43 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [profiles, setProfiles] = useState<ProfileArtifact[]>([]);
   const [selectedSpan, setSelectedSpan] = useState<TraceSpan>();
   const [selectedEvent, setSelectedEvent] = useState<EventRecord>();
+  const [lastRefreshAt, setLastRefreshAt] = useState<string>();
   const [pinnedMetricGroups, setPinnedMetricGroups] = useState<string[]>([]);
   const [metricPanelSize, setMetricPanelSize] = useState<MetricPanelSize>('standard');
 
   useEffect(() => {
     let mounted = true;
-    api.getSandbox(sandboxId).then(async (nextSandbox) => {
-      if (!mounted || !nextSandbox) return;
-      const [nextNode, nextImage, nextMetrics, nextEvents, nextSpans, nextProfiles] = await Promise.all([
-        api.getNode(nextSandbox.nodeId),
-        api.getImage(nextSandbox.imageId),
-        api.getSandboxMetrics(sandboxId),
-        api.getSandboxEvents(sandboxId),
-        api.getSandboxTrace(sandboxId),
-        api.getSandboxProfiles(sandboxId),
-      ]);
-      if (!mounted) return;
-      setSandbox(nextSandbox);
-      setNode(nextNode);
-      setImage(nextImage);
-      setMetrics(nextMetrics);
-      setEvents(nextEvents);
-      setSelectedEvent(undefined);
-      setSpans(nextSpans);
-      setSelectedSpan(undefined);
-      setProfiles(nextProfiles);
-    });
+    let timer: number | undefined;
+
+    const refresh = () => {
+      api.getSandbox(sandboxId).then(async (nextSandbox) => {
+        if (!mounted || !nextSandbox) return;
+        const [nextNode, nextImage, nextMetrics, nextEvents, nextSpans, nextProfiles] = await Promise.all([
+          api.getNode(nextSandbox.nodeId),
+          api.getImage(nextSandbox.imageId),
+          api.getSandboxMetrics(sandboxId),
+          api.getSandboxEvents(sandboxId),
+          api.getSandboxTrace(sandboxId),
+          api.getSandboxProfiles(sandboxId),
+        ]);
+        if (!mounted) return;
+        setSandbox(nextSandbox);
+        setNode(nextNode);
+        setImage(nextImage);
+        setMetrics(nextMetrics);
+        setEvents(nextEvents);
+        setSpans(nextSpans);
+        setProfiles(nextProfiles);
+        setLastRefreshAt(new Date().toISOString());
+      });
+    };
+
+    refresh();
+    timer = window.setInterval(refresh, refreshIntervalMs);
+
     return () => {
       mounted = false;
+      if (timer) window.clearInterval(timer);
     };
   }, [api, sandboxId]);
 
@@ -127,6 +138,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
           </div>
         </div>
         <div className="run-actions">
+          {lastRefreshAt && <span className="refresh-pill">Updated {formatDateTime(lastRefreshAt)}</span>}
           <button>Pin</button>
           <button>Compare</button>
           <button className="primary">Create report</button>
