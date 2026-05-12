@@ -1,0 +1,552 @@
+openapi: 3.1.0
+info:
+  title: RuntimePulse Query API
+  version: 0.1.0
+  description: Query API contract for RuntimePulse frontend and future backend storage.
+servers:
+  - url: /api
+    description: Frontend-proxied local API
+  - url: http://localhost:8081/api
+    description: Local Query API container
+paths:
+  /clusters:
+    get:
+      summary: List clusters
+      responses:
+        '200':
+          description: Cluster list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterListResponse'
+  /nodes:
+    get:
+      summary: List nodes
+      responses:
+        '200':
+          description: Node list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeListResponse'
+  /nodes/{id}:
+    get:
+      summary: Get a node
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Node
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /images:
+    get:
+      summary: List images
+      responses:
+        '200':
+          description: Image list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageListResponse'
+  /images/{id}:
+    get:
+      summary: Get an image
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Image
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /sandboxes:
+    get:
+      summary: List sandboxes
+      parameters:
+        - name: runtimeType
+          in: query
+          schema:
+            $ref: '#/components/schemas/RuntimeType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/SandboxStatus'
+        - name: text
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sandbox list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxListResponse'
+  /sandboxes/{id}:
+    get:
+      summary: Get a sandbox
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Sandbox
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /sandboxes/{id}/metrics:
+    get:
+      summary: Get sandbox metric series
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Metric series list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricSeriesListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /sandboxes/{id}/events:
+    get:
+      summary: Get sandbox events
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Event list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /sandboxes/{id}/trace:
+    get:
+      summary: Get sandbox startup trace spans
+      description: Range queries include spans whose start/end interval overlaps the requested range.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Trace span list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceSpanListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /sandboxes/{id}/profiles:
+    get:
+      summary: Get sandbox profile artifacts
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Profile artifact list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileArtifactListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /runtimes/compare:
+    get:
+      summary: Compare runtime aggregate metrics
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Runtime comparison rows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeCompareListResponse'
+components:
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    From:
+      name: from
+      in: query
+      schema:
+        type: string
+        format: date-time
+    To:
+      name: to
+      in: query
+      schema:
+        type: string
+        format: date-time
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    RuntimeType:
+      type: string
+      enum: [runc, gvisor, kata, firecracker]
+    SandboxStatus:
+      type: string
+      enum: [running, stopped, failed]
+    Severity:
+      type: string
+      enum: [info, warning, error]
+    RuntimeGroup:
+      type: string
+      enum: [cpu, memory, io, network, runtime, startup, pressure]
+    NodeStatus:
+      type: string
+      enum: [ready, degraded, unknown]
+    LoadingMode:
+      type: string
+      enum: [lazy, eager]
+    ImageDownloadPhase:
+      type: string
+      enum: [resolve, pull, verify, unpack, snapshot]
+    ProfileType:
+      type: string
+      enum: [cpu, off_cpu, memory, block_io, syscall]
+    TraceStatus:
+      type: string
+      enum: [ok, error]
+    JsonObject:
+      type: object
+      additionalProperties: true
+    Cluster:
+      type: object
+      required: [id, name, environment]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        environment: { type: string }
+    Node:
+      type: object
+      required: [id, name, clusterId, kernelVersion, cpuCores, memoryBytes, status]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        clusterId: { type: string }
+        kernelVersion: { type: string }
+        cpuCores: { type: integer }
+        memoryBytes: { type: number }
+        status:
+          $ref: '#/components/schemas/NodeStatus'
+    ImageLayer:
+      type: object
+      required: [id, command, sizeBytes, blockSizeBytes, blockCount, requestedBlockCount, cacheHitBlockCount, localReadBytes, remoteReadBytes, pullDurationMs, unpackDurationMs]
+      properties:
+        id: { type: string }
+        command: { type: string }
+        sizeBytes: { type: number }
+        blockSizeBytes: { type: number }
+        blockCount: { type: integer }
+        requestedBlockCount: { type: integer }
+        cacheHitBlockCount: { type: integer }
+        localReadBytes: { type: number }
+        remoteReadBytes: { type: number }
+        pullDurationMs: { type: number }
+        unpackDurationMs: { type: number }
+    ImageDownloadStep:
+      type: object
+      required: [id, name, phase, durationMs, detail]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        phase:
+          $ref: '#/components/schemas/ImageDownloadPhase'
+        durationMs: { type: number }
+        bytes: { type: number }
+        detail: { type: string }
+    Image:
+      type: object
+      required: [id, ref, digest, loadingMode, sizeBytes, layerCount]
+      properties:
+        id: { type: string }
+        ref: { type: string }
+        digest: { type: string }
+        loadingMode:
+          $ref: '#/components/schemas/LoadingMode'
+        sizeBytes: { type: number }
+        layerCount: { type: integer }
+        layers:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImageLayer'
+        downloadTimeline:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImageDownloadStep'
+    Sandbox:
+      type: object
+      required: [id, clusterId, nodeId, namespace, workloadId, workloadName, imageId, imageRef, runtimeType, runtimeVersion, status, createdAt, startupDurationMs, cpuAvg, memoryPeakBytes, eventCount, labels, attributes]
+      properties:
+        id: { type: string }
+        clusterId: { type: string }
+        nodeId: { type: string }
+        namespace: { type: string }
+        workloadId: { type: string }
+        workloadName: { type: string }
+        imageId: { type: string }
+        imageRef: { type: string }
+        runtimeType:
+          $ref: '#/components/schemas/RuntimeType'
+        runtimeVersion: { type: string }
+        status:
+          $ref: '#/components/schemas/SandboxStatus'
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        stoppedAt: { type: string, format: date-time }
+        startupDurationMs: { type: number }
+        cpuAvg: { type: number }
+        memoryPeakBytes: { type: number }
+        eventCount: { type: integer }
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+        attributes:
+          $ref: '#/components/schemas/JsonObject'
+    MetricPoint:
+      type: object
+      required: [timestamp, value]
+      properties:
+        timestamp: { type: string, format: date-time }
+        value: { type: number }
+    MetricSeries:
+      type: object
+      required: [id, name, label, unit, group, points]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        label: { type: string }
+        unit: { type: string }
+        group:
+          $ref: '#/components/schemas/RuntimeGroup'
+        sandboxId: { type: string }
+        nodeId: { type: string }
+        runtimeType:
+          $ref: '#/components/schemas/RuntimeType'
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricPoint'
+    EventRecord:
+      type: object
+      required: [id, timestamp, severity, eventType, eventName, message, source, attributes]
+      properties:
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        severity:
+          $ref: '#/components/schemas/Severity'
+        eventType: { type: string }
+        eventName: { type: string }
+        sandboxId: { type: string }
+        nodeId: { type: string }
+        runtimeType:
+          $ref: '#/components/schemas/RuntimeType'
+        reason: { type: string }
+        message: { type: string }
+        source: { type: string }
+        attributes:
+          $ref: '#/components/schemas/JsonObject'
+    TraceSpan:
+      type: object
+      required: [traceId, spanId, sandboxId, spanName, startTime, endTime, durationMs, status, attributes]
+      properties:
+        traceId: { type: string }
+        spanId: { type: string }
+        parentSpanId: { type: string }
+        sandboxId: { type: string }
+        spanName: { type: string }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        durationMs: { type: number }
+        status:
+          $ref: '#/components/schemas/TraceStatus'
+        attributes:
+          $ref: '#/components/schemas/JsonObject'
+    FlamegraphFrame:
+      type: object
+      required: [name, value]
+      properties:
+        name: { type: string }
+        value: { type: number }
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlamegraphFrame'
+    ProfileArtifact:
+      type: object
+      required: [id, timestamp, sandboxId, profileType, processRole, durationMs, sampleCount, objectUri]
+      properties:
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        sandboxId: { type: string }
+        profileType:
+          $ref: '#/components/schemas/ProfileType'
+        processRole: { type: string }
+        durationMs: { type: number }
+        sampleCount: { type: integer }
+        objectUri: { type: string }
+        flamegraph:
+          $ref: '#/components/schemas/FlamegraphFrame'
+    RuntimeCompareRow:
+      type: object
+      required: [runtimeType, sampleCount, startupP50Ms, startupP95Ms, cpuOverheadRatio, memoryOverheadBytes, failureRate]
+      properties:
+        runtimeType:
+          $ref: '#/components/schemas/RuntimeType'
+        sampleCount: { type: integer }
+        startupP50Ms: { type: number }
+        startupP95Ms: { type: number }
+        cpuOverheadRatio: { type: number }
+        memoryOverheadBytes: { type: number }
+        failureRate: { type: number }
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        message: { type: string }
+    ClusterListResponse:
+      $ref: '#/components/schemas/DataResponse_ClusterArray'
+    NodeListResponse:
+      $ref: '#/components/schemas/DataResponse_NodeArray'
+    NodeResponse:
+      $ref: '#/components/schemas/DataResponse_Node'
+    ImageListResponse:
+      $ref: '#/components/schemas/DataResponse_ImageArray'
+    ImageResponse:
+      $ref: '#/components/schemas/DataResponse_Image'
+    SandboxListResponse:
+      $ref: '#/components/schemas/DataResponse_SandboxArray'
+    SandboxResponse:
+      $ref: '#/components/schemas/DataResponse_Sandbox'
+    MetricSeriesListResponse:
+      $ref: '#/components/schemas/DataResponse_MetricSeriesArray'
+    EventListResponse:
+      $ref: '#/components/schemas/DataResponse_EventRecordArray'
+    TraceSpanListResponse:
+      $ref: '#/components/schemas/DataResponse_TraceSpanArray'
+    ProfileArtifactListResponse:
+      $ref: '#/components/schemas/DataResponse_ProfileArtifactArray'
+    RuntimeCompareListResponse:
+      $ref: '#/components/schemas/DataResponse_RuntimeCompareRowArray'
+    DataResponse_ClusterArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Cluster'
+    DataResponse_NodeArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+    DataResponse_Node:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Node'
+    DataResponse_ImageArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Image'
+    DataResponse_Image:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Image'
+    DataResponse_SandboxArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Sandbox'
+    DataResponse_Sandbox:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/Sandbox'
+    DataResponse_MetricSeriesArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/MetricSeries'
+    DataResponse_EventRecordArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventRecord'
+    DataResponse_TraceSpanArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceSpan'
+    DataResponse_ProfileArtifactArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProfileArtifact'
+    DataResponse_RuntimeCompareRowArray:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuntimeCompareRow'

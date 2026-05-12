@@ -59,7 +59,10 @@ Implemented:
 - Minimal `runtimepulse-query-api` service that serves mock telemetry through the planned HTTP endpoints.
 - Docker Compose wiring for frontend-to-query-api validation through `/api`.
 
-Planned backend endpoints:
+Query API contract:
+
+- Machine-readable OpenAPI spec: [`docs/openapi.yaml`](openapi.yaml)
+- Implemented mock Query API endpoints:
 
 ```text
 GET /api/clusters
