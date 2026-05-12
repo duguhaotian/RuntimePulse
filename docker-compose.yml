@@ -1,10 +1,24 @@
 services:
+  runtimepulse-query-api:
+    build:
+      context: ./query-api
+      dockerfile: Dockerfile
+    image: runtimepulse/query-api:dev
+    container_name: runtimepulse-query-api
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+
   runtimepulse-frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        VITE_RUNTIMEPULSE_API_BASE_URL: /api
     image: runtimepulse/frontend:dev
     container_name: runtimepulse-frontend
+    depends_on:
+      - runtimepulse-query-api
     ports:
       - "8080:8080"
     restart: unless-stopped

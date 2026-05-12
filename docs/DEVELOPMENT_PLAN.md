@@ -56,6 +56,8 @@ Implemented:
 
 - `HttpRuntimePulseApi` frontend adapter that matches the existing `RuntimePulseApi` contract.
 - Environment-based API switching with `VITE_RUNTIMEPULSE_API_BASE_URL`; empty value keeps the mock adapter.
+- Minimal `runtimepulse-query-api` service that serves mock telemetry through the planned HTTP endpoints.
+- Docker Compose wiring for frontend-to-query-api validation through `/api`.
 
 Planned backend endpoints:
 

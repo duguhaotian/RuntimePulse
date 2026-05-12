@@ -62,7 +62,7 @@ function createRequester(baseUrl: string) {
   const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
 
   return async function request<T>(path: string, params?: Record<string, QueryValue>): Promise<T> {
-    const url = new URL(`${normalizedBaseUrl}${path.startsWith('/') ? path : `/${path}`}`);
+    const url = new URL(`${normalizedBaseUrl}${path.startsWith('/') ? path : `/${path}`}`, window.location.origin);
     Object.entries(params ?? {}).forEach(([key, value]) => {
       if (value !== undefined && value !== '') url.searchParams.set(key, String(value));
     });
