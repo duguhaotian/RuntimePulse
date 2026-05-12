@@ -5,6 +5,7 @@ import { RuntimeBars } from '../../components/charts/RuntimeBars';
 import { RuntimeBadge } from '../SandboxExplorer/SandboxExplorer';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
 import { chartPalette, runtimeColors } from '../../utils/colors';
+import { formatDateTime } from '../../utils/time';
 
 type RuntimeComparisonProps = {
   api: RuntimePulseApi;
@@ -30,15 +31,35 @@ type StartupTemperatureRow = AggregateComparisonRow & {
   description: string;
 };
 
+const refreshIntervalMs = 5000;
+
 export function RuntimeComparison({ api }: RuntimeComparisonProps) {
   const [rows, setRows] = useState<RuntimeCompareRow[]>([]);
   const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
   const [nodeLabels, setNodeLabels] = useState<Record<string, string>>({});
+  const [lastRefreshAt, setLastRefreshAt] = useState<string>();
   const [scope, setScope] = useState<ComparisonScope>('runtime');
 
   useEffect(() => {
-    api.compareRuntimes().then(setRows);
-    api.listSandboxes().then(setSandboxes);
+    let mounted = true;
+    let timer: number | undefined;
+
+    const refresh = () => {
+      Promise.all([api.compareRuntimes(), api.listSandboxes()]).then(([nextRows, nextSandboxes]) => {
+        if (!mounted) return;
+        setRows(nextRows);
+        setSandboxes(nextSandboxes);
+        setLastRefreshAt(new Date().toISOString());
+      });
+    };
+
+    refresh();
+    timer = window.setInterval(refresh, refreshIntervalMs);
+
+    return () => {
+      mounted = false;
+      if (timer) window.clearInterval(timer);
+    };
   }, [api]);
 
   useEffect(() => {
@@ -108,6 +129,9 @@ export function RuntimeComparison({ api }: RuntimeComparisonProps) {
           <p className="eyebrow">Runtime analysis</p>
           <h2>Runtime Comparison</h2>
           <p>{currentDescription}</p>
+        </div>
+        <div className="header-actions">
+          {lastRefreshAt && <span className="refresh-pill">Updated {formatDateTime(lastRefreshAt)}</span>}
         </div>
       </div>
       <div className="comparison-mode-bar">

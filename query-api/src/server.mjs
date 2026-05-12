@@ -68,7 +68,7 @@ async function handleRequest(request, response) {
   if (path === '/nodes') return sendData(response, mergeById(nodes, liveNodes(liveStore)));
   if (path === '/images') return sendData(response, mergeById(images, liveImages(liveStore)));
   if (path === '/sandboxes') return sendData(response, filterSandboxRows(allSandboxes(), Object.fromEntries(url.searchParams)));
-  if (path === '/runtimes/compare') return sendData(response, runtimeComparison);
+  if (path === '/runtimes/compare') return sendData(response, runtimeComparisonRows());
 
   const match = path.match(/^\/(sandboxes|nodes|images)\/([^/]+)(?:\/([^/]+))?$/);
   if (!match) return sendJson(response, 404, { error: 'not_found' });
@@ -185,6 +185,51 @@ function filterSandboxRows(rows, query) {
       .some((value) => String(value).toLowerCase().includes(text));
     return runtimeMatch && statusMatch && textMatch;
   });
+}
+
+function runtimeComparisonRows() {
+  const rows = buildRuntimeComparisonRows(allSandboxes());
+  return rows.length > 0 ? rows : runtimeComparison;
+}
+
+function buildRuntimeComparisonRows(rows) {
+  const buckets = new Map();
+
+  for (const sandbox of rows) {
+    const current = buckets.get(sandbox.runtimeType) ?? [];
+    current.push(sandbox);
+    buckets.set(sandbox.runtimeType, current);
+  }
+
+  return Array.from(buckets.entries())
+    .map(([runtimeType, group]) => {
+      const startupValues = group.map((sandbox) => sandbox.startupDurationMs).sort((left, right) => left - right);
+      const cpuValues = group.map((sandbox) => sandbox.cpuAvg);
+      const memoryValues = group.map((sandbox) => sandbox.memoryPeakBytes);
+      const failures = group.filter((sandbox) => sandbox.status === 'failed').length;
+
+      return {
+        runtimeType,
+        sampleCount: group.length,
+        startupP50Ms: percentile(startupValues, 0.5),
+        startupP95Ms: percentile(startupValues, 0.95),
+        cpuOverheadRatio: average(cpuValues),
+        memoryOverheadBytes: Math.max(...memoryValues, 0),
+        failureRate: failures / Math.max(group.length, 1),
+      };
+    })
+    .sort((left, right) => right.startupP95Ms - left.startupP95Ms);
+}
+
+function percentile(values, ratio) {
+  if (values.length === 0) return 0;
+  const index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * ratio) - 1));
+  return values[index];
+}
+
+function average(values) {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function sendOptional(response, payload) {

@@ -122,6 +122,7 @@ Implemented:
 - Mock node collector emits profile artifacts so the ingest boundary exercises all frontend domain output types.
 - Query API keeps accepted collector payloads in an in-memory live query store and merges them into cluster, node, sandbox, metric, event, trace, and profile GET responses.
 - Cluster, node, and sandbox detail pages auto-refresh query data so live collector updates are visible outside the Collectors page.
+- Runtime comparison aggregates now refresh from live Query API sandbox data instead of staying fixed to static mock rows.
 
 Collector candidates:
 
