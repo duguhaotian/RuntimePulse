@@ -52,9 +52,17 @@ Goals:
 - Add a backend query API without implementing collectors yet.
 - Define storage schema and query boundaries.
 
+Implemented:
+
+- `HttpRuntimePulseApi` frontend adapter that matches the existing `RuntimePulseApi` contract.
+- Environment-based API switching with `VITE_RUNTIMEPULSE_API_BASE_URL`; empty value keeps the mock adapter.
+
 Planned backend endpoints:
 
 ```text
+GET /api/clusters
+GET /api/nodes
+GET /api/images
 GET /api/sandboxes
 GET /api/sandboxes/{id}
 GET /api/sandboxes/{id}/metrics
