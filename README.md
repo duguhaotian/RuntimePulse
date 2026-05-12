@@ -9,6 +9,7 @@ RuntimePulse is an early-stage sandbox runtime metrics platform prototype. Phase
 - Runtime Comparison for runc, gVisor, Kata, and Firecracker.
 - Mock API adapter that can later be replaced by a real HTTP API without rewriting pages.
 - Lightweight Query API container that serves the same mock telemetry over HTTP for frontend/backend contract validation.
+- Mock node collector container that periodically validates collector payloads through the ingest API.
 - Container-first deployment for local validation and later platform packaging.
 
 ## Documentation
@@ -38,6 +39,7 @@ The frontend proxies `/api/*` to the local Query API container. The Query API is
 ```text
 http://localhost:8081/health
 http://localhost:8081/api/sandboxes
+http://localhost:8081/api/ingest/batch
 ```
 
 Stop it with:
@@ -73,6 +75,7 @@ frontend/src/components Reusable visualization/layout components
 frontend/src/pages      Expert analysis pages
 frontend/src/utils      Time, unit, and color helpers
 query-api               Minimal HTTP Query API backed by mock telemetry
+collector               Mock node collector that posts validation-only ingest batches
 ```
 
 ## Mock Scenarios
