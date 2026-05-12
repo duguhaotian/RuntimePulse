@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import {
   createIngestStatus,
+  ingestRecentSnapshot,
   ingestStatusSnapshot,
   recordAcceptedIngestBatch,
   recordRejectedIngestBatch,
@@ -50,6 +51,7 @@ async function handleRequest(request, response) {
   if (request.method !== 'GET') return sendJson(response, 405, { error: 'method_not_allowed' });
 
   if (path === '/ingest/status') return sendData(response, ingestStatusSnapshot(ingestStatus));
+  if (path === '/ingest/recent') return sendData(response, ingestRecentSnapshot(ingestStatus));
   if (path === '/clusters') return sendData(response, clusters);
   if (path === '/nodes') return sendData(response, nodes);
   if (path === '/images') return sendData(response, images);

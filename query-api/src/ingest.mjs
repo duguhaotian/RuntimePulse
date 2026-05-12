@@ -1,4 +1,7 @@
 const maxPreviewErrors = 20;
+const maxRecentBatches = 25;
+const maxRecentRows = 80;
+const maxRowsPerBatchKind = 8;
 
 const metadataCollections = ['clusters', 'nodes', 'images', 'sandboxes'];
 
@@ -10,6 +13,10 @@ export function createIngestStatus() {
     rejectedBatches: 0,
     totals: emptyCounts(),
     sources: new Map(),
+    recentBatches: [],
+    recentMetrics: [],
+    recentEvents: [],
+    recentTraces: [],
     lastAcceptedBatch: undefined,
     lastRejectedBatch: undefined,
   };
@@ -74,6 +81,7 @@ export function recordAcceptedIngestBatch(status, payload, result) {
   status.acceptedBatches += 1;
   mergeCounts(status.totals, result.counts);
   status.lastAcceptedBatch = batch;
+  rememberRecentPayload(status, payload, batch);
 
   const sourceStatus = status.sources.get(source) ?? {
     source,
@@ -91,6 +99,16 @@ export function recordAcceptedIngestBatch(status, payload, result) {
   status.sources.set(source, sourceStatus);
 
   return batch;
+}
+
+export function ingestRecentSnapshot(status) {
+  return {
+    mode: status.mode,
+    recentBatches: [...status.recentBatches],
+    recentMetrics: [...status.recentMetrics],
+    recentEvents: [...status.recentEvents],
+    recentTraces: [...status.recentTraces],
+  };
 }
 
 export function recordRejectedIngestBatch(status, payload, result) {
@@ -162,6 +180,64 @@ function mergeCounts(target, increment) {
   target.events += increment.events;
   target.traces += increment.traces;
   target.profiles += increment.profiles;
+}
+
+function rememberRecentPayload(status, payload, batch) {
+  prependBounded(status.recentBatches, batch, maxRecentBatches);
+
+  for (const row of (Array.isArray(payload.metrics) ? payload.metrics : []).slice(0, maxRowsPerBatchKind)) {
+    prependBounded(status.recentMetrics, {
+      source: batch.source,
+      acceptedAt: batch.acceptedAt,
+      timestamp: row.timestamp,
+      name: row.name,
+      value: row.value,
+      unit: row.unit,
+      group: row.group,
+      sandboxId: row.sandboxId,
+      nodeId: row.nodeId,
+      imageId: row.imageId,
+      runtimeType: row.runtimeType,
+      attributes: row.attributes,
+    }, maxRecentRows);
+  }
+
+  for (const row of (Array.isArray(payload.events) ? payload.events : []).slice(0, maxRowsPerBatchKind)) {
+    prependBounded(status.recentEvents, {
+      source: batch.source,
+      acceptedAt: batch.acceptedAt,
+      id: row.id,
+      timestamp: row.timestamp,
+      severity: row.severity,
+      eventType: row.eventType,
+      eventName: row.eventName,
+      sandboxId: row.sandboxId,
+      nodeId: row.nodeId,
+      runtimeType: row.runtimeType,
+      message: row.message,
+    }, maxRecentRows);
+  }
+
+  for (const row of (Array.isArray(payload.traces) ? payload.traces : []).slice(0, maxRowsPerBatchKind)) {
+    prependBounded(status.recentTraces, {
+      source: batch.source,
+      acceptedAt: batch.acceptedAt,
+      traceId: row.traceId,
+      spanId: row.spanId,
+      parentSpanId: row.parentSpanId,
+      sandboxId: row.sandboxId,
+      spanName: row.spanName,
+      startTime: row.startTime,
+      endTime: row.endTime,
+      durationMs: row.durationMs,
+      status: row.status,
+    }, maxRecentRows);
+  }
+}
+
+function prependBounded(target, row, limit) {
+  target.unshift(row);
+  if (target.length > limit) target.length = limit;
 }
 
 function validateArray(payload, field, errors, counts, validator) {

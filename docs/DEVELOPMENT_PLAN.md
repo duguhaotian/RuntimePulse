@@ -114,6 +114,8 @@ Implemented:
 - Frontend Collectors page that visualizes ingest acceptance counters, per-source totals, and latest batch status.
 - Collectors page auto-refresh and short activity trend preview for accepted batches and records.
 - Mock collector interval aligned with the frontend refresh interval so status counters visibly update during local validation.
+- Recent ingest sample endpoint: `GET /api/ingest/recent` keeps bounded in-memory previews of recent batches, metrics, events, and trace spans for debugging.
+- Collectors page recent sample preview for latest ingested metrics, events, and trace spans.
 
 Collector candidates:
 

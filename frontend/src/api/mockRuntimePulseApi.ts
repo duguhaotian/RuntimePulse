@@ -1,5 +1,5 @@
 import type { RuntimePulseApi } from './RuntimePulseApi';
-import type { IngestStatus, SandboxQuery } from '../domain/model';
+import type { IngestRecent, IngestStatus, SandboxQuery } from '../domain/model';
 import {
   clusters,
   eventsForSandbox,
@@ -62,6 +62,9 @@ export const mockRuntimePulseApi: RuntimePulseApi = {
   async getIngestStatus() {
     return mockIngestStatus;
   },
+  async getIngestRecent() {
+    return mockIngestRecent;
+  },
 };
 
 const mockIngestStatus: IngestStatus = {
@@ -109,4 +112,65 @@ const mockIngestStatus: IngestStatus = {
     rejectedAt: '2026-05-09T03:48:40.000Z',
     errors: ['metrics[0].timestamp must be an ISO date-time string'],
   },
+};
+
+const mockIngestRecent: IngestRecent = {
+  mode: 'validation_only',
+  recentBatches: [
+    mockIngestStatus.lastAcceptedBatch!,
+  ],
+  recentMetrics: [
+    {
+      source: 'mock-node-collector/node-a',
+      acceptedAt: '2026-05-09T04:00:00.000Z',
+      timestamp: '2026-05-09T03:59:59.000Z',
+      name: 'node.container.count',
+      value: 23,
+      unit: 'count',
+      group: 'lifecycle',
+      nodeId: 'node-a',
+    },
+    {
+      source: 'mock-node-collector/node-a',
+      acceptedAt: '2026-05-09T04:00:00.000Z',
+      timestamp: '2026-05-09T03:59:59.000Z',
+      name: 'sandbox.lifecycle.runtime.create.duration_ms',
+      value: 820,
+      unit: 'ms',
+      group: 'lifecycle',
+      sandboxId: 'collector-node-a-001',
+      nodeId: 'node-a',
+      runtimeType: 'runc',
+    },
+  ],
+  recentEvents: [
+    {
+      source: 'mock-node-collector/node-a',
+      acceptedAt: '2026-05-09T04:00:00.000Z',
+      id: 'collector-node-a-001-created',
+      timestamp: '2026-05-09T03:59:59.000Z',
+      severity: 'info',
+      eventType: 'lifecycle',
+      eventName: 'sandbox.created',
+      sandboxId: 'collector-node-a-001',
+      nodeId: 'node-a',
+      runtimeType: 'runc',
+      message: 'Mock collector observed runc sandbox startup',
+    },
+  ],
+  recentTraces: [
+    {
+      source: 'mock-node-collector/node-a',
+      acceptedAt: '2026-05-09T04:00:00.000Z',
+      traceId: 'trace-collector-node-a-001',
+      spanId: 'span-3',
+      parentSpanId: 'span-1',
+      sandboxId: 'collector-node-a-001',
+      spanName: 'runtime.create',
+      startTime: '2026-05-09T03:59:59.900Z',
+      endTime: '2026-05-09T04:00:00.720Z',
+      durationMs: 820,
+      status: 'ok',
+    },
+  ],
 };

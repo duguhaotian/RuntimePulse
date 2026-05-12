@@ -222,6 +222,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IngestStatusResponse'
+  /ingest/recent:
+    get:
+      summary: Get recent validation-only ingest samples
+      description: Returns bounded in-memory recent batches and sample rows for collector debugging. Values reset when the Query API process restarts.
+      responses:
+        '200':
+          description: Recent ingest sample snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestRecentResponse'
 components:
   parameters:
     Id:
@@ -611,6 +622,80 @@ components:
           $ref: '#/components/schemas/IngestBatchSummary'
         lastRejectedBatch:
           $ref: '#/components/schemas/IngestRejectedSummary'
+    RecentMetricSample:
+      type: object
+      required: [source, acceptedAt, timestamp, name, value]
+      properties:
+        source: { type: string }
+        acceptedAt: { type: string, format: date-time }
+        timestamp: { type: string, format: date-time }
+        name: { type: string }
+        value: { type: number }
+        unit: { type: string }
+        group: { type: string }
+        sandboxId: { type: string }
+        nodeId: { type: string }
+        imageId: { type: string }
+        runtimeType:
+          $ref: '#/components/schemas/RuntimeType'
+        attributes:
+          $ref: '#/components/schemas/JsonObject'
+    RecentEventSample:
+      type: object
+      required: [source, acceptedAt, id, timestamp, severity, eventType, eventName, message]
+      properties:
+        source: { type: string }
+        acceptedAt: { type: string, format: date-time }
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        severity:
+          $ref: '#/components/schemas/Severity'
+        eventType: { type: string }
+        eventName: { type: string }
+        sandboxId: { type: string }
+        nodeId: { type: string }
+        runtimeType:
+          $ref: '#/components/schemas/RuntimeType'
+        message: { type: string }
+    RecentTraceSample:
+      type: object
+      required: [source, acceptedAt, traceId, spanId, spanName, startTime, endTime, durationMs, status]
+      properties:
+        source: { type: string }
+        acceptedAt: { type: string, format: date-time }
+        traceId: { type: string }
+        spanId: { type: string }
+        parentSpanId: { type: string }
+        sandboxId: { type: string }
+        spanName: { type: string }
+        startTime: { type: string, format: date-time }
+        endTime: { type: string, format: date-time }
+        durationMs: { type: number }
+        status:
+          $ref: '#/components/schemas/TraceStatus'
+    IngestRecent:
+      type: object
+      required: [mode, recentBatches, recentMetrics, recentEvents, recentTraces]
+      properties:
+        mode:
+          type: string
+          enum: [validation_only]
+        recentBatches:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestBatchSummary'
+        recentMetrics:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentMetricSample'
+        recentEvents:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentEventSample'
+        recentTraces:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentTraceSample'
     ErrorResponse:
       type: object
       required: [error]
@@ -649,6 +734,8 @@ components:
       $ref: '#/components/schemas/DataResponse_IngestAccepted'
     IngestStatusResponse:
       $ref: '#/components/schemas/DataResponse_IngestStatus'
+    IngestRecentResponse:
+      $ref: '#/components/schemas/DataResponse_IngestRecent'
     DataResponse_ClusterArray:
       type: object
       required: [data]
@@ -751,3 +838,9 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/IngestStatus'
+    DataResponse_IngestRecent:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/IngestRecent'

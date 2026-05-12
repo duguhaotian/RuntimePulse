@@ -206,3 +206,54 @@ export type IngestStatus = {
   lastAcceptedBatch?: IngestBatchSummary;
   lastRejectedBatch?: IngestRejectedSummary;
 };
+
+export type RecentMetricSample = {
+  source: string;
+  acceptedAt: string;
+  timestamp: string;
+  name: string;
+  value: number;
+  unit?: string;
+  group?: string;
+  sandboxId?: string;
+  nodeId?: string;
+  imageId?: string;
+  runtimeType?: RuntimeType;
+  attributes?: Record<string, unknown>;
+};
+
+export type RecentEventSample = {
+  source: string;
+  acceptedAt: string;
+  id: string;
+  timestamp: string;
+  severity: Severity;
+  eventType: string;
+  eventName: string;
+  sandboxId?: string;
+  nodeId?: string;
+  runtimeType?: RuntimeType;
+  message: string;
+};
+
+export type RecentTraceSample = {
+  source: string;
+  acceptedAt: string;
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  sandboxId?: string;
+  spanName: string;
+  startTime: string;
+  endTime: string;
+  durationMs: number;
+  status: 'ok' | 'error';
+};
+
+export type IngestRecent = {
+  mode: 'validation_only';
+  recentBatches: IngestBatchSummary[];
+  recentMetrics: RecentMetricSample[];
+  recentEvents: RecentEventSample[];
+  recentTraces: RecentTraceSample[];
+};

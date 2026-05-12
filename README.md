@@ -42,6 +42,7 @@ http://localhost:8081/health
 http://localhost:8081/api/sandboxes
 http://localhost:8081/api/ingest/batch
 http://localhost:8081/api/ingest/status
+http://localhost:8081/api/ingest/recent
 ```
 
 Stop it with:

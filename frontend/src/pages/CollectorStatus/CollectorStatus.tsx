@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
-import type { IngestCounts, IngestStatus } from '../../domain/model';
+import type { IngestCounts, IngestRecent, IngestStatus } from '../../domain/model';
 import { formatDateTime } from '../../utils/time';
+import { formatMetricValue } from '../../utils/units';
 
 type CollectorStatusProps = {
   api: RuntimePulseApi;
@@ -18,6 +19,7 @@ const maxSnapshots = 12;
 
 export function CollectorStatus({ api }: CollectorStatusProps) {
   const [status, setStatus] = useState<IngestStatus>();
+  const [recent, setRecent] = useState<IngestRecent>();
   const [error, setError] = useState<string>();
   const [lastRefreshAt, setLastRefreshAt] = useState<string>();
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -28,13 +30,14 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
     let timer: number | undefined;
 
     const refresh = () => {
-      api.getIngestStatus()
-        .then((nextStatus) => {
+      Promise.all([api.getIngestStatus(), api.getIngestRecent()])
+        .then(([nextStatus, nextRecent]) => {
           if (!active) return;
           const refreshedAt = new Date().toISOString();
           const nextTotalRecords = totalCount(nextStatus.totals);
 
           setStatus(nextStatus);
+          setRecent(nextRecent);
           setError(undefined);
           setLastRefreshAt(refreshedAt);
           setRefreshTick((current) => current + 1);
@@ -246,6 +249,23 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
           </div>
         </section>
       )}
+
+      {recent && (
+        <section className="panel-card collector-panel">
+          <div className="section-heading">
+            <div>
+              <h3>Recent ingest samples</h3>
+              <p>Bounded in-memory preview of the latest accepted collector payloads.</p>
+            </div>
+            <span>{recent.recentBatches.length} batches</span>
+          </div>
+          <div className="recent-ingest-grid">
+            <RecentMetricList recent={recent} />
+            <RecentEventList recent={recent} />
+            <RecentTraceList recent={recent} />
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -265,6 +285,72 @@ function CountPill({ label, value }: { label: string; value: number }) {
       {label}
       <b>{value.toLocaleString()}</b>
     </span>
+  );
+}
+
+function RecentMetricList({ recent }: { recent: IngestRecent }) {
+  return (
+    <div className="recent-sample-card">
+      <div className="recent-sample-header">
+        <strong>Metrics</strong>
+        <span>{recent.recentMetrics.length}</span>
+      </div>
+      <div className="recent-sample-list">
+        {recent.recentMetrics.slice(0, 6).map((metric, index) => (
+          <div className="recent-sample-row" key={`${metric.acceptedAt}-${metric.name}-${index}`}>
+            <div>
+              <strong>{metric.name}</strong>
+              <span>{metric.sandboxId ?? metric.nodeId ?? metric.source}</span>
+            </div>
+            <b>{formatMetricValue(metric.value, metric.unit ?? '')}</b>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RecentEventList({ recent }: { recent: IngestRecent }) {
+  return (
+    <div className="recent-sample-card">
+      <div className="recent-sample-header">
+        <strong>Events</strong>
+        <span>{recent.recentEvents.length}</span>
+      </div>
+      <div className="recent-sample-list">
+        {recent.recentEvents.slice(0, 6).map((event) => (
+          <div className="recent-sample-row" key={event.id}>
+            <div>
+              <strong>{event.eventName}</strong>
+              <span>{event.message}</span>
+            </div>
+            <b className={`severity-${event.severity}`}>{event.severity}</b>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RecentTraceList({ recent }: { recent: IngestRecent }) {
+  return (
+    <div className="recent-sample-card">
+      <div className="recent-sample-header">
+        <strong>Trace spans</strong>
+        <span>{recent.recentTraces.length}</span>
+      </div>
+      <div className="recent-sample-list">
+        {recent.recentTraces.slice(0, 6).map((span) => (
+          <div className="recent-sample-row" key={`${span.traceId}-${span.spanId}-${span.acceptedAt}`}>
+            <div>
+              <strong>{span.spanName}</strong>
+              <span>{span.sandboxId ?? span.traceId}</span>
+            </div>
+            <b>{formatMetricValue(span.durationMs, 'ms')}</b>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
