@@ -106,7 +106,7 @@ async function handleIngestBatch(request, response) {
   return sendJson(response, 202, {
     data: {
       status: 'accepted',
-      mode: 'validation_only',
+      mode: ingestStatus.mode,
       counts: result.counts,
     },
   });

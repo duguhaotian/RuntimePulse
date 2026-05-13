@@ -224,8 +224,10 @@ export type LiveStoreSourceStatus = {
   profiles: number;
 };
 
+export type IngestMode = 'in_memory_live_store';
+
 export type IngestStatus = {
-  mode: 'validation_only';
+  mode: IngestMode;
   startedAt: string;
   acceptedBatches: number;
   rejectedBatches: number;
@@ -293,7 +295,7 @@ export type RecentProfileSample = {
 };
 
 export type IngestRecent = {
-  mode: 'validation_only';
+  mode: IngestMode;
   recentBatches: IngestBatchSummary[];
   recentMetrics: RecentMetricSample[];
   recentEvents: RecentEventSample[];

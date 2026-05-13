@@ -63,8 +63,8 @@ export function AppLayout({ activePage, onNavigate, children }: AppLayoutProps) 
         </div>
 
         <div className="sidebar-note">
-          <strong>Mock source</strong>
-          <span>Phase 1 uses scenario telemetry. Collectors stay out of this frontend loop.</span>
+          <strong>Live source</strong>
+          <span>Query API merges seeded telemetry with accepted collector batches.</span>
         </div>
       </aside>
 
@@ -78,7 +78,7 @@ export function AppLayout({ activePage, onNavigate, children }: AppLayoutProps) 
             <div className="topbar-search">⌘K&nbsp;&nbsp;Search clusters, nodes, sandboxes</div>
             <button className="topbar-button">Last 1h</button>
             <button className="topbar-button primary">Compare</button>
-            <span className="data-pill">Mock telemetry</span>
+            <span className="data-pill">Live telemetry</span>
           </div>
         </header>
         <main className="main-panel">{children}</main>

@@ -159,7 +159,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       <div className="run-layout-grid">
         <div className="panel-card run-notes">
           <h3>Run notes</h3>
-          <p>Mock run for expert analysis. Review lifecycle events, startup spans, runtime process metrics, and profile artifacts before collector integration.</p>
+          <p>Collector-backed run preview for expert analysis. Review lifecycle events, startup spans, runtime process metrics, and profile artifacts from the live Query API view.</p>
         </div>
         <div className="panel-card config-card">
           <h3>Config</h3>
@@ -707,7 +707,7 @@ function FlameGraph({ root }: { root: FlamegraphFrame }) {
       </svg>
       <div className="flamegraph-footer">
         <span>Root on bottom, callees stack upward.</span>
-        <span>Mock preview; real pprof/flamegraph artifacts will use the same panel.</span>
+        <span>Preview renderer for profile artifacts exposed by the Query API.</span>
       </div>
     </div>
   );

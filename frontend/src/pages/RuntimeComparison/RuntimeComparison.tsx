@@ -241,7 +241,7 @@ function StartupTemperaturePanel({ rows }: { rows: StartupTemperatureRow[] }) {
       <div className="table-titlebar">
         <div>
           <strong>Cold vs warm start</strong>
-          <span>Mock cache model: first observed run per image is cold, later runs reuse image/cache state.</span>
+          <span>Observed cache heuristic: first run per image is cold, later runs reuse image/cache state.</span>
         </div>
         <div className="column-pills">
           <span>cache</span>

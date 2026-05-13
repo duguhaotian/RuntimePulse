@@ -2,12 +2,13 @@ const maxPreviewErrors = 20;
 const maxRecentBatches = 25;
 const maxRecentRows = 80;
 const maxRowsPerBatchKind = 8;
+const ingestMode = 'in_memory_live_store';
 
 const metadataCollections = ['clusters', 'nodes', 'images', 'sandboxes'];
 
 export function createIngestStatus() {
   return {
-    mode: 'validation_only',
+    mode: ingestMode,
     startedAt: new Date().toISOString(),
     acceptedBatches: 0,
     rejectedBatches: 0,

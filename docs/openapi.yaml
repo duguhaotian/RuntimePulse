@@ -185,7 +185,7 @@ paths:
   /ingest/batch:
     post:
       summary: Validate and accept a collector ingest batch
-      description: Phase 3 collector contract endpoint. The current mock service validates payload shape and returns accepted counts without persisting records.
+      description: Phase 3 collector contract endpoint. The current service validates payload shape, returns accepted counts, and records accepted rows in an in-memory live query store.
       requestBody:
         required: true
         content:
@@ -213,8 +213,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
   /ingest/status:
     get:
-      summary: Get validation-only ingest status
-      description: Returns in-memory ingest counters for collector smoke testing. Values reset when the Query API process restarts.
+      summary: Get ingest and live-store status
+      description: Returns in-memory ingest counters and live query-store occupancy for collector smoke testing. Values reset when the Query API process restarts.
       responses:
         '200':
           description: Ingest status snapshot
@@ -224,7 +224,7 @@ paths:
                 $ref: '#/components/schemas/IngestStatusResponse'
   /ingest/recent:
     get:
-      summary: Get recent validation-only ingest samples
+      summary: Get recent ingest samples
       description: Returns bounded in-memory recent batches and sample rows for collector debugging. Values reset when the Query API process restarts.
       responses:
         '200':
@@ -569,7 +569,7 @@ components:
           enum: [accepted]
         mode:
           type: string
-          enum: [validation_only]
+          enum: [in_memory_live_store]
         counts:
           $ref: '#/components/schemas/IngestCounts'
     IngestBatchSummary:
@@ -643,7 +643,7 @@ components:
       properties:
         mode:
           type: string
-          enum: [validation_only]
+          enum: [in_memory_live_store]
         startedAt: { type: string, format: date-time }
         acceptedBatches: { type: integer }
         rejectedBatches: { type: integer }
@@ -731,7 +731,7 @@ components:
       properties:
         mode:
           type: string
-          enum: [validation_only]
+          enum: [in_memory_live_store]
         recentBatches:
           type: array
           items:

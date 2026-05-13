@@ -68,7 +68,7 @@ export const mockRuntimePulseApi: RuntimePulseApi = {
 };
 
 const mockIngestStatus: IngestStatus = {
-  mode: 'validation_only',
+  mode: 'in_memory_live_store',
   startedAt: '2026-05-09T03:52:00.000Z',
   acceptedBatches: 28,
   rejectedBatches: 1,
@@ -115,7 +115,7 @@ const mockIngestStatus: IngestStatus = {
 };
 
 const mockIngestRecent: IngestRecent = {
-  mode: 'validation_only',
+  mode: 'in_memory_live_store',
   recentBatches: [
     mockIngestStatus.lastAcceptedBatch!,
   ],

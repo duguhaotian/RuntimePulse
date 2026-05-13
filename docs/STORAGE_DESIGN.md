@@ -1,6 +1,6 @@
 # RuntimePulse Storage Design
 
-This document defines the Phase 2 storage model and Query API boundaries. It is a design contract for later collector and database work; the current implementation still serves mock data.
+This document defines the Phase 2 storage model and Query API boundaries. It is a design contract for durable collector and database work; the current implementation serves seeded telemetry plus accepted collector batches through an in-memory live query store.
 
 ## Storage Split
 
@@ -225,9 +225,9 @@ The API owns joins, authorization, tenant scoping, downsampling, and time-range 
 
 ## Ingestion Boundaries
 
-Collectors should write through future ingest endpoints or streaming pipelines, not the Query API.
+Collectors should write through ingest endpoints or future streaming pipelines, not directly into query handlers or frontend state.
 
-The Phase 3 skeleton exposes `POST /api/ingest/batch` as a validation-only collector contract. It accepts metadata, metrics, events, traces, and profile artifact indexes, returns accepted counts, and intentionally does not persist records yet. `GET /api/ingest/status` exposes in-memory acceptance counters for collector smoke testing, and `GET /api/ingest/recent` exposes bounded recent sample previews. These counters and samples reset when the Query API process restarts.
+The Phase 3 skeleton exposes `POST /api/ingest/batch` as the collector contract. It accepts metadata, metrics, events, traces, and profile artifact indexes, returns accepted counts, and writes accepted records into an in-memory live query store. Query endpoints merge that live store with seeded telemetry so frontend pages can refresh without waiting for PostgreSQL or ClickHouse. `GET /api/ingest/status` exposes acceptance counters plus live-store occupancy for collector smoke testing, and `GET /api/ingest/recent` exposes bounded recent sample previews. Counters, samples, and live-store rows reset when the Query API process restarts.
 
 - Metadata writes are idempotent by stable ids such as cluster id, node id, image digest, sandbox id, and profile id.
 - Metric points are idempotent by series identity plus timestamp.

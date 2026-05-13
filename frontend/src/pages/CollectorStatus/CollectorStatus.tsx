@@ -120,7 +120,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
         <div>
           <p className="eyebrow">Collectors</p>
           <h2>Ingest status</h2>
-          <p>Validation-only collector flow from mock node collector to Query API.</p>
+          <p>Collector batches feed the Query API live store for smoke testing and UI refresh.</p>
         </div>
         <div className={`collector-health ${health}`}>
           <span className={`status-dot ${health}`} />
@@ -188,7 +188,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
           <div className="section-heading">
             <div>
               <h3>Last accepted batch</h3>
-              <p>Most recent batch accepted by the validation boundary.</p>
+              <p>Most recent batch accepted by the ingest boundary.</p>
             </div>
           </div>
           {status.lastAcceptedBatch ? (
