@@ -216,7 +216,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
               <h3>Live query store</h3>
               <p>In-memory query objects currently merged into cluster, node, sandbox, runtime, and detail API responses.</p>
             </div>
-            <span>{status.liveStore.metricPoints.toLocaleString()} points</span>
+            <span>{status.liveStore.lastUpdatedAt ? `Updated ${ageText(status.liveStore.lastUpdatedAt, refreshTick)} ago` : `${status.liveStore.metricPoints.toLocaleString()} points`}</span>
           </div>
           <div className="collector-count-grid live-store-grid">
             <CountTile label="Clusters" value={status.liveStore.clusters} />
@@ -232,6 +232,7 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
           <div className="store-limit-row">
             <span>Metric point retention: {status.liveStore.limits.metricPointsPerSeries.toLocaleString()} per series</span>
             <span>Event/profile retention: {status.liveStore.limits.rowsPerKind.toLocaleString()} rows per kind</span>
+            {status.liveStore.lastUpdatedAt && <span>Last update: {formatDateTime(status.liveStore.lastUpdatedAt)}</span>}
           </div>
         </section>
       )}

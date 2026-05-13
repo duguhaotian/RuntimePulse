@@ -206,6 +206,7 @@ export type LiveStoreStatus = {
   events: number;
   traces: number;
   profiles: number;
+  lastUpdatedAt?: string;
   limits: {
     metricPointsPerSeries: number;
     rowsPerKind: number;

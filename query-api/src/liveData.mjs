@@ -11,6 +11,7 @@ export function createLiveStore() {
     eventsBySandbox: new Map(),
     tracesBySandbox: new Map(),
     profilesBySandbox: new Map(),
+    lastUpdatedAt: undefined,
   };
 }
 
@@ -23,6 +24,7 @@ export function recordLiveBatch(store, payload) {
   for (const profile of array(payload.profiles)) rememberRow(store.profilesBySandbox, profile.sandboxId, profile, rowLimit('profiles'));
 
   for (const sandbox of store.sandboxes.values()) refreshSandboxDerivedFields(store, sandbox);
+  store.lastUpdatedAt = new Date().toISOString();
 }
 
 export function liveClusters(store) {
@@ -73,6 +75,7 @@ export function liveStoreSnapshot(store) {
     events: rowCount(store.eventsBySandbox),
     traces: rowCount(store.tracesBySandbox),
     profiles: rowCount(store.profilesBySandbox),
+    lastUpdatedAt: store.lastUpdatedAt,
     limits: {
       metricPointsPerSeries: maxMetricPointsPerSeries,
       rowsPerKind: maxRowsPerKind,

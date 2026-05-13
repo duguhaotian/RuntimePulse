@@ -615,6 +615,7 @@ components:
         events: { type: integer }
         traces: { type: integer }
         profiles: { type: integer }
+        lastUpdatedAt: { type: string, format: date-time }
         limits:
           type: object
           required: [metricPointsPerSeries, rowsPerKind]
