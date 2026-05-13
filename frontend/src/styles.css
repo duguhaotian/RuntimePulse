@@ -528,6 +528,10 @@ h3 {
   min-width: 820px;
 }
 
+.live-source-table table {
+  min-width: 920px;
+}
+
 .recent-sample-table td {
   max-width: 360px;
 }

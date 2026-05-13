@@ -234,6 +234,36 @@ export function CollectorStatus({ api }: CollectorStatusProps) {
             <span>Event/profile retention: {status.liveStore.limits.rowsPerKind.toLocaleString()} rows per kind</span>
             {status.liveStore.lastUpdatedAt && <span>Last update: {formatDateTime(status.liveStore.lastUpdatedAt)}</span>}
           </div>
+          {status.liveStore.sources.length > 0 && (
+            <div className="recent-sample-table live-source-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Source</th>
+                    <th>Sandboxes</th>
+                    <th>Metric series</th>
+                    <th>Metric points</th>
+                    <th>Events</th>
+                    <th>Traces</th>
+                    <th>Profiles</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {status.liveStore.sources.map((source) => (
+                    <tr key={source.source}>
+                      <td><strong>{source.source}</strong></td>
+                      <td>{source.sandboxes.toLocaleString()}</td>
+                      <td>{source.metricSeries.toLocaleString()}</td>
+                      <td>{source.metricPoints.toLocaleString()}</td>
+                      <td>{source.events.toLocaleString()}</td>
+                      <td>{source.traces.toLocaleString()}</td>
+                      <td>{source.profiles.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
       )}
 

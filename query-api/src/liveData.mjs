@@ -11,12 +11,13 @@ export function createLiveStore() {
     eventsBySandbox: new Map(),
     tracesBySandbox: new Map(),
     profilesBySandbox: new Map(),
+    sourceBySandbox: new Map(),
     lastUpdatedAt: undefined,
   };
 }
 
 export function recordLiveBatch(store, payload) {
-  rememberMetadata(store, payload.metadata);
+  rememberMetadata(store, payload.metadata, payload.source);
 
   for (const metric of array(payload.metrics)) rememberMetric(store, metric);
   for (const event of array(payload.events)) rememberRow(store.eventsBySandbox, event.sandboxId, event, rowLimit('events'));
@@ -76,6 +77,7 @@ export function liveStoreSnapshot(store) {
     traces: rowCount(store.tracesBySandbox),
     profiles: rowCount(store.profilesBySandbox),
     lastUpdatedAt: store.lastUpdatedAt,
+    sources: liveSourceSnapshots(store),
     limits: {
       metricPointsPerSeries: maxMetricPointsPerSeries,
       rowsPerKind: maxRowsPerKind,
@@ -83,7 +85,7 @@ export function liveStoreSnapshot(store) {
   };
 }
 
-function rememberMetadata(store, metadata) {
+function rememberMetadata(store, metadata, source) {
   for (const cluster of array(metadata?.clusters)) {
     if (!cluster.id) continue;
     store.clusters.set(cluster.id, {
@@ -105,8 +107,38 @@ function rememberMetadata(store, metadata) {
 
   for (const sandbox of array(metadata?.sandboxes)) {
     const normalized = normalizeSandbox(sandbox, store);
-    if (normalized) store.sandboxes.set(normalized.id, normalized);
+    if (normalized) {
+      store.sandboxes.set(normalized.id, normalized);
+      if (source) store.sourceBySandbox.set(normalized.id, source);
+    }
   }
+}
+
+function liveSourceSnapshots(store) {
+  const bySource = new Map();
+
+  for (const [sandboxId, source] of store.sourceBySandbox.entries()) {
+    const current = bySource.get(source) ?? {
+      source,
+      sandboxes: 0,
+      metricSeries: 0,
+      metricPoints: 0,
+      events: 0,
+      traces: 0,
+      profiles: 0,
+    };
+    const series = store.metricsBySandbox.get(sandboxId);
+
+    current.sandboxes += store.sandboxes.has(sandboxId) ? 1 : 0;
+    current.metricSeries += series?.size ?? 0;
+    current.metricPoints += series ? Array.from(series.values()).reduce((sum, item) => sum + item.points.length, 0) : 0;
+    current.events += store.eventsBySandbox.get(sandboxId)?.length ?? 0;
+    current.traces += store.tracesBySandbox.get(sandboxId)?.length ?? 0;
+    current.profiles += store.profilesBySandbox.get(sandboxId)?.length ?? 0;
+    bySource.set(source, current);
+  }
+
+  return Array.from(bySource.values()).sort((left, right) => right.metricPoints - left.metricPoints);
 }
 
 function normalizeNode(node) {

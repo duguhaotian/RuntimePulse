@@ -124,6 +124,7 @@ Implemented:
 - Cluster, node, and sandbox detail pages auto-refresh query data so live collector updates are visible outside the Collectors page.
 - Runtime comparison aggregates now refresh from live Query API sandbox data instead of staying fixed to static mock rows.
 - Collectors page shows live query store occupancy for in-memory entities, metric series, points, events, traces, and profiles.
+- Live query store status breaks down in-memory occupancy by collector source for multi-node validation.
 
 Collector candidates:
 

@@ -207,10 +207,21 @@ export type LiveStoreStatus = {
   traces: number;
   profiles: number;
   lastUpdatedAt?: string;
+  sources: LiveStoreSourceStatus[];
   limits: {
     metricPointsPerSeries: number;
     rowsPerKind: number;
   };
+};
+
+export type LiveStoreSourceStatus = {
+  source: string;
+  sandboxes: number;
+  metricSeries: number;
+  metricPoints: number;
+  events: number;
+  traces: number;
+  profiles: number;
 };
 
 export type IngestStatus = {

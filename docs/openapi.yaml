@@ -602,9 +602,20 @@ components:
         firstAcceptedAt: { type: string, format: date-time }
         lastAcceptedAt: { type: string, format: date-time }
         lastObservedAt: { type: string, format: date-time }
+    LiveStoreSourceStatus:
+      type: object
+      required: [source, sandboxes, metricSeries, metricPoints, events, traces, profiles]
+      properties:
+        source: { type: string }
+        sandboxes: { type: integer }
+        metricSeries: { type: integer }
+        metricPoints: { type: integer }
+        events: { type: integer }
+        traces: { type: integer }
+        profiles: { type: integer }
     LiveStoreStatus:
       type: object
-      required: [clusters, nodes, images, sandboxes, metricSeries, metricPoints, events, traces, profiles, limits]
+      required: [clusters, nodes, images, sandboxes, metricSeries, metricPoints, events, traces, profiles, sources, limits]
       properties:
         clusters: { type: integer }
         nodes: { type: integer }
@@ -616,6 +627,10 @@ components:
         traces: { type: integer }
         profiles: { type: integer }
         lastUpdatedAt: { type: string, format: date-time }
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/LiveStoreSourceStatus'
         limits:
           type: object
           required: [metricPointsPerSeries, rowsPerKind]
