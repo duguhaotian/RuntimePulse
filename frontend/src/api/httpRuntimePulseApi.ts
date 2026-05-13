@@ -9,6 +9,7 @@ import type {
   ProfileArtifact,
   RuntimeCompareRow,
   Sandbox,
+  SandboxAnalysis,
   SandboxQuery,
   TimeRange,
   TraceSpan,
@@ -53,6 +54,9 @@ export function createHttpRuntimePulseApi(baseUrl: string): RuntimePulseApi {
     },
     getSandboxProfiles(id) {
       return request<ProfileArtifact[]>(`/sandboxes/${encodeURIComponent(id)}/profiles`);
+    },
+    getSandboxAnalysis(id) {
+      return request<SandboxAnalysis>(`/sandboxes/${encodeURIComponent(id)}/analysis`);
     },
     compareRuntimes(range) {
       return request<RuntimeCompareRow[]>('/runtimes/compare', timeRangeParams(range));

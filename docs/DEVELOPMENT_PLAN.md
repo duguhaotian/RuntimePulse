@@ -75,6 +75,7 @@ GET /api/sandboxes/{id}/metrics
 GET /api/sandboxes/{id}/events
 GET /api/sandboxes/{id}/trace
 GET /api/sandboxes/{id}/profiles
+GET /api/sandboxes/{id}/analysis
 GET /api/runtimes/compare
 GET /api/images/{id}
 GET /api/nodes/{id}
@@ -167,6 +168,12 @@ Goals:
 
 - Add automated analysis only after data model and query API stabilize.
 - Use AI as an assistant for expert workflows, not as a replacement for raw data visibility.
+
+Implemented:
+
+- Sandbox rule analysis endpoint: `GET /api/sandboxes/{id}/analysis`.
+- Rule findings combine sandbox metadata, metrics, events, trace spans, image details, and profile indexes.
+- Sandbox detail overview now shows rule findings with evidence, recommended actions, and trace-span drill-down links.
 
 Potential architecture:
 

@@ -3101,6 +3101,159 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   line-height: 1.65;
 }
 
+.analysis-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.analysis-header {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.analysis-header h3,
+.analysis-header p,
+.analysis-lead p,
+.analysis-finding-card p {
+  margin: 0;
+}
+
+.analysis-header p {
+  margin-top: 5px;
+  max-width: 880px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.analysis-generated {
+  min-width: 150px;
+  padding: 10px 12px;
+  border: 1px solid rgba(246, 195, 68, 0.2);
+  border-radius: 10px;
+  background: rgba(246, 195, 68, 0.08);
+  text-align: right;
+}
+
+.analysis-generated strong {
+  display: block;
+  color: #fff4cb;
+  font-size: 24px;
+}
+
+.analysis-generated span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.analysis-lead {
+  display: grid;
+  gap: 6px;
+  padding: 13px 14px;
+  border: 1px solid rgba(75, 163, 255, 0.24);
+  border-radius: 10px;
+  background: rgba(75, 163, 255, 0.08);
+}
+
+.analysis-lead.warning {
+  border-color: rgba(246, 195, 68, 0.32);
+  background: rgba(246, 195, 68, 0.1);
+}
+
+.analysis-lead.critical {
+  border-color: rgba(255, 93, 115, 0.34);
+  background: rgba(255, 93, 115, 0.1);
+}
+
+.analysis-lead span,
+.analysis-finding-title span,
+.analysis-list span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.analysis-lead strong {
+  color: #f8fafc;
+  font-size: 16px;
+}
+
+.analysis-lead p,
+.analysis-finding-card p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.analysis-finding-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.analysis-finding-card {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 10px;
+  background: rgba(10, 14, 20, 0.42);
+}
+
+.analysis-finding-card.warning {
+  border-color: rgba(246, 195, 68, 0.28);
+}
+
+.analysis-finding-card.critical {
+  border-color: rgba(255, 93, 115, 0.32);
+}
+
+.analysis-finding-title {
+  display: grid;
+  gap: 4px;
+}
+
+.analysis-finding-title strong {
+  overflow-wrap: anywhere;
+  color: #f8fafc;
+  font-size: 14px;
+}
+
+.analysis-list {
+  display: grid;
+  gap: 5px;
+}
+
+.analysis-list em {
+  overflow-wrap: anywhere;
+  color: #c8d3df;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.analysis-related-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.analysis-related-actions button {
+  border: 1px solid rgba(75, 163, 255, 0.24);
+  border-radius: 8px;
+  background: rgba(75, 163, 255, 0.09);
+  color: #b8dcff;
+  font-size: 11px;
+  font-weight: 850;
+  padding: 6px 8px;
+}
+
 .config-card dl {
   display: grid;
   grid-template-columns: 125px minmax(0, 1fr);

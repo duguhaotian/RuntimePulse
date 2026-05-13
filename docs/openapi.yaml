@@ -169,6 +169,21 @@ paths:
                 $ref: '#/components/schemas/ProfileArtifactListResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+  /sandboxes/{id}/analysis:
+    get:
+      summary: Get rule-based sandbox analysis
+      description: Returns explainable rule findings derived from sandbox metadata, metrics, events, trace spans, image details, and profile indexes.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Sandbox analysis
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxAnalysisResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /runtimes/compare:
     get:
       summary: Compare runtime aggregate metrics
@@ -469,6 +484,55 @@ components:
         objectUri: { type: string }
         flamegraph:
           $ref: '#/components/schemas/FlamegraphFrame'
+    AnalysisSeverity:
+      type: string
+      enum: [info, warning, critical]
+    AnalysisCategory:
+      type: string
+      enum: [startup, image, node, runtime, profile]
+    AnalysisFinding:
+      type: object
+      required: [id, severity, category, title, summary, evidence, recommendedActions]
+      properties:
+        id: { type: string }
+        severity:
+          $ref: '#/components/schemas/AnalysisSeverity'
+        category:
+          $ref: '#/components/schemas/AnalysisCategory'
+        title: { type: string }
+        summary: { type: string }
+        evidence:
+          type: array
+          items:
+            type: string
+        recommendedActions:
+          type: array
+          items:
+            type: string
+        relatedMetricNames:
+          type: array
+          items:
+            type: string
+        relatedEventIds:
+          type: array
+          items:
+            type: string
+        relatedSpanIds:
+          type: array
+          items:
+            type: string
+    SandboxAnalysis:
+      type: object
+      required: [sandboxId, generatedAt, summary, findings]
+      properties:
+        sandboxId: { type: string }
+        generatedAt: { type: string, format: date-time }
+        summary: { type: string }
+        bottleneckStage: { type: string }
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnalysisFinding'
     RuntimeCompareRow:
       type: object
       required: [runtimeType, sampleCount, startupP50Ms, startupP95Ms, cpuOverheadRatio, memoryOverheadBytes, failureRate]
@@ -784,6 +848,8 @@ components:
       $ref: '#/components/schemas/DataResponse_TraceSpanArray'
     ProfileArtifactListResponse:
       $ref: '#/components/schemas/DataResponse_ProfileArtifactArray'
+    SandboxAnalysisResponse:
+      $ref: '#/components/schemas/DataResponse_SandboxAnalysis'
     RuntimeCompareListResponse:
       $ref: '#/components/schemas/DataResponse_RuntimeCompareRowArray'
     IngestAcceptedResponse:
@@ -874,6 +940,12 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ProfileArtifact'
+    DataResponse_SandboxAnalysis:
+      type: object
+      required: [data]
+      properties:
+        data:
+          $ref: '#/components/schemas/SandboxAnalysis'
     DataResponse_RuntimeCompareRowArray:
       type: object
       required: [data]

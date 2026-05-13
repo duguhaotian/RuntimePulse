@@ -9,6 +9,7 @@ import type {
   ProfileArtifact,
   RuntimeCompareRow,
   Sandbox,
+  SandboxAnalysis,
   SandboxQuery,
   TimeRange,
   TraceSpan,
@@ -26,6 +27,7 @@ export interface RuntimePulseApi {
   getSandboxEvents(id: string, range?: TimeRange): Promise<EventRecord[]>;
   getSandboxTrace(id: string): Promise<TraceSpan[]>;
   getSandboxProfiles(id: string): Promise<ProfileArtifact[]>;
+  getSandboxAnalysis(id: string): Promise<SandboxAnalysis>;
   compareRuntimes(range?: TimeRange): Promise<RuntimeCompareRow[]>;
   getIngestStatus(): Promise<IngestStatus>;
   getIngestRecent(): Promise<IngestRecent>;

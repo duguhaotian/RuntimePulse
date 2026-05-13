@@ -1,5 +1,5 @@
 import type { RuntimePulseApi } from './RuntimePulseApi';
-import type { IngestRecent, IngestStatus, SandboxQuery } from '../domain/model';
+import type { IngestRecent, IngestStatus, SandboxAnalysis, SandboxQuery } from '../domain/model';
 import {
   clusters,
   eventsForSandbox,
@@ -55,6 +55,39 @@ export const mockRuntimePulseApi: RuntimePulseApi = {
   },
   async getSandboxProfiles(id) {
     return profilesForSandbox(id);
+  },
+  async getSandboxAnalysis(id) {
+    const sandbox = sandboxes.find((item) => item.id === id) ?? sandboxes[0];
+    const spans = traceForSandbox(id);
+    const largestSpan = [...spans].sort((left, right) => right.durationMs - left.durationMs)[0];
+    const slow = sandbox.startupDurationMs > 7000;
+
+    return {
+      sandboxId: sandbox.id,
+      generatedAt: new Date().toISOString(),
+      summary: slow
+        ? `${largestSpan.spanName} is the largest observed startup stage. Review trace, image access, and profile artifacts before changing runtime settings.`
+        : 'No obvious bottleneck detected from the current mock analysis context.',
+      bottleneckStage: largestSpan.spanName,
+      findings: [
+        {
+          id: `${sandbox.id}-mock-startup`,
+          severity: slow ? 'warning' : 'info',
+          category: largestSpan.spanName.startsWith('image.') ? 'image' : 'startup',
+          title: slow ? 'Startup path needs review' : 'Startup path looks normal',
+          summary: `${sandbox.runtimeType} startup is ${Math.round(sandbox.startupDurationMs)}ms and ${largestSpan.spanName} is the largest span.`,
+          evidence: [
+            `startup.duration_ms=${sandbox.startupDurationMs}`,
+            `${largestSpan.spanName}=${Math.round(largestSpan.durationMs)}ms`,
+          ],
+          recommendedActions: [
+            'Open the startup trace and inspect the largest span.',
+            'Compare with another run that uses the same image.',
+          ],
+          relatedSpanIds: [largestSpan.spanId],
+        },
+      ],
+    } satisfies SandboxAnalysis;
   },
   async compareRuntimes() {
     return runtimeComparison;

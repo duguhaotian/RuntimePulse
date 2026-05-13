@@ -145,6 +145,29 @@ export type ProfileArtifact = {
   flamegraph?: FlamegraphFrame;
 };
 
+export type AnalysisSeverity = 'info' | 'warning' | 'critical';
+
+export type AnalysisFinding = {
+  id: string;
+  severity: AnalysisSeverity;
+  category: 'startup' | 'image' | 'node' | 'runtime' | 'profile';
+  title: string;
+  summary: string;
+  evidence: string[];
+  recommendedActions: string[];
+  relatedMetricNames?: string[];
+  relatedEventIds?: string[];
+  relatedSpanIds?: string[];
+};
+
+export type SandboxAnalysis = {
+  sandboxId: string;
+  generatedAt: string;
+  summary: string;
+  bottleneckStage?: string;
+  findings: AnalysisFinding[];
+};
+
 export type SandboxQuery = {
   runtimeType?: RuntimeType | 'all';
   status?: SandboxStatus | 'all';

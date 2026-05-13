@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { buildSandboxAnalysis } from './analysis.mjs';
 import {
   createIngestStatus,
   ingestRecentSnapshot,
@@ -121,6 +122,16 @@ function sendSandboxResource(response, id, child, range) {
   if (child === 'events') return sendData(response, filterTimestamped(eventsForSandboxMerged(id), range, 'timestamp'));
   if (child === 'trace') return sendData(response, filterTraceSpans(traceForSandboxMerged(id), range));
   if (child === 'profiles') return sendData(response, filterTimestamped(profilesForSandboxMerged(id), range, 'timestamp'));
+  if (child === 'analysis') {
+    return sendData(response, buildSandboxAnalysis({
+      sandbox,
+      image: mergeById(images, liveImages(liveStore)).find((item) => item.id === sandbox.imageId),
+      metrics: metricsForSandboxMerged(id),
+      events: eventsForSandboxMerged(id),
+      spans: traceForSandboxMerged(id),
+      profiles: profilesForSandboxMerged(id),
+    }));
+  }
 
   return sendJson(response, 404, { error: 'not_found' });
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
-import type { EventRecord, FlamegraphFrame, Image, MetricSeries, Node, ProfileArtifact, Sandbox, TraceSpan } from '../../domain/model';
+import type { AnalysisFinding, EventRecord, FlamegraphFrame, Image, MetricSeries, Node, ProfileArtifact, Sandbox, SandboxAnalysis, TraceSpan } from '../../domain/model';
 import { MetricChart } from '../../components/charts/MetricChart';
 import { EventTimeline } from '../../components/timeline/EventTimeline';
 import { TraceWaterfall } from '../../components/trace/TraceWaterfall';
@@ -40,6 +40,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [spans, setSpans] = useState<TraceSpan[]>([]);
   const [profiles, setProfiles] = useState<ProfileArtifact[]>([]);
+  const [analysis, setAnalysis] = useState<SandboxAnalysis>();
   const [selectedSpan, setSelectedSpan] = useState<TraceSpan>();
   const [selectedEvent, setSelectedEvent] = useState<EventRecord>();
   const [lastRefreshAt, setLastRefreshAt] = useState<string>();
@@ -53,13 +54,14 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
     const refresh = () => {
       api.getSandbox(sandboxId).then(async (nextSandbox) => {
         if (!mounted || !nextSandbox) return;
-        const [nextNode, nextImage, nextMetrics, nextEvents, nextSpans, nextProfiles] = await Promise.all([
+        const [nextNode, nextImage, nextMetrics, nextEvents, nextSpans, nextProfiles, nextAnalysis] = await Promise.all([
           api.getNode(nextSandbox.nodeId),
           api.getImage(nextSandbox.imageId),
           api.getSandboxMetrics(sandboxId),
           api.getSandboxEvents(sandboxId),
           api.getSandboxTrace(sandboxId),
           api.getSandboxProfiles(sandboxId),
+          api.getSandboxAnalysis(sandboxId),
         ]);
         if (!mounted) return;
         setSandbox(nextSandbox);
@@ -69,6 +71,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
         setEvents(nextEvents);
         setSpans(nextSpans);
         setProfiles(nextProfiles);
+        setAnalysis(nextAnalysis);
         setLastRefreshAt(new Date().toISOString());
       });
     };
@@ -180,6 +183,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 
       {tab === 'overview' && (
         <div className="overview-stack">
+          {analysis && <AnalysisPanel analysis={analysis} spans={spans} onSelectSpan={setSelectedSpan} />}
           {image && <ContainerImageAccessPanel sandbox={sandbox} image={image} ioSeries={pressureSeries.io} networkSeries={pressureSeries.network} />}
           <div className="overview-timeline-stack">
             <div className="panel-card">
@@ -223,6 +227,88 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {tab === 'raw' && <pre className="raw-json">{JSON.stringify({ sandbox, node, image, events, spans, profiles }, null, 2)}</pre>}
       {selectedSpan && <TraceSpanDetailModal span={selectedSpan} onClose={() => setSelectedSpan(undefined)} />}
     </section>
+  );
+}
+
+function AnalysisPanel({
+  analysis,
+  spans,
+  onSelectSpan,
+}: {
+  analysis: SandboxAnalysis;
+  spans: TraceSpan[];
+  onSelectSpan: (span: TraceSpan) => void;
+}) {
+  const topFinding = analysis.findings[0];
+
+  return (
+    <div className="panel-card analysis-panel">
+      <div className="analysis-header">
+        <div>
+          <h3>Rule analysis</h3>
+          <p>{analysis.summary}</p>
+        </div>
+        <div className="analysis-generated">
+          <strong>{analysis.findings.length}</strong>
+          <span>{analysis.bottleneckStage ?? 'no dominant stage'}</span>
+        </div>
+      </div>
+
+      {topFinding ? (
+        <div className={`analysis-lead ${topFinding.severity}`}>
+          <span>{topFinding.category}</span>
+          <strong>{topFinding.title}</strong>
+          <p>{topFinding.summary}</p>
+        </div>
+      ) : (
+        <div className="empty-state">No findings generated for this sandbox.</div>
+      )}
+
+      <div className="analysis-finding-grid">
+        {analysis.findings.map((finding) => (
+          <AnalysisFindingCard finding={finding} key={finding.id} spans={spans} onSelectSpan={onSelectSpan} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AnalysisFindingCard({
+  finding,
+  spans,
+  onSelectSpan,
+}: {
+  finding: AnalysisFinding;
+  spans: TraceSpan[];
+  onSelectSpan: (span: TraceSpan) => void;
+}) {
+  const relatedSpans = (finding.relatedSpanIds ?? [])
+    .map((spanId) => spans.find((span) => span.spanId === spanId))
+    .filter((span): span is TraceSpan => Boolean(span));
+
+  return (
+    <article className={`analysis-finding-card ${finding.severity}`}>
+      <div className="analysis-finding-title">
+        <span>{finding.severity}</span>
+        <strong>{finding.title}</strong>
+      </div>
+      <p>{finding.summary}</p>
+      <div className="analysis-list">
+        <span>Evidence</span>
+        {finding.evidence.slice(0, 3).map((item) => <em key={item}>{item}</em>)}
+      </div>
+      <div className="analysis-list">
+        <span>Next actions</span>
+        {finding.recommendedActions.slice(0, 2).map((item) => <em key={item}>{item}</em>)}
+      </div>
+      {relatedSpans.length > 0 && (
+        <div className="analysis-related-actions">
+          {relatedSpans.map((span) => (
+            <button key={span.spanId} onClick={() => onSelectSpan(span)}>Open {span.spanName}</button>
+          ))}
+        </div>
+      )}
+    </article>
   );
 }
 
