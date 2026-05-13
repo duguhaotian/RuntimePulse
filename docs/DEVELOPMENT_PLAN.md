@@ -126,6 +126,8 @@ Implemented:
 - Runtime comparison aggregates now refresh from live Query API sandbox data instead of staying fixed to static mock rows.
 - Collectors page shows live query store occupancy for in-memory entities, metric series, points, events, traces, and profiles.
 - Live query store status breaks down in-memory occupancy by collector source for multi-node validation.
+- Rust collector skeleton with pluginized data sources: `procfs` real node metrics, `command` external binary output conversion, and `http` API output conversion.
+- Docker Compose runs the Rust collector beside mock collectors so real container `/proc` metrics are validated through the same ingest path.
 
 Collector candidates:
 

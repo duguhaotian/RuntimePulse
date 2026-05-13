@@ -11,6 +11,7 @@ RuntimePulse is an early-stage sandbox runtime metrics platform prototype. Phase
 - Mock API adapter that can later be replaced by a real HTTP API without rewriting pages.
 - Lightweight Query API container that serves the same mock telemetry over HTTP for frontend/backend contract validation.
 - Mock node collector containers that periodically validate multi-node payloads through the ingest API.
+- Rust collector container with pluginized sources for procfs metrics, external command output, and HTTP API output.
 - Container-first deployment for local validation and later platform packaging.
 
 ## Documentation
@@ -20,6 +21,7 @@ RuntimePulse is an early-stage sandbox runtime metrics platform prototype. Phase
 - [Git Workflow](docs/GIT_WORKFLOW.md)
 - [OpenAPI Contract](docs/openapi.yaml)
 - [Storage Design](docs/STORAGE_DESIGN.md)
+- [Collector Plugins](docs/COLLECTOR_PLUGINS.md)
 
 ## Container Deployment
 
@@ -78,8 +80,31 @@ frontend/src/components Reusable visualization/layout components
 frontend/src/pages      Expert analysis pages
 frontend/src/utils      Time, unit, and color helpers
 query-api               Minimal HTTP Query API backed by mock telemetry
-collector               Mock node collector image used for multi-node validation-only ingest batches
+collector               Mock node collector image used for multi-node ingest validation
+rust-collector          Rust collector framework with procfs, command, and HTTP plugins
 ```
+
+## Rust Collector Plugins
+
+The Rust collector sends the same ingest batch contract as every other collector.
+
+```bash
+cd rust-collector
+cargo build
+cd ..
+docker compose up -d runtimepulse-rust-collector
+```
+
+Default plugin:
+
+- `procfs`: reads `/proc` CPU, memory, disk, load, process, and cgroup-like process signals from the container view.
+
+Optional plugins:
+
+- `command`: set `RUNTIMEPULSE_COLLECTOR_PLUGINS=procfs,command` and `RUNTIMEPULSE_COMMAND_PLUGIN_CMD='your-tool --json'`.
+- `http`: set `RUNTIMEPULSE_COLLECTOR_PLUGINS=procfs,http` and `RUNTIMEPULSE_HTTP_PLUGIN_URL=http://tool:port/metrics/runtimepulse`.
+
+Command/API plugins should return JSON shaped like `rust-collector/examples/command-plugin-output.json`; the collector merges it into one ingest batch.
 
 ## Mock Scenarios
 

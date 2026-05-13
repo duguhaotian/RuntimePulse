@@ -49,6 +49,27 @@ services:
       retries: 3
     restart: unless-stopped
 
+  runtimepulse-rust-collector:
+    build:
+      context: ./rust-collector
+      dockerfile: Dockerfile
+    image: runtimepulse/rust-collector:dev
+    container_name: runtimepulse-rust-collector
+    depends_on:
+      - runtimepulse-query-api
+    environment:
+      INGEST_URL: http://runtimepulse-query-api:8081/api/ingest/batch
+      RUNTIMEPULSE_COLLECTOR_NODE_ID: rust-node-a
+      RUNTIMEPULSE_COLLECTOR_CLUSTER_ID: cluster-prod
+      RUNTIMEPULSE_COLLECTOR_INTERVAL_MS: 5000
+      RUNTIMEPULSE_COLLECTOR_PLUGINS: procfs
+    healthcheck:
+      test: ["CMD", "runtimepulse-collector", "--version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
   runtimepulse-frontend:
     build:
       context: ./frontend
@@ -61,6 +82,7 @@ services:
       - runtimepulse-query-api
       - runtimepulse-mock-node-collector-a
       - runtimepulse-mock-node-collector-b
+      - runtimepulse-rust-collector
     ports:
       - "8080:8080"
     restart: unless-stopped

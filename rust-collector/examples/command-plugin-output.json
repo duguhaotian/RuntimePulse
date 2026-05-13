@@ -1,0 +1,50 @@
+{
+  "metadata": {
+    "sandboxes": [
+      {
+        "id": "external-tool-sandbox-001",
+        "nodeId": "rust-node-a",
+        "runtimeType": "runc",
+        "runtimeVersion": "external-tool",
+        "imageRef": "external/tool:latest",
+        "workloadName": "external-tool-sample",
+        "status": "running",
+        "labels": {
+          "source": "external-tool"
+        },
+        "attributes": {
+          "collector.kind": "command"
+        }
+      }
+    ]
+  },
+  "metrics": [
+    {
+      "timestamp": "2026-05-13T00:00:00Z",
+      "name": "sandbox.cpu.usage_ratio",
+      "value": 0.12,
+      "unit": "ratio",
+      "group": "cpu",
+      "sandboxId": "external-tool-sandbox-001",
+      "nodeId": "rust-node-a",
+      "runtimeType": "runc"
+    }
+  ],
+  "events": [
+    {
+      "id": "external-tool-sandbox-001-observed",
+      "timestamp": "2026-05-13T00:00:00Z",
+      "severity": "info",
+      "eventType": "collector",
+      "eventName": "external.tool.observed",
+      "message": "External tool output was converted by the Rust collector command plugin.",
+      "source": "runtimepulse-rust-collector/command",
+      "sandboxId": "external-tool-sandbox-001",
+      "nodeId": "rust-node-a",
+      "runtimeType": "runc",
+      "attributes": {
+        "tool": "example"
+      }
+    }
+  ]
+}
