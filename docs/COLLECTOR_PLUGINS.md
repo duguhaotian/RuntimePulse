@@ -2,6 +2,8 @@
 
 The Rust collector is the preferred path for real data collection. It keeps collection independent from the frontend and sends the same `POST /api/ingest/batch` payload as other collectors.
 
+On a production node, the Rust collector should also act as the node-local gateway. Host tools and container tools submit locally to the gateway, and only the gateway posts to the central RuntimePulse ingest API.
+
 ## Plugin Model
 
 Each plugin returns partial ingest data:
@@ -13,6 +15,8 @@ Each plugin returns partial ingest data:
 - `profiles`: profile artifact indexes
 
 The collector merges plugin outputs into one batch, adds the collector source, and posts it to the Query API ingest endpoint.
+
+For node deployments, plugin output should flow through the local gateway path even when the plugin runs in a separate container or process. This keeps node identity, buffering, retry, and central credentials in one place.
 
 ## Built-In Plugins
 
