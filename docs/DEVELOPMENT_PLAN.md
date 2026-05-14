@@ -126,7 +126,7 @@ Implemented:
 - Runtime comparison aggregates now refresh from live Query API sandbox data instead of staying fixed to static mock rows.
 - Collectors page shows live query store occupancy for in-memory entities, metric series, points, events, traces, and profiles.
 - Live query store status breaks down in-memory occupancy by collector source for multi-node validation.
-- Rust collector skeleton with a containerized outlet plus pluginized data sources: host-side `procfs`, external command output conversion, and HTTP API output conversion.
+- Rust collector skeleton with a containerized outlet plus pluginized data sources: host-side `procfs`, host-side `cgroupfs`, external command output conversion, and HTTP API output conversion.
 - Docker Compose default path runs the Rust collector as the node-local outlet; node-wide `/proc`, cgroupfs, and PSI data is collected by host-side tools and pushed to the outlet.
 - Collector deployment guidance now separates container-friendly sources from host-only sources such as PSI, containerd lifecycle, image cache, and eBPF/profiling.
 - Node-level unified outlet design: host tools and container tools report to the collector container over `POST /api/local/ingest`, and the collector outlet is the only component that posts to central ingest.
@@ -134,6 +134,7 @@ Implemented:
 - Query API defaults to live ingest data only; seeded mock telemetry is available only with `RUNTIMEPULSE_SEED_MOCK_DATA=true`.
 - Docker Compose default path runs the Rust collector and excludes mock collectors unless the `mock` profile is enabled.
 - Rust host-side procfs tool reports real Linux PSI samples from `/proc/pressure/*` as node pressure metrics.
+- Rust host-side cgroupfs tool reports cgroup v2 CPU, memory, IO, and process count samples as sandbox-shaped resource metrics.
 
 Collector candidates:
 

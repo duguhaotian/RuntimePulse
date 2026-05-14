@@ -116,6 +116,18 @@ RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
 cargo run -- host-procfs
 ```
 
+For cgroup v2 resource samples:
+
+```bash
+cd rust-collector
+RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
+RUNTIMEPULSE_CGROUP_MAX_ENTRIES=200 \
+RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
+cargo run -- host-cgroupfs
+```
+
+For one-shot validation, add `RUNTIMEPULSE_COLLECTOR_ONCE=true`.
+
 By default this host-side tool posts to:
 
 ```text

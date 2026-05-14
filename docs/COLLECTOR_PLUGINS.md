@@ -28,6 +28,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 ## Host-Side Tools
 
 - `host-procfs`: runs on the host, reads `/proc`, `/proc/pressure/*`, and cgroup-like process signals from the host view, then pushes partial ingest JSON to the outlet over HTTP.
+- `host-cgroupfs`: runs on the host, reads cgroup v2 CPU, memory, IO, and process counts from `/sys/fs/cgroup`, then pushes sandbox-shaped resource samples to the outlet over HTTP.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
 
@@ -37,6 +38,25 @@ RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
 RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
 cargo run -- host-procfs
 ```
+
+```bash
+cd rust-collector
+RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
+RUNTIMEPULSE_CGROUP_MAX_ENTRIES=200 \
+RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
+cargo run -- host-cgroupfs
+```
+
+Useful host tool settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RUNTIMEPULSE_COLLECTOR_NODE_ID` | `rust-node-a` | Node id attached to host samples. |
+| `RUNTIMEPULSE_LOCAL_REPORT_URL` | `http://localhost:9091/api/local/ingest` | Collector outlet endpoint. |
+| `RUNTIMEPULSE_COLLECTOR_INTERVAL_MS` | `5000` | Sampling interval for loop mode. |
+| `RUNTIMEPULSE_COLLECTOR_ONCE` | `false` | Set `true` to collect once and exit. |
+| `RUNTIMEPULSE_CGROUP_ROOT` | `/sys/fs/cgroup` | cgroup v2 root to scan. |
+| `RUNTIMEPULSE_CGROUP_MAX_ENTRIES` | `200` | Maximum cgroups sampled per tick. |
 
 ## Command Plugin
 

@@ -6,6 +6,7 @@ use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -39,6 +40,9 @@ struct CollectorConfig {
     local_report_addr: String,
     local_report_url: String,
     collection_scope: String,
+    once: bool,
+    cgroup_root: PathBuf,
+    cgroup_max_entries: usize,
     plugins: Vec<String>,
     command_plugin: Option<CommandPluginConfig>,
     http_plugin: Option<HttpPluginConfig>,
@@ -202,6 +206,23 @@ struct PsiSnapshot {
     memory_full: f64,
 }
 
+struct CgroupfsPlugin {
+    last_seen: Option<Instant>,
+    last_cpu_usage_by_path: std::collections::HashMap<String, u64>,
+    root: PathBuf,
+    max_entries: usize,
+}
+
+struct CgroupSample {
+    relative_path: String,
+    id: String,
+    cpu_usage_usec: Option<u64>,
+    memory_current: Option<u64>,
+    io_read_bytes: Option<u64>,
+    io_write_bytes: Option<u64>,
+    process_count: Option<u64>,
+}
+
 struct CommandPlugin {
     name: String,
     command: String,
@@ -221,6 +242,8 @@ fn main() {
 
     let result = if env::args().any(|arg| arg == "host-procfs") {
         run_host_procfs()
+    } else if env::args().any(|arg| arg == "host-cgroupfs") {
+        run_host_cgroupfs()
     } else {
         run_outlet()
     };
@@ -279,7 +302,13 @@ fn run_outlet() -> Result<()> {
         if config.interval > elapsed {
             thread::sleep(config.interval - elapsed);
         }
+
+        if config.once {
+            break;
+        }
     }
+
+    Ok(())
 }
 
 fn run_host_procfs() -> Result<()> {
@@ -328,7 +357,69 @@ fn run_host_procfs() -> Result<()> {
         if config.interval > elapsed {
             thread::sleep(config.interval - elapsed);
         }
+
+        if config.once {
+            break;
+        }
     }
+
+    Ok(())
+}
+
+fn run_host_cgroupfs() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+    config.plugins = vec!["cgroupfs".to_string()];
+
+    let client = Client::new();
+    let mut plugin = CgroupfsPlugin::new(config.cgroup_root.clone(), config.cgroup_max_entries);
+
+    loop {
+        let started = Instant::now();
+        let now = Utc::now();
+        match plugin.collect(now, &config) {
+            Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
+                Ok(()) => println!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "message": "host_cgroupfs_report_accepted",
+                        "url": config.local_report_url,
+                        "sandboxes": output.metadata.sandboxes.len(),
+                        "metrics": output.metrics.len(),
+                        "events": output.events.len(),
+                    })
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "host_cgroupfs_report_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            },
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "message": "host_cgroupfs_collect_failed",
+                    "error": error.to_string(),
+                })
+            ),
+        }
+
+        if config.once {
+            break;
+        }
+
+        let elapsed = started.elapsed();
+        if config.interval > elapsed {
+            thread::sleep(config.interval - elapsed);
+        }
+    }
+
+    Ok(())
 }
 
 struct BatchSummary {
@@ -430,6 +521,14 @@ impl CollectorConfig {
                 .unwrap_or_else(|_| "http://localhost:9091/api/local/ingest".to_string()),
             collection_scope: env::var("RUNTIMEPULSE_COLLECTOR_SCOPE")
                 .unwrap_or_else(|_| "outlet".to_string()),
+            once: env_bool("RUNTIMEPULSE_COLLECTOR_ONCE"),
+            cgroup_root: PathBuf::from(
+                env::var("RUNTIMEPULSE_CGROUP_ROOT")
+                    .unwrap_or_else(|_| "/sys/fs/cgroup".to_string()),
+            ),
+            cgroup_max_entries: env_u64("RUNTIMEPULSE_CGROUP_MAX_ENTRIES")
+                .unwrap_or(200)
+                .max(1) as usize,
             plugins,
             command_plugin: command_plugin_config(),
             http_plugin: http_plugin_config(),
@@ -788,6 +887,208 @@ impl CollectorPlugin for ProcfsPlugin {
 
         Ok(PluginOutput {
             metadata,
+            metrics,
+            events,
+            traces: Vec::new(),
+            profiles: Vec::new(),
+        })
+    }
+}
+
+impl CgroupfsPlugin {
+    fn new(root: PathBuf, max_entries: usize) -> Self {
+        Self {
+            last_seen: None,
+            last_cpu_usage_by_path: std::collections::HashMap::new(),
+            root,
+            max_entries,
+        }
+    }
+}
+
+impl CollectorPlugin for CgroupfsPlugin {
+    fn name(&self) -> &str {
+        "cgroupfs"
+    }
+
+    fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
+        let ts = timestamp(now);
+        let sample_interval = self
+            .last_seen
+            .map(|seen| seen.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        let samples = collect_cgroup_samples(&self.root, self.max_entries)?;
+        let image_id = "runtimepulse-host-cgroup";
+        let image_ref = "runtimepulse/host-cgroupfs:host";
+        let runtime_type = "host";
+        let mut sandboxes = Vec::new();
+        let mut metrics = Vec::new();
+
+        for sample in samples {
+            let sandbox_id = format!("cgroup-{}", sample.id);
+            let previous_cpu = self.last_cpu_usage_by_path.insert(
+                sample.relative_path.clone(),
+                sample.cpu_usage_usec.unwrap_or(0),
+            );
+            let cpu_ratio = match (previous_cpu, sample.cpu_usage_usec) {
+                (Some(previous), Some(current)) if sample_interval > 0.0 => {
+                    (current.saturating_sub(previous) as f64 / 1_000_000.0 / sample_interval)
+                        .max(0.0)
+                }
+                _ => 0.0,
+            };
+            let display_name = cgroup_display_name(&sample.relative_path);
+
+            sandboxes.push(json!({
+                "id": sandbox_id,
+                "clusterId": config.cluster_id,
+                "nodeId": config.node_id,
+                "namespace": "host-cgroupfs",
+                "workloadId": display_name,
+                "workloadName": display_name,
+                "imageId": image_id,
+                "imageRef": image_ref,
+                "runtimeType": runtime_type,
+                "runtimeVersion": "cgroupfs-v2",
+                "status": "running",
+                "createdAt": ts,
+                "startedAt": ts,
+                "startupDurationMs": 0,
+                "cpuAvg": cpu_ratio,
+                "memoryPeakBytes": sample.memory_current.unwrap_or(0),
+                "labels": {
+                    "collector": "runtimepulse-rust-collector",
+                    "plugin": "cgroupfs",
+                    "scope": config.collection_scope,
+                },
+                "attributes": {
+                    "collector.scope": config.collection_scope,
+                    "cgroup.path": sample.relative_path,
+                    "cgroup.process.count": sample.process_count.unwrap_or(0),
+                }
+            }));
+
+            metrics.push(metric(
+                &ts,
+                "sandbox.cpu.usage_ratio",
+                cpu_ratio,
+                "ratio",
+                "cpu",
+                &config.node_id,
+                &sandbox_id,
+                runtime_type,
+            ));
+
+            if let Some(memory_current) = sample.memory_current {
+                metrics.push(metric(
+                    &ts,
+                    "sandbox.memory.working_set_bytes",
+                    memory_current as f64,
+                    "bytes",
+                    "memory",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ));
+            }
+
+            if let Some(read_bytes) = sample.io_read_bytes {
+                metrics.push(metric(
+                    &ts,
+                    "sandbox.io.read_bytes",
+                    read_bytes as f64,
+                    "bytes",
+                    "io",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ));
+            }
+
+            if let Some(write_bytes) = sample.io_write_bytes {
+                metrics.push(metric(
+                    &ts,
+                    "sandbox.io.write_bytes",
+                    write_bytes as f64,
+                    "bytes",
+                    "io",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ));
+            }
+
+            if let Some(process_count) = sample.process_count {
+                metrics.push(metric(
+                    &ts,
+                    "sandbox.process.count",
+                    process_count as f64,
+                    "count",
+                    "runtime",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ));
+            }
+        }
+
+        self.last_seen = Some(Instant::now());
+
+        let mut attributes = Map::new();
+        attributes.insert("plugin".to_string(), json!("cgroupfs"));
+        attributes.insert("scope".to_string(), json!(config.collection_scope));
+        attributes.insert(
+            "cgroupRoot".to_string(),
+            json!(self.root.display().to_string()),
+        );
+        attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
+
+        let events = vec![EventRecord {
+            id: format!("host-cgroupfs-observed-{}", now.timestamp()),
+            timestamp: ts.clone(),
+            severity: "info".to_string(),
+            event_type: "collector".to_string(),
+            event_name: "cgroupfs.sample.observed".to_string(),
+            message: "Rust host cgroupfs collector sampled cgroup metrics".to_string(),
+            source: format!("runtimepulse-rust-collector/{}/cgroupfs", config.node_id),
+            attributes,
+            sandbox_id: None,
+            node_id: Some(config.node_id.clone()),
+            runtime_type: Some(runtime_type.to_string()),
+            reason: None,
+        }];
+
+        Ok(PluginOutput {
+            metadata: Metadata {
+                clusters: vec![json!({
+                    "id": config.cluster_id,
+                    "name": config.cluster_id,
+                    "environment": "collector"
+                })],
+                nodes: vec![json!({
+                    "id": config.node_id,
+                    "clusterId": config.cluster_id,
+                    "name": config.node_id,
+                    "kernelVersion": kernel_version().unwrap_or_else(|| "cgroupfs-observed".to_string()),
+                    "cpuCores": cpu_core_count().unwrap_or(0),
+                    "memoryBytes": read_memory_snapshot().map(|memory| memory.total_bytes).unwrap_or(0),
+                    "status": "ready",
+                    "labels": {
+                        "collector": "runtimepulse-rust-collector",
+                        "plugin": "cgroupfs",
+                        "scope": config.collection_scope,
+                    }
+                })],
+                images: vec![json!({
+                    "id": image_id,
+                    "ref": image_ref,
+                    "digest": "collector:runtimepulse-host-cgroup",
+                    "loadingMode": "eager",
+                    "sizeBytes": 0,
+                    "layerCount": 0
+                })],
+                sandboxes,
+            },
             metrics,
             events,
             traces: Vec::new(),
@@ -1229,6 +1530,136 @@ fn read_psi_avg10(path: &str, line_name: &str) -> Option<f64> {
     parse_psi_field(line, "avg10").map(|value| (value / 100.0).clamp(0.0, 1.0))
 }
 
+fn collect_cgroup_samples(root: &Path, max_entries: usize) -> Result<Vec<CgroupSample>> {
+    let mut samples = Vec::new();
+    collect_cgroup_samples_into(root, root, max_entries, &mut samples)?;
+    samples.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(samples)
+}
+
+fn collect_cgroup_samples_into(
+    root: &Path,
+    current: &Path,
+    max_entries: usize,
+    samples: &mut Vec<CgroupSample>,
+) -> Result<()> {
+    if samples.len() >= max_entries {
+        return Ok(());
+    }
+
+    if let Some(sample) = read_cgroup_sample(root, current) {
+        samples.push(sample);
+        if samples.len() >= max_entries {
+            return Ok(());
+        }
+    }
+
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+
+    for entry in entries.filter_map(std::result::Result::ok) {
+        if samples.len() >= max_entries {
+            break;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cgroup_samples_into(root, &path, max_entries, samples)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn read_cgroup_sample(root: &Path, path: &Path) -> Option<CgroupSample> {
+    let relative_path = path
+        .strip_prefix(root)
+        .ok()
+        .map(|path| path.to_string_lossy().trim_matches('/').to_string())
+        .filter(|value| !value.is_empty())?;
+    let process_count = read_cgroup_process_count(path);
+    let cpu_usage_usec = read_cpu_usage_usec(path);
+    let memory_current = read_u64_file(path.join("memory.current"));
+    let (io_read_bytes, io_write_bytes) = read_io_stat(path);
+
+    if process_count.unwrap_or(0) == 0
+        && memory_current.unwrap_or(0) == 0
+        && cpu_usage_usec.unwrap_or(0) == 0
+    {
+        return None;
+    }
+
+    Some(CgroupSample {
+        id: sanitize_id(&relative_path),
+        relative_path,
+        cpu_usage_usec,
+        memory_current,
+        io_read_bytes,
+        io_write_bytes,
+        process_count,
+    })
+}
+
+fn read_cgroup_process_count(path: &Path) -> Option<u64> {
+    fs::read_to_string(path.join("cgroup.procs"))
+        .ok()
+        .map(|value| value.lines().filter(|line| !line.trim().is_empty()).count() as u64)
+}
+
+fn read_cpu_usage_usec(path: &Path) -> Option<u64> {
+    let stat = fs::read_to_string(path.join("cpu.stat")).ok()?;
+    stat.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        if parts.next()? == "usage_usec" {
+            parts.next()?.parse::<u64>().ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn read_io_stat(path: &Path) -> (Option<u64>, Option<u64>) {
+    let stat = match fs::read_to_string(path.join("io.stat")) {
+        Ok(stat) => stat,
+        Err(_) => return (None, None),
+    };
+    let mut read_bytes = 0_u64;
+    let mut write_bytes = 0_u64;
+    let mut seen = false;
+
+    for line in stat.lines() {
+        for part in line.split_whitespace().skip(1) {
+            if let Some(value) = part.strip_prefix("rbytes=") {
+                read_bytes = read_bytes.saturating_add(value.parse::<u64>().unwrap_or(0));
+                seen = true;
+            }
+            if let Some(value) = part.strip_prefix("wbytes=") {
+                write_bytes = write_bytes.saturating_add(value.parse::<u64>().unwrap_or(0));
+                seen = true;
+            }
+        }
+    }
+
+    if seen {
+        (Some(read_bytes), Some(write_bytes))
+    } else {
+        (None, None)
+    }
+}
+
+fn read_u64_file(path: PathBuf) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()
+}
+
+fn cgroup_display_name(relative_path: &str) -> String {
+    relative_path
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(relative_path)
+        .to_string()
+}
+
 fn parse_psi_field(line: &str, field_name: &str) -> Option<f64> {
     line.split_whitespace().find_map(|part| {
         let (key, value) = part.split_once('=')?;
@@ -1328,6 +1759,13 @@ fn http_plugin_config() -> Option<HttpPluginConfig> {
 
 fn env_u64(name: &str) -> Option<u64> {
     env::var(name).ok()?.parse::<u64>().ok()
+}
+
+fn env_bool(name: &str) -> bool {
+    matches!(
+        env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 fn sanitize_id(value: &str) -> String {
