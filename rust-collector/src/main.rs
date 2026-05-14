@@ -1,3 +1,5 @@
+mod collectors;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
