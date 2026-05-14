@@ -192,6 +192,14 @@ struct DiskSnapshot {
     write_sectors: u64,
 }
 
+struct PsiSnapshot {
+    cpu_some: f64,
+    io_some: f64,
+    io_full: f64,
+    memory_some: f64,
+    memory_full: f64,
+}
+
 struct CommandPlugin {
     name: String,
     command: String,
@@ -415,6 +423,7 @@ impl CollectorPlugin for ProcfsPlugin {
         let cpu = read_cpu_snapshot()?;
         let memory = read_memory_snapshot()?;
         let disk = read_disk_snapshot()?;
+        let psi = read_psi_snapshot();
         let process_count = count_processes()?;
         let container_count = count_container_like_processes().unwrap_or(0);
         let load_avg = read_load_average().unwrap_or(0.0);
@@ -496,7 +505,7 @@ impl CollectorPlugin for ProcfsPlugin {
             })],
         };
 
-        let metrics = vec![
+        let mut metrics = vec![
             metric(
                 &ts,
                 "node.cpu.usage_ratio",
@@ -618,6 +627,60 @@ impl CollectorPlugin for ProcfsPlugin {
                 runtime_type,
             ),
         ];
+        if let Some(psi) = psi {
+            metrics.extend([
+                metric(
+                    &ts,
+                    "node.psi.cpu.some",
+                    psi.cpu_some,
+                    "ratio",
+                    "pressure",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ),
+                metric(
+                    &ts,
+                    "node.psi.io.some",
+                    psi.io_some,
+                    "ratio",
+                    "pressure",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ),
+                metric(
+                    &ts,
+                    "node.psi.io.full",
+                    psi.io_full,
+                    "ratio",
+                    "pressure",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ),
+                metric(
+                    &ts,
+                    "node.psi.memory.some",
+                    psi.memory_some,
+                    "ratio",
+                    "pressure",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ),
+                metric(
+                    &ts,
+                    "node.psi.memory.full",
+                    psi.memory_full,
+                    "ratio",
+                    "pressure",
+                    &config.node_id,
+                    &sandbox_id,
+                    runtime_type,
+                ),
+            ]);
+        }
 
         let mut attributes = Map::new();
         attributes.insert("plugin".to_string(), json!("procfs"));
@@ -1035,6 +1098,36 @@ fn read_uptime_seconds() -> Result<f64> {
         .next()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0))
+}
+
+fn read_psi_snapshot() -> Option<PsiSnapshot> {
+    Some(PsiSnapshot {
+        cpu_some: read_psi_avg10("/proc/pressure/cpu", "some")?,
+        io_some: read_psi_avg10("/proc/pressure/io", "some")?,
+        io_full: read_psi_avg10("/proc/pressure/io", "full").unwrap_or(0.0),
+        memory_some: read_psi_avg10("/proc/pressure/memory", "some")?,
+        memory_full: read_psi_avg10("/proc/pressure/memory", "full").unwrap_or(0.0),
+    })
+}
+
+fn read_psi_avg10(path: &str, line_name: &str) -> Option<f64> {
+    let pressure = fs::read_to_string(path).ok()?;
+    let line = pressure
+        .lines()
+        .find(|line| line.starts_with(&format!("{line_name} ")))?;
+
+    parse_psi_field(line, "avg10").map(|value| (value / 100.0).clamp(0.0, 1.0))
+}
+
+fn parse_psi_field(line: &str, field_name: &str) -> Option<f64> {
+    line.split_whitespace().find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        if key == field_name {
+            value.parse::<f64>().ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn cpu_core_count() -> Result<u64> {

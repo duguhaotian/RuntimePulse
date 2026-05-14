@@ -1,17 +1,17 @@
 # RuntimePulse
 
-RuntimePulse is an early-stage sandbox runtime metrics platform prototype. Phase 1 is frontend-first: it uses mock data to validate expert workflows before backend storage and collectors are implemented.
+RuntimePulse is an early-stage sandbox runtime metrics platform prototype. The current default path is collector-first: the UI reads Query API data backed by accepted collector batches.
 
-## Phase 1 Scope
+## Current Scope
 
 - Sandbox Explorer with runtime/status/search filters.
 - Sandbox Detail with metrics, lifecycle events, startup trace, profiles, and raw data.
 - Runtime Comparison for runc, gVisor, Kata, and Firecracker.
 - Collector status page for ingest acceptance counters, source health, short activity trends, and per-refresh deltas.
-- Mock API adapter that can later be replaced by a real HTTP API without rewriting pages.
-- Lightweight Query API container that serves the same mock telemetry over HTTP for frontend/backend contract validation.
-- Mock node collector containers that periodically validate multi-node payloads through the ingest API.
-- Rust collector container with pluginized sources for procfs metrics, external command output, and HTTP API output.
+- HTTP API adapter used by the frontend by default.
+- Lightweight Query API container that serves live in-memory telemetry from collector ingest.
+- Rust collector container with pluginized sources for procfs metrics, Linux PSI, external command output, HTTP API output, and local HTTP reports.
+- Optional mock node collector containers for UI/demo validation.
 - Container-first deployment for local validation and later platform packaging.
 
 ## Documentation
@@ -38,7 +38,7 @@ Open:
 http://localhost:8080
 ```
 
-The frontend proxies `/api/*` to the local Query API container. The Query API is also exposed directly for endpoint checks:
+The frontend proxies `/api/*` to the local Query API container. By default, Query API responses come from accepted collector batches only. The Query API is also exposed directly for endpoint checks:
 
 ```text
 http://localhost:8081/health
@@ -74,15 +74,15 @@ npm run build
 ## Frontend Structure
 
 ```text
-frontend/src/api        API interface and mock adapter
+frontend/src/api        API interface and HTTP adapter
 frontend/src/domain     Shared TypeScript domain models
 frontend/src/mock       Scenario-based mock telemetry data
 frontend/src/components Reusable visualization/layout components
 frontend/src/pages      Expert analysis pages
 frontend/src/utils      Time, unit, and color helpers
-query-api               Minimal HTTP Query API backed by mock telemetry
-collector               Mock node collector image used for multi-node ingest validation
-rust-collector          Rust collector framework with procfs, command, and HTTP plugins
+query-api               Minimal HTTP Query API backed by live ingest telemetry
+collector               Optional mock node collector image used for validation
+rust-collector          Rust collector framework with procfs, PSI, command, HTTP, and local report inputs
 ```
 
 ## Rust Collector Plugins
@@ -98,7 +98,7 @@ docker compose up -d runtimepulse-rust-collector
 
 Default plugin:
 
-- `procfs`: reads `/proc` CPU, memory, disk, load, process, and cgroup-like process signals from the container view.
+- `procfs`: reads `/proc` CPU, memory, disk, load, process, cgroup-like process signals, and PSI pressure metrics from the collector view.
 
 Optional plugins:
 
@@ -118,6 +118,12 @@ curl -X POST \
 
 The collector queues local reports and merges them into the next `POST /api/ingest/batch` delivery.
 
-## Mock Scenarios
+## Optional Mock Scenarios
 
-The current mock dataset includes slow image unpack, high node IO pressure, gVisor sentry CPU overhead, Kata MicroVM slow boot, and Firecracker guest agent timeout cases.
+Mock data is not part of the default data path. To run the old synthetic collectors for UI validation:
+
+```bash
+docker compose --profile mock up --build
+```
+
+The optional mock dataset includes slow image unpack, high node IO pressure, gVisor sentry CPU overhead, Kata MicroVM slow boot, and Firecracker guest agent timeout cases.

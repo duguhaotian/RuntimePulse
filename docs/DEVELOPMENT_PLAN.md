@@ -2,13 +2,13 @@
 
 ## Current Principle
 
-Development is frontend-first and container-first.
+Development is now collector-first and container-first.
 
-- Do not depend on real collectors during Phase 1.
+- Default UI data must come from accepted collector batches.
 - Do not bind pages directly to backend storage.
 - Do not run host-level Node development as the default workflow.
 - Build and verify the app through Docker Compose.
-- Keep mock data realistic enough that real ingestion can later replace it.
+- Keep mock data available only as an optional validation profile.
 
 ## Phase 1: Frontend Prototype
 
@@ -26,7 +26,7 @@ Implemented:
 - React + TypeScript + Vite frontend.
 - Docker/Nginx container deployment.
 - `RuntimePulseApi` frontend contract.
-- `MockRuntimePulseApi` adapter.
+- `MockRuntimePulseApi` adapter for optional local UI validation.
 - W&B-inspired workspace shell.
 - Runs table for sandbox instances.
 - Run detail page for individual sandbox analysis.
@@ -55,15 +55,15 @@ Goals:
 Implemented:
 
 - `HttpRuntimePulseApi` frontend adapter that matches the existing `RuntimePulseApi` contract.
-- Environment-based API switching with `VITE_RUNTIMEPULSE_API_BASE_URL`; empty value keeps the mock adapter.
-- Minimal `runtimepulse-query-api` service that serves mock telemetry through the planned HTTP endpoints.
+- `HttpRuntimePulseApi` frontend adapter is now the default frontend data path.
+- Minimal `runtimepulse-query-api` service that serves live collector telemetry through the planned HTTP endpoints.
 - Docker Compose wiring for frontend-to-query-api validation through `/api`.
 - Storage model and Query API boundary design: [`docs/STORAGE_DESIGN.md`](STORAGE_DESIGN.md)
 
 Query API contract:
 
 - Machine-readable OpenAPI spec: [`docs/openapi.yaml`](openapi.yaml)
-- Implemented mock Query API endpoints:
+- Implemented Query API endpoints:
 
 ```text
 GET /api/clusters
@@ -127,9 +127,13 @@ Implemented:
 - Collectors page shows live query store occupancy for in-memory entities, metric series, points, events, traces, and profiles.
 - Live query store status breaks down in-memory occupancy by collector source for multi-node validation.
 - Rust collector skeleton with pluginized data sources: `procfs` real node metrics, `command` external binary output conversion, and `http` API output conversion.
-- Docker Compose runs the Rust collector beside mock collectors so real container `/proc` metrics are validated through the same ingest path.
+- Docker Compose default path runs the Rust collector so real container `/proc` metrics are validated through the same ingest path.
 - Collector deployment guidance now separates container-friendly sources from host-only sources such as PSI, containerd lifecycle, image cache, and eBPF/profiling.
 - Node-level unified outlet design: host tools and container tools report to the collector container over `POST /api/local/ingest`, and the collector outlet is the only component that posts to central ingest.
+- Frontend default data path now uses the HTTP Query API directly instead of the embedded mock adapter.
+- Query API defaults to live ingest data only; seeded mock telemetry is available only with `RUNTIMEPULSE_SEED_MOCK_DATA=true`.
+- Docker Compose default path runs the Rust collector and excludes mock collectors unless the `mock` profile is enabled.
+- Rust collector now reports real Linux PSI samples from `/proc/pressure/*` as node pressure metrics.
 
 Collector candidates:
 

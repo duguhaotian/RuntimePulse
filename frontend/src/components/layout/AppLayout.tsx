@@ -64,7 +64,7 @@ export function AppLayout({ activePage, onNavigate, children }: AppLayoutProps) 
 
         <div className="sidebar-note">
           <strong>Live source</strong>
-          <span>Query API merges seeded telemetry with accepted collector batches.</span>
+          <span>Query API displays accepted collector batches only.</span>
         </div>
       </aside>
 

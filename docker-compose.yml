@@ -10,6 +10,8 @@ services:
     restart: unless-stopped
 
   runtimepulse-mock-node-collector-a:
+    profiles:
+      - mock
     build:
       context: ./collector
       dockerfile: Dockerfile
@@ -30,6 +32,8 @@ services:
     restart: unless-stopped
 
   runtimepulse-mock-node-collector-b:
+    profiles:
+      - mock
     build:
       context: ./collector
       dockerfile: Dockerfile
@@ -83,8 +87,6 @@ services:
     container_name: runtimepulse-frontend
     depends_on:
       - runtimepulse-query-api
-      - runtimepulse-mock-node-collector-a
-      - runtimepulse-mock-node-collector-b
       - runtimepulse-rust-collector
     ports:
       - "8080:8080"
