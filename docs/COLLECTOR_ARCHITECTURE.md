@@ -1,150 +1,164 @@
 # Collector Architecture
 
-RuntimePulse collectors are organized around one rule: each collector belongs to one of three runtime layers, and all collectors are managed from one place.
+RuntimePulse collectors are organized by responsibility first, then by where they run.
 
-## Top-Level Layers
+The main source tree is:
 
-### 1. Outlet Layer
+```text
+rust-collector/src/collectors/
+  core/
+  outlet/
+  adapters/
+  sources/
+    node/
+    runtime/
+    image/
+    sandbox/
+    profiling/
+```
 
-Runs inside the node-local collector container.
+## Design Principles
+
+- Data semantics decide source ownership.
+- Runtime location is a deployment concern, not the only directory boundary.
+- Third-party collectors are adapters, not a separate data layer.
+- Sandbox metrics are lifecycle-triggered, not discovered by broad host scans.
+- The node-local outlet is the only component that posts to central ingest.
+
+## Core
+
+`core/` owns shared collector framework pieces:
+
+- RuntimePulse ingest model
+- plugin/source traits
+- configuration
+- report normalization
+- common source lifecycle contracts
+
+The goal is to keep source implementations small and to avoid each collector inventing its own payload rules.
+
+## Outlet
+
+`outlet/` runs in the node-local collector container.
 
 Responsibilities:
 
 - accept local reports over HTTP
-- normalize partial payloads
-- batch and forward to Query API ingest
-- host `command` and `http` adapters
-- act as the central process for third-party adapters that do not need host or sandbox namespaces
+- normalize partial reports
+- batch local and in-process outputs
+- forward batches to Query API ingest
+- later own retry and buffering
 
-Typical collectors:
+The outlet can run generic adapters such as command and HTTP when those adapters are container-safe.
 
-- outlet HTTP receiver
-- command adapter
-- HTTP pull adapter
-- payload normalizer
-- batch sender
+## Adapters
 
-### 2. Host Layer
+`adapters/` contains integration mechanisms for external collectors:
 
-Runs on the node host or with host-level access.
+- `command`: execute a binary that emits RuntimePulse partial ingest JSON
+- `http`: poll an API that returns RuntimePulse partial ingest JSON
+- `local_push`: accept reports from host tools, sidecars, or sandbox workers
 
-Responsibilities:
+Adapters do not define the data domain. The same adapter style can be used for node, runtime, image, sandbox, or profiling sources.
 
-- read host-only kernel and filesystem state
-- collect node-wide metrics and events
-- discover runtime and image inventory
-- watch sandbox lifecycle events
-- feed the outlet container through local HTTP
+## Sources
 
-Typical collectors:
+`sources/` is grouped by data semantics.
 
-- host `procfs`
-- host root `cgroupfs`
-- PSI/pressure
+### Node Sources
+
+`sources/node/` reports host/node state only.
+
+Examples:
+
+- host `/proc`
+- host/root cgroupfs
+- PSI pressure
+
+Node sources must not create sandbox or image inventory records.
+
+### Runtime Sources
+
+`sources/runtime/` discovers runtime inventory and lifecycle.
+
+Examples:
+
 - Docker inventory
-- containerd or kubelet lifecycle watcher
-- image cache / unpack probe
-- eBPF / perf / kernel profile collectors
+- Docker lifecycle
+- containerd lifecycle
+- kubelet pod/sandbox lifecycle
 
-### 3. Sandbox Layer
+Runtime sources create or update sandbox and image metadata. They can also emit lifecycle events that drive sandbox samplers.
 
-Runs per sandbox shape or per sandbox lifecycle domain.
+### Image Sources
 
-Responsibilities:
+`sources/image/` reports image behavior.
 
-- attach to a specific sandbox after `started`
-- sample sandbox-specific cgroups and runtime state
-- stop or expire after `stopped`
-- support multiple sandbox shapes through adapters
+Examples:
 
-Typical collectors:
+- eager download timeline
+- layer timing
+- lazy-loading cache and block hit data
+- snapshotter cache state
 
-- container sandbox cgroup sampler
-- gVisor sandbox sampler
-- Kata sandbox sampler
-- Firecracker sandbox sampler
-- sandbox trace / profile collector
+Image sources should attach image-level metrics to image ids created by runtime or image inventory sources.
 
-## Third-Party Collectors
+### Sandbox Sources
 
-Third-party collectors are not a separate runtime layer. They are adapters that plug into one of the three layers above.
+`sources/sandbox/` reports per-sandbox data after lifecycle discovery.
 
-Preferred integration paths:
-
-- outlet layer via `command`
-- outlet layer via `http`
-- host layer via host binary + local HTTP push
-- sandbox layer via lifecycle-triggered sampler
-
-## Project Split And Runtime Grouping
-
-The repo should treat collector code as one project with multiple runtime groups.
-
-| Runtime group | Layer | Runs with | Examples |
-| --- | --- | --- | --- |
-| `collector-outlet` | outlet | collector container | local HTTP ingress, command/http adapters, batching, central ingest forwarding |
-| `host-agent` | host | host process or privileged host-visible deployment | procfs, host root cgroupfs, Docker inventory, lifecycle watchers, image probes, eBPF |
-| `sandbox-agent` | sandbox | lifecycle-triggered worker or runtime-specific process | sandbox cgroup sampler, gVisor/Kata/Firecracker samplers, sandbox traces/profiles |
-| `third-party-adapters` | adapter | outlet, host agent, or sandbox agent | external binary adapter, third-party HTTP metric source |
-
-First implementation can keep these runtime groups in one Rust crate and one binary with subcommands. As the code grows, the groups can split into separate binaries without changing the layer model.
-
-## What Runs Together
-
-### Collector Container
-
-Run together:
-
-- outlet HTTP ingress
-- command adapters
-- HTTP adapters
-- batch normalization and forwarding
-
-### Host Agent
-
-Run together:
-
-- host `procfs`
-- host root `cgroupfs`
-- PSI
-- Docker inventory
-- lifecycle watchers
-- image cache probes
-- host eBPF / perf collectors
-
-### Sandbox Agent
-
-Run together when the runtime needs per-sandbox attachment:
-
-- sandbox lifecycle listener
-- runtime-specific cgroup sampler
-- sandbox trace collector
-- sandbox profile collector
-
-## Directory Shape
-
-All collectors should live under one tree in `rust-collector/src/collectors/`:
+Expected flow:
 
 ```text
-collectors/
-  outlet/
-  host/
-  sandbox/
-  third_party/
+runtime lifecycle event
+  -> sandbox sampler manager
+  -> runtime-specific path resolution
+  -> sandbox cgroup/trace/profile sampler
+  -> local outlet report
 ```
 
-The goal is to keep collector ownership obvious:
+Sandbox cgroupfs must not be implemented as a broad host cgroup scan. It should start after a sandbox/container `started` event and stop or expire after the matching `stopped` event.
 
-- outlet code stays together
-- host collectors stay together
-- sandbox collectors stay together
-- third-party adapters stay together
+### Profiling Sources
 
-## Design Rule
+`sources/profiling/` reports profile artifacts.
 
-If a collector needs:
+Examples:
 
-- host namespaces or host filesystem access, put it in the host layer
-- a sandbox-specific lifecycle or cgroup, put it in the sandbox layer
-- only normalization, batching, or generic integration, put it in the outlet layer
-- external binary or HTTP integration, treat it as third-party and adapt it into one of the layers above
+- eBPF
+- perf
+- runtime-specific profiles
+
+Profiling sources can be host-scoped or sandbox-scoped depending on the probe and permissions.
+
+## Runtime Groups
+
+The repo can keep one Rust crate and one binary at first, while still separating runtime groups by responsibility.
+
+| Runtime group | Runs with | Owns |
+| --- | --- | --- |
+| `collector-outlet` | collector container | `outlet/`, container-safe `adapters/` |
+| `host-agent` | host process or host-visible deployment | `sources/node/`, `sources/runtime/`, `sources/image/`, host profiling |
+| `sandbox-agent` | lifecycle-triggered worker managed by host-agent at first | `sources/sandbox/`, sandbox profiling |
+| `third-party-adapters` | outlet, host-agent, or sandbox-agent | `adapters/` used by any source domain |
+
+First implementation can keep `collector-outlet`, `host-agent`, and sandbox samplers as subcommands in one binary. Later they can split into separate binaries without changing the directory model.
+
+## Current Mapping
+
+| Current command/plugin | Target source ownership |
+| --- | --- |
+| `host-procfs` | `sources/node/procfs.rs` plus PSI support |
+| `host-cgroupfs` | `sources/node/cgroupfs.rs` |
+| `host-docker` | `sources/runtime/docker/inventory.rs` |
+| `command` | `adapters/command.rs` |
+| `http` | `adapters/http.rs` |
+| `POST /api/local/ingest` | `outlet/http_ingress.rs` and `adapters/local_push.rs` |
+
+## Next Steps
+
+1. Move shared structs and plugin traits from `main.rs` into `core/`.
+2. Move outlet HTTP ingress, batching, and sender logic into `outlet/`.
+3. Move command and HTTP plugin implementations into `adapters/`.
+4. Move `host-procfs`, `host-cgroupfs`, and `host-docker` implementations into their target `sources/` modules.
+5. Add runtime lifecycle watchers and the sandbox sampler manager.

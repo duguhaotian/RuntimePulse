@@ -1,4 +1,7 @@
-//! Collector outlet layer.
+//! Node-local collector outlet.
 //!
-//! The outlet runs inside the collector container and owns local report ingress,
-//! payload normalization, batching, and forwarding to central ingest.
+//! The outlet owns local ingress, batching, retry, and central ingest delivery.
+
+pub mod batcher;
+pub mod http_ingress;
+pub mod sender;

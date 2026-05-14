@@ -1,4 +1,4 @@
-pub mod host;
+pub mod adapters;
+pub mod core;
 pub mod outlet;
-pub mod sandbox;
-pub mod third_party;
+pub mod sources;
