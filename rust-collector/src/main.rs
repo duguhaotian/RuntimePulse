@@ -1,9 +1,10 @@
 mod collectors;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use collectors::core::model::{EventRecord, IngestBatch, Metadata, MetricSample, PluginOutput};
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde::Deserialize;
+use serde_json::{json, Map};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -65,121 +66,6 @@ struct HttpPluginConfig {
 trait CollectorPlugin {
     fn name(&self) -> &str;
     fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput>;
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PluginOutput {
-    #[serde(default)]
-    metadata: Metadata,
-    #[serde(default)]
-    metrics: Vec<MetricSample>,
-    #[serde(default)]
-    events: Vec<EventRecord>,
-    #[serde(default)]
-    traces: Vec<TraceSpan>,
-    #[serde(default)]
-    profiles: Vec<ProfileArtifact>,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Metadata {
-    #[serde(default)]
-    clusters: Vec<Value>,
-    #[serde(default)]
-    nodes: Vec<Value>,
-    #[serde(default)]
-    images: Vec<Value>,
-    #[serde(default)]
-    sandboxes: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MetricSample {
-    timestamp: String,
-    name: String,
-    value: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    unit: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    group: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sandbox_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runtime_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attributes: Option<Map<String, Value>>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EventRecord {
-    id: String,
-    timestamp: String,
-    severity: String,
-    event_type: String,
-    event_name: String,
-    message: String,
-    source: String,
-    attributes: Map<String, Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sandbox_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runtime_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TraceSpan {
-    trace_id: String,
-    span_id: String,
-    span_name: String,
-    start_time: String,
-    end_time: String,
-    duration_ms: f64,
-    status: String,
-    attributes: Map<String, Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    sandbox_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parent_span_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProfileArtifact {
-    id: String,
-    timestamp: String,
-    sandbox_id: String,
-    profile_type: String,
-    process_role: String,
-    duration_ms: f64,
-    sample_count: u64,
-    object_uri: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    flamegraph: Option<Value>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct IngestBatch {
-    source: String,
-    observed_at: String,
-    metadata: Metadata,
-    metrics: Vec<MetricSample>,
-    events: Vec<EventRecord>,
-    traces: Vec<TraceSpan>,
-    profiles: Vec<ProfileArtifact>,
 }
 
 struct ProcfsPlugin {
