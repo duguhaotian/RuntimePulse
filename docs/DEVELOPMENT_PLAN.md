@@ -129,7 +129,7 @@ Implemented:
 - Rust collector skeleton with pluginized data sources: `procfs` real node metrics, `command` external binary output conversion, and `http` API output conversion.
 - Docker Compose runs the Rust collector beside mock collectors so real container `/proc` metrics are validated through the same ingest path.
 - Collector deployment guidance now separates container-friendly sources from host-only sources such as PSI, containerd lifecycle, image cache, and eBPF/profiling.
-- Node-level unified outlet design: host tools and container tools report to a local Node Collector Gateway, and the gateway is the only component that posts to central ingest.
+- Node-level unified outlet design: host tools and container tools report to the collector container over `POST /api/local/ingest`, and the collector outlet is the only component that posts to central ingest.
 
 Collector candidates:
 

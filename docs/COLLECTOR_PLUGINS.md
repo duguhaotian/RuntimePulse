@@ -2,7 +2,7 @@
 
 The Rust collector is the preferred path for real data collection. It keeps collection independent from the frontend and sends the same `POST /api/ingest/batch` payload as other collectors.
 
-On a production node, the Rust collector should also act as the node-local gateway. Host tools and container tools submit locally to the gateway, and only the gateway posts to the central RuntimePulse ingest API.
+For personal node deployments, the Rust collector also acts as the node-local outlet. Host tools and container tools submit locally to the collector container over HTTP, and only the outlet posts to the central RuntimePulse ingest API.
 
 ## Plugin Model
 
@@ -16,7 +16,7 @@ Each plugin returns partial ingest data:
 
 The collector merges plugin outputs into one batch, adds the collector source, and posts it to the Query API ingest endpoint.
 
-For node deployments, plugin output should flow through the local gateway path even when the plugin runs in a separate container or process. This keeps node identity, buffering, retry, and central credentials in one place.
+For node deployments, plugin output should flow through the local outlet path even when the plugin runs in a separate container or process. This keeps node identity, batching, retry, and central ingest configuration in one place.
 
 ## Built-In Plugins
 
@@ -47,6 +47,25 @@ RUNTIMEPULSE_HTTP_PLUGIN_URL=http://image-cache-agent:9090/runtimepulse
 ```
 
 The endpoint must return the same partial ingest JSON shape as the command plugin.
+
+## Local HTTP Reports
+
+Use this for host-side tools or sidecar containers that push data into the collector outlet.
+
+```bash
+curl -X POST \
+  http://<collector-container-ip>:9091/api/local/ingest \
+  -H 'content-type: application/json' \
+  -d @rust-collector/examples/command-plugin-output.json
+```
+
+Containers in the same Compose network can use:
+
+```text
+http://runtimepulse-rust-collector:9091/api/local/ingest
+```
+
+The request body uses the same partial ingest JSON shape as the command plugin.
 
 ## Development Validation
 

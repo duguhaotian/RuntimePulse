@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::env;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -33,6 +36,7 @@ struct CollectorConfig {
     node_id: String,
     cluster_id: String,
     interval: Duration,
+    local_report_addr: String,
     plugins: Vec<String>,
     command_plugin: Option<CommandPluginConfig>,
     http_plugin: Option<HttpPluginConfig>,
@@ -222,17 +226,19 @@ fn run() -> Result<()> {
     let config = CollectorConfig::from_env()?;
     let mut plugins = build_plugins(&config)?;
     let client = Client::new();
+    let local_reports = start_local_report_server(&config.local_report_addr)?;
 
     loop {
         let started = Instant::now();
         let now = Utc::now();
-        match collect_once(&client, &config, &mut plugins, now) {
+        match collect_once(&client, &config, &mut plugins, &local_reports, now) {
             Ok(summary) => println!(
                 "{}",
                 json!({
                     "level": "info",
                     "message": "ingest_batch_accepted",
                     "source": summary.source,
+                    "localReports": summary.local_reports,
                     "metrics": summary.metrics,
                     "events": summary.events,
                     "traces": summary.traces,
@@ -258,6 +264,7 @@ fn run() -> Result<()> {
 
 struct BatchSummary {
     source: String,
+    local_reports: usize,
     metrics: usize,
     events: usize,
     traces: usize,
@@ -268,6 +275,7 @@ fn collect_once(
     client: &Client,
     config: &CollectorConfig,
     plugins: &mut [Box<dyn CollectorPlugin>],
+    local_reports: &Receiver<PluginOutput>,
     now: DateTime<Utc>,
 ) -> Result<BatchSummary> {
     let mut batch = IngestBatch {
@@ -291,10 +299,17 @@ fn collect_once(
         merge_output(&mut batch, output, now, config);
     }
 
+    let mut local_report_count = 0;
+    while let Ok(output) = local_reports.try_recv() {
+        local_report_count += 1;
+        merge_output(&mut batch, output, now, config);
+    }
+
     send_batch(client, config, &batch)?;
 
     Ok(BatchSummary {
         source: batch.source,
+        local_reports: local_report_count,
         metrics: batch.metrics.len(),
         events: batch.events.len(),
         traces: batch.traces.len(),
@@ -331,6 +346,8 @@ impl CollectorConfig {
             cluster_id: env::var("RUNTIMEPULSE_COLLECTOR_CLUSTER_ID")
                 .unwrap_or_else(|_| "cluster-prod".to_string()),
             interval: Duration::from_millis(interval_ms.max(1000)),
+            local_report_addr: env::var("RUNTIMEPULSE_LOCAL_REPORT_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:9091".to_string()),
             plugins,
             command_plugin: command_plugin_config(),
             http_plugin: http_plugin_config(),
@@ -717,6 +734,204 @@ fn send_batch(client: &Client, config: &CollectorConfig, batch: &IngestBatch) ->
     }
 
     Ok(())
+}
+
+struct LocalHttpRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+}
+
+fn start_local_report_server(addr: &str) -> Result<Receiver<PluginOutput>> {
+    let listener = TcpListener::bind(addr)?;
+    let (sender, receiver) = mpsc::channel();
+    let addr = addr.to_string();
+
+    thread::spawn(move || {
+        println!(
+            "{}",
+            json!({
+                "level": "info",
+                "message": "local_report_server_started",
+                "addr": addr,
+                "endpoint": "/api/local/ingest",
+            })
+        );
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let sender = sender.clone();
+                    thread::spawn(move || handle_local_report_connection(stream, sender));
+                }
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "local_report_accept_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            }
+        }
+    });
+
+    Ok(receiver)
+}
+
+fn handle_local_report_connection(mut stream: TcpStream, sender: Sender<PluginOutput>) {
+    match read_local_http_request(&mut stream) {
+        Ok(request) => {
+            if request.method == "GET" && request.path == "/health" {
+                let _ = write_http_response(&mut stream, 200, "OK", r#"{"status":"ok"}"#);
+                return;
+            }
+
+            if request.path != "/api/local/ingest" {
+                let _ =
+                    write_http_response(&mut stream, 404, "Not Found", r#"{"error":"not_found"}"#);
+                return;
+            }
+
+            if request.method != "POST" {
+                let _ = write_http_response(
+                    &mut stream,
+                    405,
+                    "Method Not Allowed",
+                    r#"{"error":"method_not_allowed"}"#,
+                );
+                return;
+            }
+
+            match serde_json::from_slice::<PluginOutput>(&request.body) {
+                Ok(output) => match sender.send(output) {
+                    Ok(()) => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            202,
+                            "Accepted",
+                            r#"{"status":"accepted"}"#,
+                        );
+                    }
+                    Err(error) => {
+                        let _ = write_http_response(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            &json!({ "error": error.to_string() }).to_string(),
+                        );
+                    }
+                },
+                Err(error) => {
+                    let _ = write_http_response(
+                        &mut stream,
+                        400,
+                        "Bad Request",
+                        &json!({ "error": error.to_string() }).to_string(),
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            let _ = write_http_response(
+                &mut stream,
+                400,
+                "Bad Request",
+                &json!({ "error": error.to_string() }).to_string(),
+            );
+        }
+    }
+}
+
+fn read_local_http_request(stream: &mut TcpStream) -> Result<LocalHttpRequest> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let header_end = loop {
+        let size = stream.read(&mut chunk)?;
+        if size == 0 {
+            return Err(CollectorError::Config(
+                "connection closed before HTTP headers".to_string(),
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..size]);
+
+        if buffer.len() > 1024 * 1024 {
+            return Err(CollectorError::Config(
+                "local report request is too large".to_string(),
+            ));
+        }
+
+        if let Some(index) = find_header_end(&buffer) {
+            break index;
+        }
+    };
+
+    let header_bytes = &buffer[..header_end];
+    let headers = String::from_utf8_lossy(header_bytes);
+    let mut lines = headers.lines();
+    let request_line = lines
+        .next()
+        .ok_or_else(|| CollectorError::Config("missing HTTP request line".to_string()))?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| CollectorError::Config("missing HTTP method".to_string()))?
+        .to_string();
+    let path = parts
+        .next()
+        .ok_or_else(|| CollectorError::Config("missing HTTP path".to_string()))?
+        .to_string();
+    let content_length = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    if content_length > 1024 * 1024 {
+        return Err(CollectorError::Config(
+            "local report body is too large".to_string(),
+        ));
+    }
+
+    let body_start = header_end + 4;
+    while buffer.len() < body_start + content_length {
+        let size = stream.read(&mut chunk)?;
+        if size == 0 {
+            return Err(CollectorError::Config(
+                "connection closed before HTTP body".to_string(),
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..size]);
+    }
+
+    Ok(LocalHttpRequest {
+        method,
+        path,
+        body: buffer[body_start..body_start + content_length].to_vec(),
+    })
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes())
 }
 
 #[derive(Debug)]

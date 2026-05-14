@@ -1,12 +1,13 @@
 # RuntimePulse Collector Deployment
 
-Collector packaging should stay container-friendly, but the data source decides whether the collector must run with host access.
+Collector packaging should stay container-first. For personal use, the collector container is also the single node-local outlet for both container-side and host-side tools.
 
 ## Short Answer
 
-- Container deployment is enough for many workload, process, and API-based metrics.
-- Host-side access is required for a slice of node, runtime, kernel, and image-cache data.
-- The practical model is mixed: ship collectors as containers, run some as privileged node agents.
+- Use one collector container as the node-local reporting outlet.
+- Container-side tools run as in-container plugins or report to the collector container over HTTP.
+- Host-side tools report to the collector container by container IP and port.
+- Some data still requires host visibility, but the reporting path stays unified.
 
 ## What Works Well In Containers
 
@@ -37,78 +38,101 @@ These sources often need host visibility or elevated privileges:
 - Host namespace process trees and system-level cgroup traversal.
 - Runtime-specific data that lives outside the workload container namespace.
 
-## Recommended Deployment Modes
+## Recommended Personal Deployment
 
-### 1. Container Agent
+### 1. Collector Outlet Container
 
-Use a normal container when the plugin reads in-container data or talks to APIs.
+Run one RuntimePulse collector container per node. This container owns the central ingest URL and is the only process that posts to RuntimePulse Query API.
 
-Good for:
+The container is responsible for:
 
-- app metrics
-- command adapters
-- HTTP adapters
-- profile transport
+- running built-in plugins such as `procfs`, `command`, and `http`
+- managing plugin lifecycle
+- exposing a local HTTP report endpoint
+- receiving host-side and container-side reports
+- normalizing partial payloads into RuntimePulse ingest batches
+- adding node identity and timestamps when missing
+- posting batches to central ingest
 
-### 2. Host Agent
+Default local report endpoint:
 
-Use a privileged container or host binary when the collector needs node-wide visibility.
+```text
+POST http://<collector-container-ip>:9091/api/local/ingest
+```
 
-Typical settings:
+Containers in the same Docker Compose network can use the service name:
 
-- `hostPID: true`
-- `hostNetwork: true`
-- `privileged: true` or targeted Linux capabilities
-- host mounts for `/proc`, `/sys`, `/var/lib/containerd`, runtime sockets, or image stores
+```text
+POST http://runtimepulse-rust-collector:9091/api/local/ingest
+```
 
-### 3. DaemonSet or Per-Node Service
+### 2. Host Tools
 
-Use one collector per node when the data is node-scoped.
+Host-side tools stay outside the collector container when they need host namespaces, host filesystem paths, runtime sockets, or kernel privileges.
 
-Best fit for:
+They do not post to central ingest directly. Instead, they submit local JSON payloads to the collector container:
 
-- PSI
-- cgroup tree inspection
-- containerd events
-- image cache and unpack metrics
-- eBPF/profile collectors
+```bash
+curl -X POST \
+  http://<collector-container-ip>:9091/api/local/ingest \
+  -H 'content-type: application/json' \
+  -d @payload.json
+```
+
+Examples:
+
+- a host binary reading real `/proc/pressure/*`
+- a containerd event watcher using `/run/containerd/containerd.sock`
+- an image-cache probe reading snapshotter state
+- an eBPF profiler that needs host privileges
+
+### 3. Optional Host Mounts
+
+If a plugin can run safely inside the collector container but needs host files, mount only the required paths:
+
+- `/proc`
+- `/sys`
+- `/run/containerd/containerd.sock`
+- image store or snapshotter paths
+
+This is useful for personal/local deployment, but the default design should still allow a host binary to report through the collector HTTP endpoint instead.
 
 ## Mapping By Data Type
 
-| Data type | Container agent | Host agent |
+| Data type | Collector container | Host tool over HTTP |
 | --- | --- | --- |
 | App CPU / memory / IO | yes | optional |
 | Workload lifecycle spans | yes | optional |
 | HTTP tool integrations | yes | optional |
 | Command-line tool integrations | yes | optional |
-| Node PSI | limited | yes |
-| Disk / network saturation | limited | yes |
-| containerd / kubelet events | no | yes |
-| Image layer unpack / cache | no | yes |
-| eBPF / perf / kernel profiles | no | yes |
+| Node PSI | possible with host mount | yes |
+| Disk / network saturation | possible with host mount | yes |
+| containerd / kubelet events | possible with runtime mount | yes |
+| Image layer unpack / cache | possible with host mount | yes |
+| eBPF / perf / kernel profiles | usually no | yes |
 
 ## RuntimePulse Recommendation
 
-Use one collector framework with pluginized backends:
+Use one containerized collector outlet with pluginized backends:
 
 - `procfs` for basic local and host-visible metrics.
 - `command` for existing binaries.
-- `http` for API-based tools.
-- later host plugins for runtime, image, and kernel sources.
+- `http` for API-based tools that the collector pulls.
+- `local-http` input for host-side and sidecar tools that push reports.
 
-That keeps the codebase unified while letting deployment vary by source.
+That keeps personal deployment simple: one container owns reporting, while host tools can still collect host-only data.
 
 ## Node Unified Outlet
 
-Each node should expose one local collector outlet. Host-side tools and container-side tools should report to this local outlet instead of posting directly to the central ingest API.
+Each node should expose one local collector outlet. In the personal-use design, that outlet is the Rust collector container.
 
 Recommended name:
 
 ```text
-Node Collector Gateway
+Node Collector Outlet
 ```
 
-The gateway is the only component on a node that talks to the central RuntimePulse ingest API.
+The outlet is the only component on a node that talks to the central RuntimePulse ingest API.
 
 ```text
 Host tools
@@ -118,79 +142,58 @@ Host tools
   +-- image cache / unpack probes
   +-- eBPF / perf profilers
         |
+        | HTTP POST to container IP:9091
         v
-Node Collector Gateway  --->  RuntimePulse Ingest API
+RuntimePulse Collector Container  --->  RuntimePulse Ingest API
         ^
         |
-  +-- workload sidecars
-  +-- container-local agents
+  +-- in-container plugins
   +-- command plugins
-  +-- HTTP plugin adapters
+  +-- HTTP pull adapters
+  +-- container-local tools
 ```
 
-### Why A Node Gateway
+### Why A Single Outlet
 
-Without a node gateway, every collector needs to solve the same operational problems:
+Without a node-local outlet, every collector needs to know how to talk to central ingest.
 
-- central ingest authentication
-- retry and backoff
-- local buffering when the network is unavailable
-- duplicate event detection
+- central ingest URL
+- retry behavior
 - timestamp normalization
 - node identity enrichment
-- batch sizing and rate limits
-- source health reporting
+- batch format
+- source naming
 
-Putting these responsibilities in one local outlet makes host and container collectors simpler.
+Putting this in one collector container keeps host tools and container tools small.
 
-### Gateway Responsibilities
+### Outlet Responsibilities
 
-The gateway should own:
+The outlet should own:
 
 - Node identity: cluster id, node id, hostname, kernel, labels.
-- Source registration: plugin name, tool kind, version, privilege level.
+- Source naming: plugin name, tool kind, and version when available.
 - Payload normalization: convert tool-specific output into the RuntimePulse ingest schema.
 - Local enrichment: attach node id, runtime type, sandbox id, image id, source, and timestamps when missing.
-- Validation: reject malformed local payloads before they reach central ingest.
+- Validation: reject malformed local payloads before central ingest.
 - Batching: merge small local records into bounded ingest batches.
-- De-duplication: collapse repeated events, trace spans, and profile indexes by stable ids.
-- Backpressure: rate limit noisy tools and drop or downsample low-priority metrics first.
-- Buffering: spool accepted local records when central ingest is unavailable.
-- Health: expose local source status for debugging.
+- Basic retry: retry central ingest failures.
+- Health logs: show which local source is producing data.
 
 ### Local Input Interfaces
 
-The gateway should support more than one input shape:
+The outlet should support these input shapes:
 
 | Input | Purpose | Example |
 | --- | --- | --- |
-| Unix domain socket | host-local trusted tools | `/run/runtimepulse/node-gateway.sock` |
-| Local HTTP | container tools and sidecars | `http://runtimepulse-node-gateway:19091/ingest` |
+| Local HTTP push | host tools, sidecars, and local scripts | `POST /api/local/ingest` |
 | Command plugin | existing binaries | `containerd-exporter --format runtimepulse-json` |
 | Pull plugin | API-based tools | image cache agent HTTP endpoint |
-| File spool | crash-safe handoff | `/var/lib/runtimepulse/spool/*.jsonl` |
 
-For Kubernetes, expose the gateway to local pods through a ClusterIP service, hostNetwork port, or mounted Unix socket depending on the trust boundary.
+For the first implementation, the local HTTP push endpoint is enough for host-side reports. It avoids filesystem mounts just for reporting and works for both host tools and sidecar containers.
 
 ### Local Payload Contract
 
-Local tools can submit either full RuntimePulse ingest batches or partial plugin outputs.
-
-Full batch:
-
-```json
-{
-  "source": "containerd-agent/node-a",
-  "observedAt": "2026-05-13T00:00:00.000Z",
-  "metadata": {},
-  "metrics": [],
-  "events": [],
-  "traces": [],
-  "profiles": []
-}
-```
-
-Partial output:
+Local tools submit partial plugin outputs. The collector outlet wraps them into the central RuntimePulse ingest batch.
 
 ```json
 {
@@ -206,44 +209,29 @@ Partial output:
 }
 ```
 
-The gateway fills missing `source`, `nodeId`, `observedAt`, and related labels when it can do so safely.
+The outlet fills missing `source`, `nodeId`, `observedAt`, and related labels when it can do so safely.
 
-### Security Boundary
+### Delivery Flow
 
-The gateway should distinguish trusted host sources from less-trusted container sources.
+Recommended first flow:
 
-Recommended rules:
+1. Local source submits data to `POST /api/local/ingest`.
+2. Collector outlet validates and queues the local payload.
+3. Collector outlet merges plugin and local HTTP data into the next batch.
+4. Collector outlet posts to central ingest.
+5. Collector outlet logs success or failure.
 
-- Host tools can use a Unix socket with filesystem permissions.
-- Container tools should use a local HTTP endpoint with a per-source token.
-- Only the gateway stores central ingest credentials.
-- Privileged plugins stay in the host agent process or a privileged companion container.
-- Container plugins should not receive host mounts unless their data source requires it.
-
-### Buffering And Delivery
-
-The gateway should acknowledge local submissions after local validation and durable enqueue, not after central ingest succeeds.
-
-Recommended flow:
-
-1. Local source submits data.
-2. Gateway validates and enriches.
-3. Gateway writes to an in-memory queue plus optional disk spool.
-4. Gateway batches by size, time, and priority.
-5. Gateway posts to central ingest with retry and backoff.
-6. Gateway updates local source health.
-
-This prevents short central outages from breaking host-side collection.
+Advanced disk buffering can wait until it is actually needed.
 
 ### Recommended First Implementation
 
-Use the existing Rust collector as the gateway process:
+Use the existing Rust collector as the outlet container:
 
 - Keep `procfs`, `command`, and `http` as in-process plugins.
-- Add a local HTTP `POST /local/ingest` endpoint for container tools.
-- Add a Unix socket listener for host tools.
-- Add a bounded local queue.
-- Add optional disk spool under `/var/lib/runtimepulse`.
+- Add a local HTTP listener on `0.0.0.0:9091`.
+- Accept partial plugin output at `POST /api/local/ingest`.
+- Let host tools send JSON payloads to the collector container IP and port.
+- Merge local HTTP payloads with plugin output.
 - Keep central delivery through `POST /api/ingest/batch`.
 
-This lets both deployment styles share one node-local outlet while preserving the plugin model.
+This keeps the system small and still supports host-only collectors.

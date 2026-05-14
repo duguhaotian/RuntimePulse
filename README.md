@@ -107,6 +107,17 @@ Optional plugins:
 
 Command/API plugins should return JSON shaped like `rust-collector/examples/command-plugin-output.json`; the collector merges it into one ingest batch.
 
+Host-side tools and sidecar containers can also push partial collector output to the Rust collector outlet:
+
+```bash
+curl -X POST \
+  http://localhost:9091/api/local/ingest \
+  -H 'content-type: application/json' \
+  -d @rust-collector/examples/command-plugin-output.json
+```
+
+The collector queues local reports and merges them into the next `POST /api/ingest/batch` delivery.
+
 ## Mock Scenarios
 
 The current mock dataset includes slow image unpack, high node IO pressure, gVisor sentry CPU overhead, Kata MicroVM slow boot, and Firecracker guest agent timeout cases.
