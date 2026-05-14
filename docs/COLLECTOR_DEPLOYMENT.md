@@ -118,7 +118,7 @@ This is useful for personal/local deployment, but the default design should stil
 Use one containerized collector outlet with pluginized backends:
 
 - host-side `procfs` for node CPU, memory, IO, process, and PSI metrics.
-- host-side `cgroupfs` for Docker-matched cgroup v2 CPU, memory, IO, and process samples.
+- host-side `cgroupfs` for host/root cgroup v2 CPU, memory, IO, and process samples.
 - host-side `docker` for container and image inventory metadata.
 - `command` for existing binaries.
 - `http` for API-based tools that the collector pulls.
@@ -232,7 +232,7 @@ Advanced disk buffering can wait until it is actually needed.
 Use the existing Rust collector as the outlet container:
 
 - Keep `command` and `http` as in-process plugins when they collect container-safe data.
-- Run node-wide `procfs`, cgroupfs, PSI, and Docker inventory collection as host-side tools.
+- Run node-wide `procfs`, host/root cgroupfs, PSI, and Docker inventory collection as host-side tools.
 - Add a local HTTP listener on `0.0.0.0:9091`.
 - Accept partial plugin output at `POST /api/local/ingest`.
 - Let host tools send JSON payloads to the collector container IP and port.

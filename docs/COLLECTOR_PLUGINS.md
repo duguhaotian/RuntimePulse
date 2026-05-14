@@ -28,7 +28,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 ## Host-Side Tools
 
 - `host-procfs`: runs on the host, reads `/proc`, `/proc/pressure/*`, and cgroup-like process signals from the host view, then pushes partial ingest JSON to the outlet over HTTP.
-- `host-cgroupfs`: runs on the host, reads cgroup v2 CPU, memory, IO, and process counts from `/sys/fs/cgroup`, and by default only reports Docker container cgroups that can be matched to `host-docker` container IDs.
+- `host-cgroupfs`: runs on the host, reads only host/root cgroup v2 CPU, memory, IO, and process counts from `/sys/fs/cgroup`, and reports node-level metrics.
 - `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
@@ -89,6 +89,17 @@ RUNTIMEPULSE_HTTP_PLUGIN_URL=http://image-cache-agent:9090/runtimepulse
 ```
 
 The endpoint must return the same partial ingest JSON shape as the command plugin.
+
+## Container Cgroup Collection
+
+Container cgroupfs metrics should be collected by a lifecycle-aware runtime collector, not by `host-cgroupfs`.
+
+Expected flow:
+
+1. A Docker/containerd/Kubernetes/runtime-specific collector observes a sandbox/container `started` event.
+2. The collector resolves the exact runtime cgroup path for that sandbox shape.
+3. A per-sandbox cgroup sampler reports `sandbox.*` metrics against the sandbox id created by the lifecycle event.
+4. The sampler stops or expires when the corresponding `stopped` event is observed.
 
 ## Local HTTP Reports
 

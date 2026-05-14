@@ -210,7 +210,6 @@ struct CgroupfsPlugin {
     last_seen: Option<Instant>,
     last_cpu_usage_by_path: std::collections::HashMap<String, u64>,
     root: PathBuf,
-    max_entries: usize,
 }
 
 struct CgroupSample {
@@ -989,12 +988,11 @@ impl CollectorPlugin for ProcfsPlugin {
 }
 
 impl CgroupfsPlugin {
-    fn new(root: PathBuf, max_entries: usize) -> Self {
+    fn new(root: PathBuf, _max_entries: usize) -> Self {
         Self {
             last_seen: None,
             last_cpu_usage_by_path: std::collections::HashMap::new(),
             root,
-            max_entries,
         }
     }
 }
@@ -1010,91 +1008,74 @@ impl CollectorPlugin for CgroupfsPlugin {
             .last_seen
             .map(|seen| seen.elapsed().as_secs_f64())
             .unwrap_or(0.0);
-        let samples = collect_cgroup_samples(&self.root, self.max_entries)?;
-        let runtime_type = "runc";
+        let sample =
+            read_cgroup_sample(&self.root, &self.root).ok_or_else(|| CollectorError::Plugin {
+                plugin: "cgroupfs".to_string(),
+                message: format!("unable to read host cgroup root at {}", self.root.display()),
+            })?;
         let mut metrics = Vec::new();
-        let mut sampled_cgroups = 0_usize;
+        let previous_cpu = self.last_cpu_usage_by_path.insert(
+            sample.relative_path.clone(),
+            sample.cpu_usage_usec.unwrap_or(0),
+        );
+        let cpu_ratio = match (previous_cpu, sample.cpu_usage_usec) {
+            (Some(previous), Some(current)) if sample_interval > 0.0 => {
+                (current.saturating_sub(previous) as f64 / 1_000_000.0 / sample_interval).max(0.0)
+            }
+            _ => 0.0,
+        };
 
-        for sample in samples {
-            let Some(sandbox_id) = docker_sandbox_id_from_cgroup(&sample.relative_path) else {
-                continue;
-            };
-            sampled_cgroups += 1;
+        metrics.push(node_metric(
+            &ts,
+            "node.cgroup.cpu.usage_ratio",
+            cpu_ratio,
+            "ratio",
+            "cpu",
+            &config.node_id,
+        ));
 
-            let previous_cpu = self.last_cpu_usage_by_path.insert(
-                sample.relative_path.clone(),
-                sample.cpu_usage_usec.unwrap_or(0),
-            );
-            let cpu_ratio = match (previous_cpu, sample.cpu_usage_usec) {
-                (Some(previous), Some(current)) if sample_interval > 0.0 => {
-                    (current.saturating_sub(previous) as f64 / 1_000_000.0 / sample_interval)
-                        .max(0.0)
-                }
-                _ => 0.0,
-            };
-
-            metrics.push(metric(
+        if let Some(memory_current) = sample.memory_current {
+            metrics.push(node_metric(
                 &ts,
-                "sandbox.cpu.usage_ratio",
-                cpu_ratio,
-                "ratio",
-                "cpu",
+                "node.cgroup.memory.current_bytes",
+                memory_current as f64,
+                "bytes",
+                "memory",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ));
+        }
 
-            if let Some(memory_current) = sample.memory_current {
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.memory.working_set_bytes",
-                    memory_current as f64,
-                    "bytes",
-                    "memory",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ));
-            }
+        if let Some(read_bytes) = sample.io_read_bytes {
+            metrics.push(node_metric(
+                &ts,
+                "node.cgroup.io.read_bytes",
+                read_bytes as f64,
+                "bytes",
+                "io",
+                &config.node_id,
+            ));
+        }
 
-            if let Some(read_bytes) = sample.io_read_bytes {
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.io.read_bytes",
-                    read_bytes as f64,
-                    "bytes",
-                    "io",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ));
-            }
+        if let Some(write_bytes) = sample.io_write_bytes {
+            metrics.push(node_metric(
+                &ts,
+                "node.cgroup.io.write_bytes",
+                write_bytes as f64,
+                "bytes",
+                "io",
+                &config.node_id,
+            ));
+        }
 
-            if let Some(write_bytes) = sample.io_write_bytes {
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.io.write_bytes",
-                    write_bytes as f64,
-                    "bytes",
-                    "io",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ));
-            }
-
-            if let Some(process_count) = sample.process_count {
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.process.count",
-                    process_count as f64,
-                    "count",
-                    "runtime",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ));
-            }
+        if let Some(process_count) = sample.process_count {
+            metrics.push(node_metric(
+                &ts,
+                "node.cgroup.process.count",
+                process_count as f64,
+                "count",
+                "runtime",
+                &config.node_id,
+            ));
         }
 
         self.last_seen = Some(Instant::now());
@@ -1106,8 +1087,8 @@ impl CollectorPlugin for CgroupfsPlugin {
             "cgroupRoot".to_string(),
             json!(self.root.display().to_string()),
         );
-        attributes.insert("sampleCount".to_string(), json!(sampled_cgroups));
-        attributes.insert("filter".to_string(), json!("docker-cgroups-only"));
+        attributes.insert("sampleCount".to_string(), json!(1));
+        attributes.insert("scopeKind".to_string(), json!("host-root-cgroup"));
 
         let events = vec![EventRecord {
             id: format!("host-cgroupfs-observed-{}", now.timestamp()),
@@ -1120,7 +1101,7 @@ impl CollectorPlugin for CgroupfsPlugin {
             attributes,
             sandbox_id: None,
             node_id: Some(config.node_id.clone()),
-            runtime_type: Some(runtime_type.to_string()),
+            runtime_type: None,
             reason: None,
         }];
 
@@ -1763,54 +1744,16 @@ fn read_psi_avg10(path: &str, line_name: &str) -> Option<f64> {
     parse_psi_field(line, "avg10").map(|value| (value / 100.0).clamp(0.0, 1.0))
 }
 
-fn collect_cgroup_samples(root: &Path, max_entries: usize) -> Result<Vec<CgroupSample>> {
-    let mut samples = Vec::new();
-    collect_cgroup_samples_into(root, root, max_entries, &mut samples)?;
-    samples.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    Ok(samples)
-}
-
-fn collect_cgroup_samples_into(
-    root: &Path,
-    current: &Path,
-    max_entries: usize,
-    samples: &mut Vec<CgroupSample>,
-) -> Result<()> {
-    if samples.len() >= max_entries {
-        return Ok(());
-    }
-
-    if let Some(sample) = read_cgroup_sample(root, current) {
-        samples.push(sample);
-        if samples.len() >= max_entries {
-            return Ok(());
-        }
-    }
-
-    let entries = match fs::read_dir(current) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
-
-    for entry in entries.filter_map(std::result::Result::ok) {
-        if samples.len() >= max_entries {
-            break;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            collect_cgroup_samples_into(root, &path, max_entries, samples)?;
-        }
-    }
-
-    Ok(())
-}
-
 fn read_cgroup_sample(root: &Path, path: &Path) -> Option<CgroupSample> {
     let relative_path = path
         .strip_prefix(root)
         .ok()
-        .map(|path| path.to_string_lossy().trim_matches('/').to_string())
-        .filter(|value| !value.is_empty())?;
+        .map(|path| path.to_string_lossy().trim_matches('/').to_string())?;
+    let relative_path = if relative_path.is_empty() {
+        ".".to_string()
+    } else {
+        relative_path
+    };
     let process_count = read_cgroup_process_count(path);
     let cpu_usage_usec = read_cpu_usage_usec(path);
     let memory_current = read_u64_file(path.join("memory.current"));
@@ -1882,30 +1825,6 @@ fn read_io_stat(path: &Path) -> (Option<u64>, Option<u64>) {
 
 fn read_u64_file(path: PathBuf) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()
-}
-
-fn docker_sandbox_id_from_cgroup(relative_path: &str) -> Option<String> {
-    relative_path
-        .split('/')
-        .find_map(docker_id_from_cgroup_part)
-        .map(docker_sandbox_id)
-}
-
-fn docker_id_from_cgroup_part(part: &str) -> Option<&str> {
-    let id = part
-        .strip_prefix("docker-")
-        .and_then(|value| value.strip_suffix(".scope"))
-        .unwrap_or(part);
-
-    if is_container_id(id) {
-        Some(id)
-    } else {
-        None
-    }
-}
-
-fn is_container_id(value: &str) -> bool {
-    value.len() >= 12 && value.chars().all(|char| char.is_ascii_hexdigit())
 }
 
 fn short_container_id(id: &str) -> String {
@@ -2068,6 +1987,28 @@ fn metric(
         node_id: Some(node_id.to_string()),
         image_id: None,
         runtime_type: Some(runtime_type.to_string()),
+        attributes: None,
+    }
+}
+
+fn node_metric(
+    timestamp: &str,
+    name: &str,
+    value: f64,
+    unit: &str,
+    group: &str,
+    node_id: &str,
+) -> MetricSample {
+    MetricSample {
+        timestamp: timestamp.to_string(),
+        name: name.to_string(),
+        value,
+        unit: Some(unit.to_string()),
+        group: Some(group.to_string()),
+        sandbox_id: None,
+        node_id: Some(node_id.to_string()),
+        image_id: None,
+        runtime_type: None,
         attributes: None,
     }
 }
