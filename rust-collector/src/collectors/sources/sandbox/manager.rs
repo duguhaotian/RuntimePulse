@@ -1,3 +1,4 @@
 //! Sandbox sampler manager placeholder.
 //!
-//! Starts and stops per-sandbox samplers from runtime lifecycle events.
+//! Reconciles already-running sandboxes and starts/stops per-sandbox samplers
+//! from runtime lifecycle events.

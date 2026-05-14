@@ -22,7 +22,7 @@ rust-collector/src/collectors/
 - Data semantics decide source ownership.
 - Runtime location is a deployment concern, not the only directory boundary.
 - Third-party collectors are adapters, not a separate data layer.
-- Sandbox metrics are lifecycle-triggered, not discovered by broad host scans.
+- Sandbox metrics are driven by runtime inventory reconciliation plus lifecycle events, not by broad host scans.
 - The node-local outlet is the only component that posts to central ingest.
 
 ## Core
@@ -90,6 +90,13 @@ Examples:
 
 Runtime sources create or update sandbox and image metadata. They can also emit lifecycle events that drive sandbox samplers.
 
+Runtime sources must support two discovery paths:
+
+- startup inventory: list already-running sandboxes from the runtime API when the collector starts
+- lifecycle watch: observe `started`, `stopped`, and failure events after startup
+
+The startup inventory path prevents collector restarts from missing sandboxes that were already running before the collector came up.
+
 ### Image Sources
 
 `sources/image/` reports image behavior.
@@ -107,17 +114,37 @@ Image sources should attach image-level metrics to image ids created by runtime 
 
 `sources/sandbox/` reports per-sandbox data after lifecycle discovery.
 
-Expected flow:
+Expected startup flow:
 
 ```text
-runtime lifecycle event
+collector/sandbox sampler startup
+  -> runtime inventory API
+  -> existing sandbox list
+  -> sandbox reconcile
   -> sandbox sampler manager
   -> runtime-specific path resolution
   -> sandbox cgroup/trace/profile sampler
   -> local outlet report
 ```
 
-Sandbox cgroupfs must not be implemented as a broad host cgroup scan. It should start after a sandbox/container `started` event and stop or expire after the matching `stopped` event.
+Expected event flow:
+
+```text
+runtime lifecycle watch
+  -> started/stopped event
+  -> sandbox sampler manager
+  -> runtime-specific path resolution
+  -> sandbox cgroup/trace/profile sampler
+  -> local outlet report
+```
+
+Sandbox cgroupfs must not be implemented as a broad host cgroup scan. It should start from either startup inventory reconciliation or a sandbox/container `started` event, and stop or expire after the matching `stopped` event.
+
+Reconciliation should be idempotent:
+
+- already-sampled sandboxes keep their existing sampler
+- newly discovered running sandboxes start a sampler
+- missing sandboxes are marked stopped or expired after a grace window
 
 ### Profiling Sources
 
@@ -161,4 +188,5 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 2. Move outlet HTTP ingress, batching, and sender logic into `outlet/`.
 3. Move command and HTTP plugin implementations into `adapters/`.
 4. Move `host-procfs`, `host-cgroupfs`, and `host-docker` implementations into their target `sources/` modules.
-5. Add runtime lifecycle watchers and the sandbox sampler manager.
+5. Add runtime startup inventory reconciliation.
+6. Add runtime lifecycle watchers and the sandbox sampler manager.
