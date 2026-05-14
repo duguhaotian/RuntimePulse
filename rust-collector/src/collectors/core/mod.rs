@@ -4,6 +4,7 @@
 //! configuration, report building, and source lifecycle primitives.
 
 pub mod config;
+pub mod error;
 pub mod model;
 pub mod plugin;
 pub mod report;
