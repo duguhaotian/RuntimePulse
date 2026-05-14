@@ -3,11 +3,12 @@ mod collectors;
 use chrono::{DateTime, SecondsFormat, Utc};
 use collectors::core::config::CollectorConfig;
 use collectors::core::error::{CollectorError, Result};
-use collectors::core::model::{EventRecord, IngestBatch, Metadata, PluginOutput};
+use collectors::core::model::{EventRecord, Metadata, PluginOutput};
 use collectors::core::plugin::CollectorPlugin;
-use collectors::core::report::{has_batch_payload, merge_output, metric, node_metric};
+use collectors::core::report::{metric, node_metric};
+use collectors::outlet::batcher::collect_once;
 use collectors::outlet::http_ingress::start_local_report_server;
-use collectors::outlet::sender::{send_batch, send_local_report};
+use collectors::outlet::sender::send_local_report;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use serde_json::{json, Map};
@@ -15,7 +16,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Instant;
 
@@ -351,75 +351,6 @@ fn run_host_docker() -> Result<()> {
     }
 
     Ok(())
-}
-
-struct BatchSummary {
-    source: String,
-    submitted: bool,
-    local_reports: usize,
-    metrics: usize,
-    events: usize,
-    traces: usize,
-    profiles: usize,
-}
-
-fn collect_once(
-    client: &Client,
-    config: &CollectorConfig,
-    plugins: &mut [Box<dyn CollectorPlugin>],
-    local_reports: &Receiver<PluginOutput>,
-    now: DateTime<Utc>,
-) -> Result<BatchSummary> {
-    let mut batch = IngestBatch {
-        source: format!("runtimepulse-rust-collector/{}", config.node_id),
-        observed_at: timestamp(now),
-        metadata: Metadata::default(),
-        metrics: Vec::new(),
-        events: Vec::new(),
-        traces: Vec::new(),
-        profiles: Vec::new(),
-    };
-
-    for plugin in plugins {
-        let plugin_name = plugin.name().to_string();
-        let output = plugin
-            .collect(now, config)
-            .map_err(|error| CollectorError::Plugin {
-                plugin: plugin_name,
-                message: error.to_string(),
-            })?;
-        merge_output(&mut batch, output, now, config);
-    }
-
-    let mut local_report_count = 0;
-    while let Ok(output) = local_reports.try_recv() {
-        local_report_count += 1;
-        merge_output(&mut batch, output, now, config);
-    }
-
-    if !has_batch_payload(&batch) {
-        return Ok(BatchSummary {
-            source: batch.source,
-            submitted: false,
-            local_reports: local_report_count,
-            metrics: 0,
-            events: 0,
-            traces: 0,
-            profiles: 0,
-        });
-    }
-
-    send_batch(client, config, &batch)?;
-
-    Ok(BatchSummary {
-        source: batch.source,
-        submitted: true,
-        local_reports: local_report_count,
-        metrics: batch.metrics.len(),
-        events: batch.events.len(),
-        traces: batch.traces.len(),
-        profiles: batch.profiles.len(),
-    })
 }
 
 fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin>>> {
