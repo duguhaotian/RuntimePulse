@@ -118,7 +118,7 @@ This is useful for personal/local deployment, but the default design should stil
 Use one containerized collector outlet with pluginized backends:
 
 - host-side `procfs` for node CPU, memory, IO, process, and PSI metrics.
-- host-side `cgroupfs` for cgroup v2 CPU, memory, IO, and process samples.
+- host-side `cgroupfs` for Docker-matched cgroup v2 CPU, memory, IO, and process samples.
 - host-side `docker` for container and image inventory metadata.
 - `command` for existing binaries.
 - `http` for API-based tools that the collector pulls.

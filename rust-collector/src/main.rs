@@ -215,7 +215,6 @@ struct CgroupfsPlugin {
 
 struct CgroupSample {
     relative_path: String,
-    id: String,
     cpu_usage_usec: Option<u64>,
     memory_current: Option<u64>,
     io_read_bytes: Option<u64>,
@@ -1012,15 +1011,16 @@ impl CollectorPlugin for CgroupfsPlugin {
             .map(|seen| seen.elapsed().as_secs_f64())
             .unwrap_or(0.0);
         let samples = collect_cgroup_samples(&self.root, self.max_entries)?;
-        let image_id = "runtimepulse-host-cgroup";
-        let image_ref = "runtimepulse/host-cgroupfs:host";
         let runtime_type = "runc";
-        let mut sandboxes = Vec::new();
         let mut metrics = Vec::new();
+        let mut sampled_cgroups = 0_usize;
 
         for sample in samples {
-            let sandbox_id = cgroup_sandbox_id(&sample.relative_path, &sample.id);
-            let docker_backed = docker_sandbox_id_from_cgroup(&sample.relative_path).is_some();
+            let Some(sandbox_id) = docker_sandbox_id_from_cgroup(&sample.relative_path) else {
+                continue;
+            };
+            sampled_cgroups += 1;
+
             let previous_cpu = self.last_cpu_usage_by_path.insert(
                 sample.relative_path.clone(),
                 sample.cpu_usage_usec.unwrap_or(0),
@@ -1032,38 +1032,6 @@ impl CollectorPlugin for CgroupfsPlugin {
                 }
                 _ => 0.0,
             };
-            let display_name = cgroup_display_name(&sample.relative_path);
-
-            if !docker_backed {
-                sandboxes.push(json!({
-                    "id": sandbox_id,
-                    "clusterId": config.cluster_id,
-                    "nodeId": config.node_id,
-                    "namespace": "host-cgroupfs",
-                    "workloadId": display_name,
-                    "workloadName": display_name,
-                    "imageId": image_id,
-                    "imageRef": image_ref,
-                    "runtimeType": runtime_type,
-                    "runtimeVersion": "cgroupfs-v2",
-                    "status": "running",
-                    "createdAt": ts,
-                    "startedAt": ts,
-                    "startupDurationMs": 0,
-                    "cpuAvg": cpu_ratio,
-                    "memoryPeakBytes": sample.memory_current.unwrap_or(0),
-                    "labels": {
-                        "collector": "runtimepulse-rust-collector",
-                        "plugin": "cgroupfs",
-                        "scope": config.collection_scope,
-                    },
-                    "attributes": {
-                        "collector.scope": config.collection_scope,
-                        "cgroup.path": sample.relative_path,
-                        "cgroup.process.count": sample.process_count.unwrap_or(0),
-                    }
-                }));
-            }
 
             metrics.push(metric(
                 &ts,
@@ -1138,7 +1106,8 @@ impl CollectorPlugin for CgroupfsPlugin {
             "cgroupRoot".to_string(),
             json!(self.root.display().to_string()),
         );
-        attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
+        attributes.insert("sampleCount".to_string(), json!(sampled_cgroups));
+        attributes.insert("filter".to_string(), json!("docker-cgroups-only"));
 
         let events = vec![EventRecord {
             id: format!("host-cgroupfs-observed-{}", now.timestamp()),
@@ -1176,15 +1145,8 @@ impl CollectorPlugin for CgroupfsPlugin {
                         "scope": config.collection_scope,
                     }
                 })],
-                images: vec![json!({
-                    "id": image_id,
-                    "ref": image_ref,
-                    "digest": "collector:runtimepulse-host-cgroup",
-                    "loadingMode": "eager",
-                    "sizeBytes": 0,
-                    "layerCount": 0
-                })],
-                sandboxes,
+                images: Vec::new(),
+                sandboxes: Vec::new(),
             },
             metrics,
             events,
@@ -1862,7 +1824,6 @@ fn read_cgroup_sample(root: &Path, path: &Path) -> Option<CgroupSample> {
     }
 
     Some(CgroupSample {
-        id: sanitize_id(&relative_path),
         relative_path,
         cpu_usage_usec,
         memory_current,
@@ -1921,18 +1882,6 @@ fn read_io_stat(path: &Path) -> (Option<u64>, Option<u64>) {
 
 fn read_u64_file(path: PathBuf) -> Option<u64> {
     fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()
-}
-
-fn cgroup_display_name(relative_path: &str) -> String {
-    relative_path
-        .rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or(relative_path)
-        .to_string()
-}
-
-fn cgroup_sandbox_id(relative_path: &str, fallback_id: &str) -> String {
-    docker_sandbox_id_from_cgroup(relative_path).unwrap_or_else(|| format!("cgroup-{fallback_id}"))
 }
 
 fn docker_sandbox_id_from_cgroup(relative_path: &str) -> Option<String> {

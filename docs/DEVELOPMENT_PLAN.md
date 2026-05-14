@@ -134,7 +134,7 @@ Implemented:
 - Query API defaults to live ingest data only; seeded mock telemetry is available only with `RUNTIMEPULSE_SEED_MOCK_DATA=true`.
 - Docker Compose default path runs the Rust collector and excludes mock collectors unless the `mock` profile is enabled.
 - Rust host-side procfs tool reports real Linux PSI samples from `/proc/pressure/*` as node pressure metrics.
-- Rust host-side cgroupfs tool reports cgroup v2 CPU, memory, IO, and process count samples as sandbox-shaped resource metrics.
+- Rust host-side cgroupfs tool reports Docker-matched cgroup v2 CPU, memory, IO, and process count samples as sandbox resource metrics without creating extra sandbox or image metadata.
 - Rust host-side Docker tool reports real Docker container and image inventory, and uses Docker container IDs that align with cgroupfs resource samples.
 
 Collector candidates:
