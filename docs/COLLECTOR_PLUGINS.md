@@ -2,7 +2,7 @@
 
 The Rust collector is the preferred path for real data collection. It keeps collection independent from the frontend and sends the same `POST /api/ingest/batch` payload as other collectors.
 
-For personal node deployments, the Rust collector also acts as the node-local outlet. Host tools and container tools submit locally to the collector container over HTTP, and only the outlet posts to the central RuntimePulse ingest API.
+For personal node deployments, the Rust collector container acts as the node-local outlet. Host tools and container tools submit locally to the collector container over HTTP, and only the outlet posts to the central RuntimePulse ingest API.
 
 ## Plugin Model
 
@@ -18,18 +18,32 @@ The collector merges plugin outputs into one batch, adds the collector source, a
 
 For node deployments, plugin output should flow through the local outlet path even when the plugin runs in a separate container or process. This keeps node identity, batching, retry, and central ingest configuration in one place.
 
-## Built-In Plugins
+## Outlet Container Plugins
 
-- `procfs`: reads real CPU, memory, disk, load, process, and cgroup-like process signals from `/proc`.
+- `command`: runs an external binary or shell command inside the outlet container and parses JSON from stdout.
+- `http`: calls an HTTP API from inside the outlet container and parses JSON from the response body.
+
+Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. A normal container sees container namespaces, so those readings describe the collector container or container-visible subset, not the host node.
+
+## Host-Side Tools
+
+- `host-procfs`: runs on the host, reads `/proc`, `/proc/pressure/*`, and cgroup-like process signals from the host view, then pushes partial ingest JSON to the outlet over HTTP.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
+
+```bash
+cd rust-collector
+RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
+RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
+cargo run -- host-procfs
+```
 
 ## Command Plugin
 
 Use this for existing tools that already expose useful data.
 
 ```bash
-RUNTIMEPULSE_COLLECTOR_PLUGINS=procfs,command
+RUNTIMEPULSE_COLLECTOR_PLUGINS=command
 RUNTIMEPULSE_COMMAND_PLUGIN_NAME=containerd-exporter
 RUNTIMEPULSE_COMMAND_PLUGIN_CMD='containerd-exporter --format runtimepulse-json'
 ```
@@ -41,7 +55,7 @@ The command must write JSON shaped like `rust-collector/examples/command-plugin-
 Use this for tools that expose a local or remote API.
 
 ```bash
-RUNTIMEPULSE_COLLECTOR_PLUGINS=procfs,http
+RUNTIMEPULSE_COLLECTOR_PLUGINS=http
 RUNTIMEPULSE_HTTP_PLUGIN_NAME=image-cache-agent
 RUNTIMEPULSE_HTTP_PLUGIN_URL=http://image-cache-agent:9090/runtimepulse
 ```

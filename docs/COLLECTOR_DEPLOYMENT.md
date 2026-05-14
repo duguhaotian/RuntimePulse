@@ -5,7 +5,7 @@ Collector packaging should stay container-first. For personal use, the collector
 ## Short Answer
 
 - Use one collector container as the node-local reporting outlet.
-- Container-side tools run as in-container plugins or report to the collector container over HTTP.
+- Container-side tools run as in-container plugins only for container-scoped data, or report to the collector container over HTTP.
 - Host-side tools report to the collector container by container IP and port.
 - Some data still requires host visibility, but the reporting path stays unified.
 
@@ -22,7 +22,7 @@ These sources are usually safe to package as normal containers:
 
 Examples:
 
-- `procfs` inside the container namespace for container-local views.
+- `procfs` inside the container namespace for container-local views only.
 - `command` plugins for existing tools such as exporters, profilers, or snapshotters.
 - `http` plugins for local agents or side services that already expose metrics.
 
@@ -46,7 +46,8 @@ Run one RuntimePulse collector container per node. This container owns the centr
 
 The container is responsible for:
 
-- running built-in plugins such as `procfs`, `command`, and `http`
+- running outlet-safe plugins such as `command` and `http`
+- avoiding node-wide procfs/cgroupfs/PSI collection inside the container
 - managing plugin lifecycle
 - exposing a local HTTP report endpoint
 - receiving host-side and container-side reports
@@ -81,7 +82,7 @@ curl -X POST \
 
 Examples:
 
-- a host binary reading real `/proc/pressure/*`
+- a host binary reading real `/proc`, `/proc/pressure/*`, and cgroupfs
 - a containerd event watcher using `/run/containerd/containerd.sock`
 - an image-cache probe reading snapshotter state
 - an eBPF profiler that needs host privileges
@@ -105,8 +106,8 @@ This is useful for personal/local deployment, but the default design should stil
 | Workload lifecycle spans | yes | optional |
 | HTTP tool integrations | yes | optional |
 | Command-line tool integrations | yes | optional |
-| Node PSI | possible with host mount | yes |
-| Disk / network saturation | possible with host mount | yes |
+| Node PSI | no, unless explicitly host-mounted | yes |
+| Disk / network saturation | no, unless explicitly host-mounted | yes |
 | containerd / kubelet events | possible with runtime mount | yes |
 | Image layer unpack / cache | possible with host mount | yes |
 | eBPF / perf / kernel profiles | usually no | yes |
@@ -115,7 +116,7 @@ This is useful for personal/local deployment, but the default design should stil
 
 Use one containerized collector outlet with pluginized backends:
 
-- `procfs` for basic local and host-visible metrics.
+- host-side `procfs` for node CPU, memory, IO, process, cgroupfs, and PSI metrics.
 - `command` for existing binaries.
 - `http` for API-based tools that the collector pulls.
 - `local-http` input for host-side and sidecar tools that push reports.
@@ -137,7 +138,7 @@ The outlet is the only component on a node that talks to the central RuntimePuls
 ```text
 Host tools
   |
-  +-- procfs / cgroup / PSI
+  +-- procfs / cgroupfs / PSI
   +-- containerd / kubelet events
   +-- image cache / unpack probes
   +-- eBPF / perf profilers
@@ -227,7 +228,8 @@ Advanced disk buffering can wait until it is actually needed.
 
 Use the existing Rust collector as the outlet container:
 
-- Keep `procfs`, `command`, and `http` as in-process plugins.
+- Keep `command` and `http` as in-process plugins when they collect container-safe data.
+- Run node-wide `procfs`, cgroupfs, and PSI collection as a host-side tool.
 - Add a local HTTP listener on `0.0.0.0:9091`.
 - Accept partial plugin output at `POST /api/local/ingest`.
 - Let host tools send JSON payloads to the collector container IP and port.

@@ -37,6 +37,8 @@ struct CollectorConfig {
     cluster_id: String,
     interval: Duration,
     local_report_addr: String,
+    local_report_url: String,
+    collection_scope: String,
     plugins: Vec<String>,
     command_plugin: Option<CommandPluginConfig>,
     http_plugin: Option<HttpPluginConfig>,
@@ -59,7 +61,7 @@ trait CollectorPlugin {
     fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput>;
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginOutput {
     #[serde(default)]
@@ -217,7 +219,13 @@ fn main() {
         return;
     }
 
-    if let Err(error) = run() {
+    let result = if env::args().any(|arg| arg == "host-procfs") {
+        run_host_procfs()
+    } else {
+        run_outlet()
+    };
+
+    if let Err(error) = result {
         eprintln!(
             "{}",
             json!({
@@ -230,7 +238,7 @@ fn main() {
     }
 }
 
-fn run() -> Result<()> {
+fn run_outlet() -> Result<()> {
     let config = CollectorConfig::from_env()?;
     let mut plugins = build_plugins(&config)?;
     let client = Client::new();
@@ -240,19 +248,23 @@ fn run() -> Result<()> {
         let started = Instant::now();
         let now = Utc::now();
         match collect_once(&client, &config, &mut plugins, &local_reports, now) {
-            Ok(summary) => println!(
-                "{}",
-                json!({
-                    "level": "info",
-                    "message": "ingest_batch_accepted",
-                    "source": summary.source,
-                    "localReports": summary.local_reports,
-                    "metrics": summary.metrics,
-                    "events": summary.events,
-                    "traces": summary.traces,
-                    "profiles": summary.profiles,
-                })
-            ),
+            Ok(summary) => {
+                if summary.submitted {
+                    println!(
+                        "{}",
+                        json!({
+                            "level": "info",
+                            "message": "ingest_batch_accepted",
+                            "source": summary.source,
+                            "localReports": summary.local_reports,
+                            "metrics": summary.metrics,
+                            "events": summary.events,
+                            "traces": summary.traces,
+                            "profiles": summary.profiles,
+                        })
+                    );
+                }
+            }
             Err(error) => eprintln!(
                 "{}",
                 json!({
@@ -270,8 +282,58 @@ fn run() -> Result<()> {
     }
 }
 
+fn run_host_procfs() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+    config.plugins = vec!["procfs".to_string()];
+
+    let client = Client::new();
+    let mut plugin = ProcfsPlugin::new();
+
+    loop {
+        let started = Instant::now();
+        let now = Utc::now();
+        match plugin.collect(now, &config) {
+            Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
+                Ok(()) => println!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "message": "host_procfs_report_accepted",
+                        "url": config.local_report_url,
+                        "metrics": output.metrics.len(),
+                        "events": output.events.len(),
+                    })
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "host_procfs_report_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            },
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "message": "host_procfs_collect_failed",
+                    "error": error.to_string(),
+                })
+            ),
+        }
+
+        let elapsed = started.elapsed();
+        if config.interval > elapsed {
+            thread::sleep(config.interval - elapsed);
+        }
+    }
+}
+
 struct BatchSummary {
     source: String,
+    submitted: bool,
     local_reports: usize,
     metrics: usize,
     events: usize,
@@ -313,10 +375,23 @@ fn collect_once(
         merge_output(&mut batch, output, now, config);
     }
 
+    if !has_batch_payload(&batch) {
+        return Ok(BatchSummary {
+            source: batch.source,
+            submitted: false,
+            local_reports: local_report_count,
+            metrics: 0,
+            events: 0,
+            traces: 0,
+            profiles: 0,
+        });
+    }
+
     send_batch(client, config, &batch)?;
 
     Ok(BatchSummary {
         source: batch.source,
+        submitted: true,
         local_reports: local_report_count,
         metrics: batch.metrics.len(),
         events: batch.events.len(),
@@ -331,18 +406,13 @@ impl CollectorConfig {
             .or_else(|| env_u64("COLLECTOR_INTERVAL_MS"))
             .unwrap_or(5000);
         let plugins = env::var("RUNTIMEPULSE_COLLECTOR_PLUGINS")
-            .unwrap_or_else(|_| "procfs".to_string())
+            .unwrap_or_default()
             .split(',')
             .map(str::trim)
             .filter(|item| !item.is_empty())
+            .filter(|item| *item != "none")
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
-
-        if plugins.is_empty() {
-            return Err(CollectorError::Config(
-                "RUNTIMEPULSE_COLLECTOR_PLUGINS is empty".to_string(),
-            ));
-        }
 
         Ok(Self {
             ingest_url: env::var("INGEST_URL").unwrap_or_else(|_| {
@@ -356,6 +426,10 @@ impl CollectorConfig {
             interval: Duration::from_millis(interval_ms.max(1000)),
             local_report_addr: env::var("RUNTIMEPULSE_LOCAL_REPORT_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:9091".to_string()),
+            local_report_url: env::var("RUNTIMEPULSE_LOCAL_REPORT_URL")
+                .unwrap_or_else(|_| "http://localhost:9091/api/local/ingest".to_string()),
+            collection_scope: env::var("RUNTIMEPULSE_COLLECTOR_SCOPE")
+                .unwrap_or_else(|_| "outlet".to_string()),
             plugins,
             command_plugin: command_plugin_config(),
             http_plugin: http_plugin_config(),
@@ -469,7 +543,11 @@ impl CollectorPlugin for ProcfsPlugin {
                 "cpuCores": cpu_core_count().unwrap_or(0),
                 "memoryBytes": memory.total_bytes,
                 "status": if cpu_usage > 0.9 { "degraded" } else { "ready" },
-                "labels": { "collector": "runtimepulse-rust-collector", "plugin": "procfs" }
+                "labels": {
+                    "collector": "runtimepulse-rust-collector",
+                    "plugin": "procfs",
+                    "scope": config.collection_scope,
+                }
             })],
             images: vec![json!({
                 "id": image_id,
@@ -496,8 +574,13 @@ impl CollectorPlugin for ProcfsPlugin {
                 "startupDurationMs": 0,
                 "cpuAvg": cpu_usage,
                 "memoryPeakBytes": memory.used_bytes,
-                "labels": { "collector": "runtimepulse-rust-collector", "plugin": "procfs" },
+                "labels": {
+                    "collector": "runtimepulse-rust-collector",
+                    "plugin": "procfs",
+                    "scope": config.collection_scope,
+                },
                 "attributes": {
+                    "collector.scope": config.collection_scope,
                     "process.count": process_count,
                     "container.process.count": container_count,
                     "load.avg.1m": load_avg
@@ -684,6 +767,7 @@ impl CollectorPlugin for ProcfsPlugin {
 
         let mut attributes = Map::new();
         attributes.insert("plugin".to_string(), json!("procfs"));
+        attributes.insert("scope".to_string(), json!(config.collection_scope));
         attributes.insert("processCount".to_string(), json!(process_count));
         attributes.insert("containerProcessCount".to_string(), json!(container_count));
 
@@ -797,6 +881,32 @@ fn send_batch(client: &Client, config: &CollectorConfig, batch: &IngestBatch) ->
     }
 
     Ok(())
+}
+
+fn send_local_report(client: &Client, url: &str, output: &PluginOutput) -> Result<()> {
+    let response = client.post(url).json(output).send()?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(CollectorError::Ingest {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    Ok(())
+}
+
+fn has_batch_payload(batch: &IngestBatch) -> bool {
+    !batch.metadata.clusters.is_empty()
+        || !batch.metadata.nodes.is_empty()
+        || !batch.metadata.images.is_empty()
+        || !batch.metadata.sandboxes.is_empty()
+        || !batch.metrics.is_empty()
+        || !batch.events.is_empty()
+        || !batch.traces.is_empty()
+        || !batch.profiles.is_empty()
 }
 
 struct LocalHttpRequest {
