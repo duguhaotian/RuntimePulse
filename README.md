@@ -10,7 +10,7 @@ RuntimePulse is an early-stage sandbox runtime metrics platform prototype. The c
 - Collector status page for ingest acceptance counters, source health, short activity trends, and per-refresh deltas.
 - HTTP API adapter used by the frontend by default.
 - Lightweight Query API container that serves live in-memory telemetry from collector ingest.
-- Rust collector container as the node-local outlet, plus host-side collector tools for procfs, cgroupfs, PSI, and other node-scoped data.
+- Rust collector container as the node-local outlet, plus host-side collector tools for procfs, cgroupfs, Docker inventory, PSI, and other node-scoped data.
 - Optional mock node collector containers for UI/demo validation.
 - Container-first deployment for local validation and later platform packaging.
 
@@ -82,7 +82,7 @@ frontend/src/pages      Expert analysis pages
 frontend/src/utils      Time, unit, and color helpers
 query-api               Minimal HTTP Query API backed by live ingest telemetry
 collector               Optional mock node collector image used for validation
-rust-collector          Rust collector framework with outlet, host-procfs, command, HTTP, and local report inputs
+rust-collector          Rust collector framework with outlet, host-procfs, host-cgroupfs, host-docker, command, HTTP, and local report inputs
 ```
 
 ## Rust Collector Plugins
@@ -124,6 +124,15 @@ RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
 RUNTIMEPULSE_CGROUP_MAX_ENTRIES=200 \
 RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
 cargo run -- host-cgroupfs
+```
+
+For Docker container and image inventory:
+
+```bash
+cd rust-collector
+RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
+RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
+cargo run -- host-docker
 ```
 
 For one-shot validation, add `RUNTIMEPULSE_COLLECTOR_ONCE=true`.

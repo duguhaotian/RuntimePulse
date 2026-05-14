@@ -29,6 +29,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 
 - `host-procfs`: runs on the host, reads `/proc`, `/proc/pressure/*`, and cgroup-like process signals from the host view, then pushes partial ingest JSON to the outlet over HTTP.
 - `host-cgroupfs`: runs on the host, reads cgroup v2 CPU, memory, IO, and process counts from `/sys/fs/cgroup`, then pushes sandbox-shaped resource samples to the outlet over HTTP.
+- `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
 
@@ -45,6 +46,13 @@ RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
 RUNTIMEPULSE_CGROUP_MAX_ENTRIES=200 \
 RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
 cargo run -- host-cgroupfs
+```
+
+```bash
+cd rust-collector
+RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
+RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
+cargo run -- host-docker
 ```
 
 Useful host tool settings:

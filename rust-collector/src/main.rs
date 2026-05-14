@@ -223,6 +223,44 @@ struct CgroupSample {
     process_count: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerInspectContainer {
+    id: String,
+    name: String,
+    created: String,
+    image: String,
+    state: DockerState,
+    config: DockerConfig,
+    host_config: DockerHostConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerState {
+    status: String,
+    running: bool,
+    #[serde(rename = "OOMKilled")]
+    oom_killed: bool,
+    error: String,
+    started_at: String,
+    finished_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerConfig {
+    image: String,
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerHostConfig {
+    runtime: String,
+}
+
 struct CommandPlugin {
     name: String,
     command: String,
@@ -244,6 +282,8 @@ fn main() {
         run_host_procfs()
     } else if env::args().any(|arg| arg == "host-cgroupfs") {
         run_host_cgroupfs()
+    } else if env::args().any(|arg| arg == "host-docker") {
+        run_host_docker()
     } else {
         run_outlet()
     };
@@ -404,6 +444,60 @@ fn run_host_cgroupfs() -> Result<()> {
                 json!({
                     "level": "error",
                     "message": "host_cgroupfs_collect_failed",
+                    "error": error.to_string(),
+                })
+            ),
+        }
+
+        if config.once {
+            break;
+        }
+
+        let elapsed = started.elapsed();
+        if config.interval > elapsed {
+            thread::sleep(config.interval - elapsed);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_host_docker() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let client = Client::new();
+
+    loop {
+        let started = Instant::now();
+        let now = Utc::now();
+        match collect_docker_inventory(now, &config) {
+            Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
+                Ok(()) => println!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "message": "host_docker_report_accepted",
+                        "url": config.local_report_url,
+                        "sandboxes": output.metadata.sandboxes.len(),
+                        "images": output.metadata.images.len(),
+                        "events": output.events.len(),
+                    })
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "host_docker_report_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            },
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "message": "host_docker_collect_failed",
                     "error": error.to_string(),
                 })
             ),
@@ -920,12 +1014,13 @@ impl CollectorPlugin for CgroupfsPlugin {
         let samples = collect_cgroup_samples(&self.root, self.max_entries)?;
         let image_id = "runtimepulse-host-cgroup";
         let image_ref = "runtimepulse/host-cgroupfs:host";
-        let runtime_type = "host";
+        let runtime_type = "runc";
         let mut sandboxes = Vec::new();
         let mut metrics = Vec::new();
 
         for sample in samples {
-            let sandbox_id = format!("cgroup-{}", sample.id);
+            let sandbox_id = cgroup_sandbox_id(&sample.relative_path, &sample.id);
+            let docker_backed = docker_sandbox_id_from_cgroup(&sample.relative_path).is_some();
             let previous_cpu = self.last_cpu_usage_by_path.insert(
                 sample.relative_path.clone(),
                 sample.cpu_usage_usec.unwrap_or(0),
@@ -939,34 +1034,36 @@ impl CollectorPlugin for CgroupfsPlugin {
             };
             let display_name = cgroup_display_name(&sample.relative_path);
 
-            sandboxes.push(json!({
-                "id": sandbox_id,
-                "clusterId": config.cluster_id,
-                "nodeId": config.node_id,
-                "namespace": "host-cgroupfs",
-                "workloadId": display_name,
-                "workloadName": display_name,
-                "imageId": image_id,
-                "imageRef": image_ref,
-                "runtimeType": runtime_type,
-                "runtimeVersion": "cgroupfs-v2",
-                "status": "running",
-                "createdAt": ts,
-                "startedAt": ts,
-                "startupDurationMs": 0,
-                "cpuAvg": cpu_ratio,
-                "memoryPeakBytes": sample.memory_current.unwrap_or(0),
-                "labels": {
-                    "collector": "runtimepulse-rust-collector",
-                    "plugin": "cgroupfs",
-                    "scope": config.collection_scope,
-                },
-                "attributes": {
-                    "collector.scope": config.collection_scope,
-                    "cgroup.path": sample.relative_path,
-                    "cgroup.process.count": sample.process_count.unwrap_or(0),
-                }
-            }));
+            if !docker_backed {
+                sandboxes.push(json!({
+                    "id": sandbox_id,
+                    "clusterId": config.cluster_id,
+                    "nodeId": config.node_id,
+                    "namespace": "host-cgroupfs",
+                    "workloadId": display_name,
+                    "workloadName": display_name,
+                    "imageId": image_id,
+                    "imageRef": image_ref,
+                    "runtimeType": runtime_type,
+                    "runtimeVersion": "cgroupfs-v2",
+                    "status": "running",
+                    "createdAt": ts,
+                    "startedAt": ts,
+                    "startupDurationMs": 0,
+                    "cpuAvg": cpu_ratio,
+                    "memoryPeakBytes": sample.memory_current.unwrap_or(0),
+                    "labels": {
+                        "collector": "runtimepulse-rust-collector",
+                        "plugin": "cgroupfs",
+                        "scope": config.collection_scope,
+                    },
+                    "attributes": {
+                        "collector.scope": config.collection_scope,
+                        "cgroup.path": sample.relative_path,
+                        "cgroup.process.count": sample.process_count.unwrap_or(0),
+                    }
+                }));
+            }
 
             metrics.push(metric(
                 &ts,
@@ -1129,6 +1226,180 @@ impl CollectorPlugin for HttpPlugin {
             .error_for_status()?
             .json()?)
     }
+}
+
+fn docker_container_ids() -> Result<Vec<String>> {
+    let output = Command::new("docker")
+        .args(["ps", "-aq", "--no-trunc"])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(CollectorError::Plugin {
+            plugin: "docker".to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn docker_inspect_containers(ids: &[String]) -> Result<Vec<DockerInspectContainer>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let output = Command::new("docker").arg("inspect").args(ids).output()?;
+
+    if !output.status.success() {
+        return Err(CollectorError::Plugin {
+            plugin: "docker".to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn collect_docker_inventory(now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
+    let ids = docker_container_ids()?;
+    let containers = docker_inspect_containers(&ids)?;
+    let ts = timestamp(now);
+    let mut images = std::collections::BTreeMap::new();
+    let mut sandboxes = Vec::new();
+    let mut events = Vec::new();
+
+    for container in containers {
+        let short_id = short_container_id(&container.id);
+        let sandbox_id = docker_sandbox_id(&container.id);
+        let image_ref = if container.config.image.is_empty() {
+            container.image.clone()
+        } else {
+            container.config.image.clone()
+        };
+        let image_id = image_id_from_ref_or_digest(&image_ref, &container.image);
+        let runtime_type = runtime_type_from_docker(&container.host_config.runtime);
+        let status = sandbox_status_from_docker(&container.state);
+        let workload_name = docker_workload_name(&container);
+        let namespace = docker_namespace(&container);
+        let created_at =
+            normalize_docker_timestamp(&container.created).unwrap_or_else(|| ts.clone());
+        let started_at = normalize_docker_timestamp(&container.state.started_at);
+        let stopped_at = normalize_docker_timestamp(&container.state.finished_at);
+        let startup_duration_ms = started_at
+            .as_deref()
+            .and_then(|started| duration_ms_between(&created_at, started))
+            .unwrap_or(0.0);
+
+        let image_row_id = image_id.clone();
+        let image_row_ref = image_ref.clone();
+        let image_row_digest = container.image.clone();
+        images.entry(image_id.clone()).or_insert_with(|| {
+            json!({
+                "id": image_row_id,
+                "ref": image_row_ref,
+                "digest": image_row_digest,
+                "loadingMode": "eager",
+                "sizeBytes": 0,
+                "layerCount": 0,
+            })
+        });
+
+        sandboxes.push(json!({
+            "id": sandbox_id,
+            "clusterId": config.cluster_id,
+            "nodeId": config.node_id,
+            "namespace": namespace,
+            "workloadId": workload_name,
+            "workloadName": workload_name,
+            "imageId": image_id,
+            "imageRef": image_ref,
+            "runtimeType": runtime_type,
+            "runtimeVersion": container.host_config.runtime,
+            "status": status,
+            "createdAt": created_at,
+            "startedAt": started_at,
+            "stoppedAt": stopped_at,
+            "startupDurationMs": startup_duration_ms,
+            "cpuAvg": 0,
+            "memoryPeakBytes": 0,
+            "labels": {
+                "collector": "runtimepulse-rust-collector",
+                "plugin": "docker",
+                "scope": config.collection_scope,
+            },
+            "attributes": {
+                "collector.scope": config.collection_scope,
+                "docker.id": container.id,
+                "docker.short_id": short_id,
+                "docker.name": container.name.trim_start_matches('/'),
+                "docker.status": container.state.status,
+                "docker.oom_killed": container.state.oom_killed,
+                "docker.error": container.state.error,
+            }
+        }));
+
+        let mut attributes = Map::new();
+        attributes.insert("plugin".to_string(), json!("docker"));
+        attributes.insert("scope".to_string(), json!(config.collection_scope));
+        attributes.insert("dockerId".to_string(), json!(container.id));
+        attributes.insert("dockerStatus".to_string(), json!(container.state.status));
+
+        events.push(EventRecord {
+            id: format!("docker-{}-observed-{}", short_id, now.timestamp()),
+            timestamp: ts.clone(),
+            severity: if status == "failed" { "error" } else { "info" }.to_string(),
+            event_type: "container".to_string(),
+            event_name: "docker.container.observed".to_string(),
+            message: format!("Docker container {workload_name} is {status}."),
+            source: format!("runtimepulse-rust-collector/{}/docker", config.node_id),
+            attributes,
+            sandbox_id: Some(docker_sandbox_id(&container.id)),
+            node_id: Some(config.node_id.clone()),
+            runtime_type: Some(runtime_type.to_string()),
+            reason: if container.state.oom_killed {
+                Some("oom_killed".to_string())
+            } else if !container.state.error.is_empty() {
+                Some(container.state.error)
+            } else {
+                None
+            },
+        });
+    }
+
+    Ok(PluginOutput {
+        metadata: Metadata {
+            clusters: vec![json!({
+                "id": config.cluster_id,
+                "name": config.cluster_id,
+                "environment": "collector"
+            })],
+            nodes: vec![json!({
+                "id": config.node_id,
+                "clusterId": config.cluster_id,
+                "name": config.node_id,
+                "kernelVersion": kernel_version().unwrap_or_else(|| "docker-observed".to_string()),
+                "cpuCores": cpu_core_count().unwrap_or(0),
+                "memoryBytes": read_memory_snapshot().map(|memory| memory.total_bytes).unwrap_or(0),
+                "status": "ready",
+                "labels": {
+                    "collector": "runtimepulse-rust-collector",
+                    "plugin": "docker",
+                    "scope": config.collection_scope,
+                }
+            })],
+            images: images.into_values().collect(),
+            sandboxes,
+        },
+        metrics: Vec::new(),
+        events,
+        traces: Vec::new(),
+        profiles: Vec::new(),
+    })
 }
 
 fn merge_output(
@@ -1658,6 +1929,118 @@ fn cgroup_display_name(relative_path: &str) -> String {
         .find(|part| !part.is_empty())
         .unwrap_or(relative_path)
         .to_string()
+}
+
+fn cgroup_sandbox_id(relative_path: &str, fallback_id: &str) -> String {
+    docker_sandbox_id_from_cgroup(relative_path).unwrap_or_else(|| format!("cgroup-{fallback_id}"))
+}
+
+fn docker_sandbox_id_from_cgroup(relative_path: &str) -> Option<String> {
+    relative_path
+        .split('/')
+        .find_map(docker_id_from_cgroup_part)
+        .map(docker_sandbox_id)
+}
+
+fn docker_id_from_cgroup_part(part: &str) -> Option<&str> {
+    let id = part
+        .strip_prefix("docker-")
+        .and_then(|value| value.strip_suffix(".scope"))
+        .unwrap_or(part);
+
+    if is_container_id(id) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+fn is_container_id(value: &str) -> bool {
+    value.len() >= 12 && value.chars().all(|char| char.is_ascii_hexdigit())
+}
+
+fn short_container_id(id: &str) -> String {
+    id.chars().take(12).collect()
+}
+
+fn docker_sandbox_id(id: &str) -> String {
+    format!("docker-{}", short_container_id(id))
+}
+
+fn image_id_from_ref_or_digest(image_ref: &str, digest: &str) -> String {
+    let source = if image_ref.is_empty() {
+        digest
+    } else {
+        image_ref
+    };
+    format!("docker-image-{}", sanitize_id(source))
+}
+
+fn runtime_type_from_docker(runtime: &str) -> String {
+    let normalized = runtime.to_ascii_lowercase();
+    if normalized.contains("runsc") || normalized.contains("gvisor") {
+        "gvisor".to_string()
+    } else if normalized.contains("kata") {
+        "kata".to_string()
+    } else if normalized.contains("firecracker") {
+        "firecracker".to_string()
+    } else {
+        "runc".to_string()
+    }
+}
+
+fn sandbox_status_from_docker(state: &DockerState) -> String {
+    let status = state.status.to_ascii_lowercase();
+    if state.oom_killed || !state.error.is_empty() {
+        "failed".to_string()
+    } else if state.running || matches!(status.as_str(), "created" | "paused" | "restarting") {
+        "running".to_string()
+    } else {
+        "stopped".to_string()
+    }
+}
+
+fn docker_workload_name(container: &DockerInspectContainer) -> String {
+    container
+        .config
+        .labels
+        .get("com.docker.compose.service")
+        .cloned()
+        .or_else(|| {
+            let name = container.name.trim_start_matches('/');
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .unwrap_or_else(|| short_container_id(&container.id))
+}
+
+fn docker_namespace(container: &DockerInspectContainer) -> String {
+    container
+        .config
+        .labels
+        .get("com.docker.compose.project")
+        .cloned()
+        .unwrap_or_else(|| "docker".to_string())
+}
+
+fn normalize_docker_timestamp(value: &str) -> Option<String> {
+    if value.is_empty() || value.starts_with("0001-01-01T00:00:00") {
+        return None;
+    }
+
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|time| timestamp(time.with_timezone(&Utc)))
+}
+
+fn duration_ms_between(start: &str, end: &str) -> Option<f64> {
+    let start = DateTime::parse_from_rfc3339(start).ok()?;
+    let end = DateTime::parse_from_rfc3339(end).ok()?;
+    let duration = end.signed_duration_since(start);
+    Some(duration.num_milliseconds().max(0) as f64)
 }
 
 fn parse_psi_field(line: &str, field_name: &str) -> Option<f64> {
