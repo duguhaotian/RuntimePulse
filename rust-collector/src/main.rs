@@ -1,6 +1,8 @@
 mod collectors;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use collectors::adapters::command::CommandPlugin;
+use collectors::adapters::http::HttpPlugin;
 use collectors::core::config::CollectorConfig;
 use collectors::core::error::{CollectorError, Result};
 use collectors::core::model::{EventRecord, Metadata, PluginOutput};
@@ -96,17 +98,6 @@ struct DockerConfig {
 #[serde(rename_all = "PascalCase")]
 struct DockerHostConfig {
     runtime: String,
-}
-
-struct CommandPlugin {
-    name: String,
-    command: String,
-}
-
-struct HttpPlugin {
-    name: String,
-    url: String,
-    client: Client,
 }
 
 fn main() {
@@ -859,40 +850,6 @@ impl CollectorPlugin for CgroupfsPlugin {
             traces: Vec::new(),
             profiles: Vec::new(),
         })
-    }
-}
-
-impl CollectorPlugin for CommandPlugin {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn collect(&mut self, _now: DateTime<Utc>, _config: &CollectorConfig) -> Result<PluginOutput> {
-        let output = Command::new("sh").arg("-lc").arg(&self.command).output()?;
-
-        if !output.status.success() {
-            return Err(CollectorError::Plugin {
-                plugin: self.name.clone(),
-                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-
-        Ok(serde_json::from_slice(&output.stdout)?)
-    }
-}
-
-impl CollectorPlugin for HttpPlugin {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn collect(&mut self, _now: DateTime<Utc>, _config: &CollectorConfig) -> Result<PluginOutput> {
-        Ok(self
-            .client
-            .get(&self.url)
-            .send()?
-            .error_for_status()?
-            .json()?)
     }
 }
 
