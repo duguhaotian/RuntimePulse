@@ -12,6 +12,9 @@ use collectors::outlet::sender::send_local_report;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
 use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
+use collectors::sources::runtime::docker::lifecycle::{
+    collect_recent_docker_lifecycle, stream_docker_lifecycle,
+};
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::env;
@@ -30,6 +33,8 @@ fn main() {
         run_host_cgroupfs()
     } else if env::args().any(|arg| arg == "host-docker") {
         run_host_docker()
+    } else if env::args().any(|arg| arg == "host-docker-events") {
+        run_host_docker_events()
     } else {
         run_outlet()
     };
@@ -260,6 +265,63 @@ fn run_host_docker() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_host_docker_events() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let client = Client::new();
+
+    if config.once {
+        let now = Utc::now();
+        match collect_recent_docker_lifecycle(now, &config) {
+            Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
+                Ok(()) => println!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "message": "host_docker_events_report_accepted",
+                        "url": config.local_report_url,
+                        "sandboxes": output.metadata.sandboxes.len(),
+                        "events": output.events.len(),
+                    })
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "host_docker_events_report_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            },
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "message": "host_docker_events_collect_failed",
+                    "error": error.to_string(),
+                })
+            ),
+        }
+        return Ok(());
+    }
+
+    stream_docker_lifecycle(&config, |output| {
+        send_local_report(&client, &config.local_report_url, &output)?;
+        println!(
+            "{}",
+            json!({
+                "level": "info",
+                "message": "host_docker_event_report_accepted",
+                "url": config.local_report_url,
+                "sandboxes": output.metadata.sandboxes.len(),
+                "events": output.events.len(),
+            })
+        );
+        Ok(())
+    })
 }
 
 fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin>>> {

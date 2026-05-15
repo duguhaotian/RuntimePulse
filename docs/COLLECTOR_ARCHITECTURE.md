@@ -178,6 +178,7 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 | `host-procfs` | `sources/node/procfs.rs` plus PSI support |
 | `host-cgroupfs` | `sources/node/cgroupfs.rs` |
 | `host-docker` | `sources/runtime/docker/inventory.rs` |
+| `host-docker-events` | `sources/runtime/docker/lifecycle.rs` |
 | `command` | `adapters/command.rs` |
 | `http` | `adapters/http.rs` |
 | `POST /api/local/ingest` | `outlet/http_ingress.rs` and `adapters/local_push.rs` |
@@ -188,5 +189,5 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 2. Move outlet HTTP ingress, batching, and sender logic into `outlet/`.
 3. Move command and HTTP plugin implementations into `adapters/`.
 4. Move `host-procfs`, `host-cgroupfs`, and `host-docker` implementations into their target `sources/` modules.
-5. Add runtime startup inventory reconciliation.
-6. Add runtime lifecycle watchers and the sandbox sampler manager.
+5. Add runtime lifecycle watchers.
+6. Add runtime startup inventory reconciliation and the sandbox sampler manager.
