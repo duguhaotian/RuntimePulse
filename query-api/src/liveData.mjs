@@ -105,7 +105,7 @@ function rememberMetadata(store, metadata, source) {
 
   for (const image of array(metadata?.images)) {
     const normalized = normalizeImage(image);
-    if (normalized) store.images.set(normalized.id, normalized);
+    if (normalized) store.images.set(normalized.id, mergeImage(store.images.get(normalized.id), normalized));
   }
 
   for (const sandbox of array(metadata?.sandboxes)) {
@@ -175,6 +175,18 @@ function normalizeImage(image) {
     layerCount: numberOr(image.layerCount, 0),
     layers: Array.isArray(image.layers) ? image.layers : undefined,
     downloadTimeline: Array.isArray(image.downloadTimeline) ? image.downloadTimeline : undefined,
+  };
+}
+
+function mergeImage(existing, incoming) {
+  if (!existing) return incoming;
+  return {
+    ...existing,
+    ...incoming,
+    sizeBytes: incoming.sizeBytes || existing.sizeBytes,
+    layerCount: incoming.layerCount || existing.layerCount,
+    layers: incoming.layers ?? existing.layers,
+    downloadTimeline: incoming.downloadTimeline ?? existing.downloadTimeline,
   };
 }
 

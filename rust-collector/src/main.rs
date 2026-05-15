@@ -9,6 +9,7 @@ use collectors::core::plugin::CollectorPlugin;
 use collectors::outlet::batcher::collect_once;
 use collectors::outlet::http_ingress::start_local_report_server;
 use collectors::outlet::sender::send_local_report;
+use collectors::sources::image::download::pull_docker_image;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
 use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
@@ -41,6 +42,8 @@ fn main() {
         run_host_docker_cgroupfs()
     } else if env::args().any(|arg| arg == "host-docker-sandbox-agent") {
         run_host_docker_sandbox_agent()
+    } else if env::args().any(|arg| arg == "host-docker-pull") {
+        run_host_docker_pull()
     } else {
         run_outlet()
     };
@@ -387,6 +390,33 @@ fn run_host_docker_cgroupfs() -> Result<()> {
 
 fn run_host_docker_sandbox_agent() -> Result<()> {
     run_docker_sandbox_agent(CollectorConfig::from_env()?)
+}
+
+fn run_host_docker_pull() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let image_ref = env::args()
+        .skip_while(|arg| arg != "host-docker-pull")
+        .nth(1)
+        .ok_or_else(|| {
+            CollectorError::Config("host-docker-pull requires an image reference".to_string())
+        })?;
+    let client = Client::new();
+    let output = pull_docker_image(&image_ref, Utc::now(), &config)?;
+    send_local_report(&client, &config.local_report_url, &output)?;
+    println!(
+        "{}",
+        json!({
+            "level": "info",
+            "message": "host_docker_pull_report_accepted",
+            "url": config.local_report_url,
+            "image": image_ref,
+            "images": output.metadata.images.len(),
+            "events": output.events.len(),
+        })
+    );
+    Ok(())
 }
 
 fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin>>> {

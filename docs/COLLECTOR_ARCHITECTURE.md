@@ -179,6 +179,7 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 | `host-cgroupfs` | `sources/node/cgroupfs.rs` |
 | `host-docker` | `sources/runtime/docker/inventory.rs` |
 | Docker image metadata | `sources/image/layer.rs` via Docker image inspect/history enrichment |
+| `host-docker-pull <image>` | `sources/image/download.rs` wrapping Docker pull and reporting measured eager pull duration |
 | `host-docker-events` | `sources/runtime/docker/lifecycle.rs` |
 | `host-docker-cgroupfs` | `sources/sandbox/cgroupfs.rs` using Docker PID cgroup resolution |
 | `host-docker-sandbox-agent` | `sources/sandbox/manager.rs` combining Docker lifecycle events with active-set cgroupfs sampling |

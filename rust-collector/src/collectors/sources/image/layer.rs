@@ -72,7 +72,7 @@ pub fn docker_image_metadata_rows(
     Ok(rows)
 }
 
-fn docker_image_metadata_row(candidate: &DockerImageCandidate) -> Result<Value> {
+pub fn docker_image_metadata_row(candidate: &DockerImageCandidate) -> Result<Value> {
     let inspected = inspect_docker_image(&candidate.reference)
         .or_else(|_| inspect_docker_image(&candidate.digest))
         .ok();
@@ -113,6 +113,15 @@ fn docker_image_metadata_row(candidate: &DockerImageCandidate) -> Result<Value> 
         "layerCount": layer_count,
         "layers": layers,
     }))
+}
+
+pub fn docker_image_id_from_ref_or_digest(image_ref: &str, digest: &str) -> String {
+    let source = if image_ref.is_empty() {
+        digest
+    } else {
+        image_ref
+    };
+    format!("docker-image-{}", sanitize_id(source))
 }
 
 fn inspect_docker_image(reference: &str) -> Result<DockerInspectImage> {
@@ -337,4 +346,19 @@ fn shorten(value: &str, max_chars: usize) -> String {
         return clean;
     }
     clean.chars().take(max_chars).collect()
+}
+
+fn sanitize_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() {
+                char.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
