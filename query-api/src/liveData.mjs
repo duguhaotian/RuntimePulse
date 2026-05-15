@@ -18,6 +18,7 @@ export function createLiveStore() {
 
 export function recordLiveBatch(store, payload) {
   rememberMetadata(store, payload.metadata, payload.source);
+  reconcileSnapshotEvents(store, payload.events);
 
   for (const metric of array(payload.metrics)) rememberMetric(store, metric);
   for (const event of array(payload.events)) rememberRow(store.eventsBySandbox, event.sandboxId, event, rowLimit('events'));
@@ -245,6 +246,23 @@ function removeLiveSandbox(store, sandboxId) {
   store.profilesBySandbox.delete(sandboxId);
 }
 
+function reconcileSnapshotEvents(store, events) {
+  for (const event of array(events)) {
+    const attributes = isObject(event.attributes) ? event.attributes : {};
+    const scope = stringValue(attributes['snapshot.scope']);
+    const nodeId = stringValue(attributes['snapshot.nodeId']) ?? stringValue(event.nodeId);
+    const sandboxIds = stringSet(attributes['snapshot.sandboxIds']);
+
+    if (!scope || !nodeId || !sandboxIds) continue;
+
+    for (const sandbox of Array.from(store.sandboxes.values())) {
+      if (sandbox.nodeId !== nodeId) continue;
+      if (sandbox.attributes?.['snapshot.scope'] !== scope) continue;
+      if (!sandboxIds.has(sandbox.id)) removeLiveSandbox(store, sandbox.id);
+    }
+  }
+}
+
 function rememberMetric(store, metric) {
   const sandboxId = metric.sandboxId;
   if (!sandboxId) return;
@@ -363,6 +381,15 @@ function array(value) {
 
 function isObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stringValue(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+function stringSet(value) {
+  if (!Array.isArray(value)) return undefined;
+  return new Set(value.filter((item) => typeof item === 'string' && item.trim() !== ''));
 }
 
 function rowCount(collection) {

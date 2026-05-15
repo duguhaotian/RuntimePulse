@@ -107,12 +107,14 @@ impl CollectorPlugin for DockerSandboxCgroupfsPlugin {
         let targets = docker_cgroup_targets(&self.root)?;
         let mut images = BTreeMap::new();
         let mut sandboxes = Vec::new();
+        let mut sampled_sandbox_ids = Vec::new();
         let mut metrics = Vec::new();
 
         for target in targets {
             let Some(sample) = read_sandbox_cgroup_sample(&target.cgroup_path) else {
                 continue;
             };
+            sampled_sandbox_ids.push(target.sandbox_id.clone());
 
             images.entry(target.image_id.clone()).or_insert_with(|| {
                 json!({
@@ -147,6 +149,9 @@ impl CollectorPlugin for DockerSandboxCgroupfsPlugin {
                 },
                 "attributes": {
                     "collector.scope": config.collection_scope,
+                    "runtime.source": "docker",
+                    "snapshot.scope": "docker-running",
+                    "lifecycle.current": true,
                     "docker.id": target.docker_id,
                     "docker.name": target.docker_name,
                     "cgroup.path": target.cgroup_relative_path,
@@ -245,6 +250,12 @@ impl CollectorPlugin for DockerSandboxCgroupfsPlugin {
         attributes.insert("scope".to_string(), json!(config.collection_scope));
         attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
         attributes.insert("resolver".to_string(), json!("docker-pid-cgroup"));
+        attributes.insert("snapshot.scope".to_string(), json!("docker-running"));
+        attributes.insert("snapshot.nodeId".to_string(), json!(config.node_id));
+        attributes.insert(
+            "snapshot.sandboxIds".to_string(),
+            json!(sampled_sandbox_ids),
+        );
 
         let events = vec![EventRecord {
             id: format!("docker-sandbox-cgroupfs-observed-{}", now.timestamp()),
