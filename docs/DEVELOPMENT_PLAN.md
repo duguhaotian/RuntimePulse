@@ -140,13 +140,14 @@ Implemented:
 - Rust host-side Docker lifecycle tool reports Docker container create/start/stop/die/kill/oom/destroy events as sandbox lifecycle events through the local outlet.
 - Query API live store applies Docker lifecycle mutations: stop/die update sandbox status and destroy removes the sandbox from the current live container set while preserving event records.
 - Rust host-side Docker sandbox cgroupfs tool resolves cgroup paths from Docker running-container inventory and samples per-sandbox CPU, memory, IO, and process metrics without broad host cgroup scanning.
+- Rust host-side Docker sandbox agent combines startup/running-container cgroupfs reconciliation with Docker lifecycle event streaming, so one host process can keep current sandbox metadata and metrics in sync.
 
 Collector candidates:
 
 - Host metrics collector.
 - Cgroup metrics collector.
 - Docker/containerd lifecycle collector. Docker lifecycle is implemented; containerd remains pending.
-- Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker inventory-based sandbox cgroup sampling is implemented; event-managed sampler lifetime remains pending.
+- Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, periodic cgroup sampling, and lifecycle event streaming are available through `host-docker-sandbox-agent`; fine-grained per-sandbox sampler lifetime remains pending.
 - image metadata and cache collector.
 - gVisor collector.
 - Kata collector.

@@ -16,6 +16,7 @@ use collectors::sources::runtime::docker::lifecycle::{
     collect_recent_docker_lifecycle, stream_docker_lifecycle,
 };
 use collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
+use collectors::sources::sandbox::manager::run_docker_sandbox_agent;
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::env;
@@ -38,6 +39,8 @@ fn main() {
         run_host_docker_events()
     } else if env::args().any(|arg| arg == "host-docker-cgroupfs") {
         run_host_docker_cgroupfs()
+    } else if env::args().any(|arg| arg == "host-docker-sandbox-agent") {
+        run_host_docker_sandbox_agent()
     } else {
         run_outlet()
     };
@@ -380,6 +383,10 @@ fn run_host_docker_cgroupfs() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_host_docker_sandbox_agent() -> Result<()> {
+    run_docker_sandbox_agent(CollectorConfig::from_env()?)
 }
 
 fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin>>> {

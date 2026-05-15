@@ -180,6 +180,7 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 | `host-docker` | `sources/runtime/docker/inventory.rs` |
 | `host-docker-events` | `sources/runtime/docker/lifecycle.rs` |
 | `host-docker-cgroupfs` | `sources/sandbox/cgroupfs.rs` using Docker PID cgroup resolution |
+| `host-docker-sandbox-agent` | `sources/sandbox/manager.rs` combining Docker lifecycle events with sandbox cgroupfs reconciliation |
 | `command` | `adapters/command.rs` |
 | `http` | `adapters/http.rs` |
 | `POST /api/local/ingest` | `outlet/http_ingress.rs` and `adapters/local_push.rs` |
@@ -192,4 +193,4 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 4. Move `host-procfs`, `host-cgroupfs`, and `host-docker` implementations into their target `sources/` modules.
 5. Add runtime lifecycle watchers.
 6. Add Docker inventory-driven sandbox cgroupfs sampling.
-7. Add runtime startup inventory reconciliation and the sandbox sampler manager.
+7. Add runtime startup inventory reconciliation and the sandbox sampler manager. Docker has an initial combined manager through `host-docker-sandbox-agent`; next iterations should make sampler lifetime per-sandbox instead of periodic whole-snapshot sampling.
