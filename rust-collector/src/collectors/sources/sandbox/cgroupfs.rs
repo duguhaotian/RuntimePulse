@@ -91,6 +91,20 @@ impl DockerSandboxCgroupfsPlugin {
             last_io_write_by_sandbox: HashMap::new(),
         }
     }
+
+    pub fn collect_for_docker_ids(
+        &mut self,
+        now: DateTime<Utc>,
+        config: &CollectorConfig,
+        docker_ids: &[String],
+    ) -> Result<PluginOutput> {
+        collect_cgroup_targets(
+            self,
+            now,
+            config,
+            docker_cgroup_targets_for_ids(&self.root, docker_ids)?,
+        )
+    }
 }
 
 impl CollectorPlugin for DockerSandboxCgroupfsPlugin {
@@ -99,213 +113,225 @@ impl CollectorPlugin for DockerSandboxCgroupfsPlugin {
     }
 
     fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
-        let ts = timestamp(now);
-        let sample_interval = self
-            .last_seen
-            .map(|seen| seen.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
         let targets = docker_cgroup_targets(&self.root)?;
-        let mut images = BTreeMap::new();
-        let mut sandboxes = Vec::new();
-        let mut sampled_sandbox_ids = Vec::new();
-        let mut metrics = Vec::new();
+        collect_cgroup_targets(self, now, config, targets)
+    }
+}
 
-        for target in targets {
-            let Some(sample) = read_sandbox_cgroup_sample(&target.cgroup_path) else {
-                continue;
-            };
-            sampled_sandbox_ids.push(target.sandbox_id.clone());
+fn collect_cgroup_targets(
+    plugin: &mut DockerSandboxCgroupfsPlugin,
+    now: DateTime<Utc>,
+    config: &CollectorConfig,
+    targets: Vec<SandboxCgroupTarget>,
+) -> Result<PluginOutput> {
+    let ts = timestamp(now);
+    let sample_interval = plugin
+        .last_seen
+        .map(|seen| seen.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
+    let mut images = BTreeMap::new();
+    let mut sandboxes = Vec::new();
+    let mut sampled_sandbox_ids = Vec::new();
+    let mut metrics = Vec::new();
 
-            images.entry(target.image_id.clone()).or_insert_with(|| {
-                json!({
-                    "id": target.image_id,
-                    "ref": target.image_ref,
-                    "digest": format!("collector:{}", target.image_id),
-                    "loadingMode": "eager",
-                    "sizeBytes": 0,
-                    "layerCount": 0
-                })
-            });
+    for target in targets {
+        let Some(sample) = read_sandbox_cgroup_sample(&target.cgroup_path) else {
+            continue;
+        };
+        sampled_sandbox_ids.push(target.sandbox_id.clone());
 
-            sandboxes.push(json!({
-                "id": target.sandbox_id,
-                "clusterId": config.cluster_id,
-                "nodeId": config.node_id,
-                "namespace": target.namespace,
-                "workloadId": target.workload_name,
-                "workloadName": target.workload_name,
-                "imageId": target.image_id,
-                "imageRef": target.image_ref,
-                "runtimeType": target.runtime_type,
-                "runtimeVersion": target.runtime_version,
-                "status": "running",
-                "startupDurationMs": 0,
-                "cpuAvg": 0,
-                "memoryPeakBytes": sample.memory_current.unwrap_or(0),
-                "labels": {
-                    "collector": "runtimepulse-rust-collector",
-                    "plugin": "docker-sandbox-cgroupfs",
-                    "scope": config.collection_scope,
-                },
-                "attributes": {
-                    "collector.scope": config.collection_scope,
-                    "runtime.source": "docker",
-                    "snapshot.scope": "docker-running",
-                    "lifecycle.current": true,
-                    "docker.id": target.docker_id,
-                    "docker.name": target.docker_name,
-                    "cgroup.path": target.cgroup_relative_path,
-                }
-            }));
+        images.entry(target.image_id.clone()).or_insert_with(|| {
+            json!({
+                "id": target.image_id,
+                "ref": target.image_ref,
+                "digest": format!("collector:{}", target.image_id),
+                "loadingMode": "eager",
+                "sizeBytes": 0,
+                "layerCount": 0
+            })
+        });
 
-            let previous_cpu = self.last_cpu_usage_by_sandbox.insert(
-                target.sandbox_id.clone(),
-                sample.cpu_usage_usec.unwrap_or(0),
-            );
-            let cpu_ratio = match (previous_cpu, sample.cpu_usage_usec) {
-                (Some(previous), Some(current)) if sample_interval > 0.0 => {
-                    (current.saturating_sub(previous) as f64 / 1_000_000.0 / sample_interval)
-                        .max(0.0)
-                }
-                _ => 0.0,
-            };
+        sandboxes.push(json!({
+            "id": target.sandbox_id,
+            "clusterId": config.cluster_id,
+            "nodeId": config.node_id,
+            "namespace": target.namespace,
+            "workloadId": target.workload_name,
+            "workloadName": target.workload_name,
+            "imageId": target.image_id,
+            "imageRef": target.image_ref,
+            "runtimeType": target.runtime_type,
+            "runtimeVersion": target.runtime_version,
+            "status": "running",
+            "startupDurationMs": 0,
+            "cpuAvg": 0,
+            "memoryPeakBytes": sample.memory_current.unwrap_or(0),
+            "labels": {
+                "collector": "runtimepulse-rust-collector",
+                "plugin": "docker-sandbox-cgroupfs",
+                "scope": config.collection_scope,
+            },
+            "attributes": {
+                "collector.scope": config.collection_scope,
+                "runtime.source": "docker",
+                "snapshot.scope": "docker-running",
+                "lifecycle.current": true,
+                "docker.id": target.docker_id,
+                "docker.name": target.docker_name,
+                "cgroup.path": target.cgroup_relative_path,
+            }
+        }));
 
+        let previous_cpu = plugin.last_cpu_usage_by_sandbox.insert(
+            target.sandbox_id.clone(),
+            sample.cpu_usage_usec.unwrap_or(0),
+        );
+        let cpu_ratio = match (previous_cpu, sample.cpu_usage_usec) {
+            (Some(previous), Some(current)) if sample_interval > 0.0 => {
+                (current.saturating_sub(previous) as f64 / 1_000_000.0 / sample_interval).max(0.0)
+            }
+            _ => 0.0,
+        };
+
+        metrics.push(metric(
+            &ts,
+            "sandbox.cpu.usage_ratio",
+            cpu_ratio,
+            "ratio",
+            "cpu",
+            &config.node_id,
+            &target.sandbox_id,
+            &target.runtime_type,
+        ));
+
+        if let Some(memory_current) = sample.memory_current {
             metrics.push(metric(
                 &ts,
-                "sandbox.cpu.usage_ratio",
-                cpu_ratio,
-                "ratio",
-                "cpu",
+                "sandbox.memory.working_set_bytes",
+                memory_current as f64,
+                "bytes",
+                "memory",
                 &config.node_id,
                 &target.sandbox_id,
                 &target.runtime_type,
             ));
-
-            if let Some(memory_current) = sample.memory_current {
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.memory.working_set_bytes",
-                    memory_current as f64,
-                    "bytes",
-                    "memory",
-                    &config.node_id,
-                    &target.sandbox_id,
-                    &target.runtime_type,
-                ));
-            }
-
-            if let Some(read_bytes) = sample.io_read_bytes {
-                let previous = self
-                    .last_io_read_by_sandbox
-                    .insert(target.sandbox_id.clone(), read_bytes);
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.io.read_bytes",
-                    rate(previous, read_bytes, sample_interval),
-                    "bytes/s",
-                    "io",
-                    &config.node_id,
-                    &target.sandbox_id,
-                    &target.runtime_type,
-                ));
-            }
-
-            if let Some(write_bytes) = sample.io_write_bytes {
-                let previous = self
-                    .last_io_write_by_sandbox
-                    .insert(target.sandbox_id.clone(), write_bytes);
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.io.write_bytes",
-                    rate(previous, write_bytes, sample_interval),
-                    "bytes/s",
-                    "io",
-                    &config.node_id,
-                    &target.sandbox_id,
-                    &target.runtime_type,
-                ));
-            }
-
-            if let Some(process_count) = sample.process_count {
-                metrics.push(metric(
-                    &ts,
-                    "sandbox.process.count",
-                    process_count as f64,
-                    "count",
-                    "runtime",
-                    &config.node_id,
-                    &target.sandbox_id,
-                    &target.runtime_type,
-                ));
-            }
         }
 
-        self.last_seen = Some(Instant::now());
-        retain_seen(&mut self.last_cpu_usage_by_sandbox, &sandboxes);
-        retain_seen(&mut self.last_io_read_by_sandbox, &sandboxes);
-        retain_seen(&mut self.last_io_write_by_sandbox, &sandboxes);
+        if let Some(read_bytes) = sample.io_read_bytes {
+            let previous = plugin
+                .last_io_read_by_sandbox
+                .insert(target.sandbox_id.clone(), read_bytes);
+            metrics.push(metric(
+                &ts,
+                "sandbox.io.read_bytes",
+                rate(previous, read_bytes, sample_interval),
+                "bytes/s",
+                "io",
+                &config.node_id,
+                &target.sandbox_id,
+                &target.runtime_type,
+            ));
+        }
 
-        let mut attributes = Map::new();
-        attributes.insert("plugin".to_string(), json!("docker-sandbox-cgroupfs"));
-        attributes.insert("scope".to_string(), json!(config.collection_scope));
-        attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
-        attributes.insert("resolver".to_string(), json!("docker-pid-cgroup"));
-        attributes.insert("snapshot.scope".to_string(), json!("docker-running"));
-        attributes.insert("snapshot.nodeId".to_string(), json!(config.node_id));
-        attributes.insert(
-            "snapshot.sandboxIds".to_string(),
-            json!(sampled_sandbox_ids),
-        );
+        if let Some(write_bytes) = sample.io_write_bytes {
+            let previous = plugin
+                .last_io_write_by_sandbox
+                .insert(target.sandbox_id.clone(), write_bytes);
+            metrics.push(metric(
+                &ts,
+                "sandbox.io.write_bytes",
+                rate(previous, write_bytes, sample_interval),
+                "bytes/s",
+                "io",
+                &config.node_id,
+                &target.sandbox_id,
+                &target.runtime_type,
+            ));
+        }
 
-        let events = vec![EventRecord {
-            id: format!("docker-sandbox-cgroupfs-observed-{}", now.timestamp()),
-            timestamp: ts,
-            severity: "info".to_string(),
-            event_type: "collector".to_string(),
-            event_name: "sandbox.cgroupfs.sample.observed".to_string(),
-            message: "Docker sandbox cgroupfs collector sampled resolved cgroups".to_string(),
-            source: format!(
-                "runtimepulse-rust-collector/{}/docker-sandbox-cgroupfs",
-                config.node_id
-            ),
-            attributes,
-            sandbox_id: None,
-            node_id: Some(config.node_id.clone()),
-            runtime_type: None,
-            reason: None,
-        }];
-
-        Ok(PluginOutput {
-            metadata: Metadata {
-                clusters: vec![json!({
-                    "id": config.cluster_id,
-                    "name": config.cluster_id,
-                    "environment": "collector"
-                })],
-                nodes: vec![json!({
-                    "id": config.node_id,
-                    "clusterId": config.cluster_id,
-                    "name": config.node_id,
-                    "status": "ready",
-                    "labels": {
-                        "collector": "runtimepulse-rust-collector",
-                        "plugin": "docker-sandbox-cgroupfs",
-                        "scope": config.collection_scope,
-                    }
-                })],
-                images: images.into_values().collect(),
-                sandboxes,
-            },
-            metrics,
-            events,
-            traces: Vec::new(),
-            profiles: Vec::new(),
-        })
+        if let Some(process_count) = sample.process_count {
+            metrics.push(metric(
+                &ts,
+                "sandbox.process.count",
+                process_count as f64,
+                "count",
+                "runtime",
+                &config.node_id,
+                &target.sandbox_id,
+                &target.runtime_type,
+            ));
+        }
     }
+
+    plugin.last_seen = Some(Instant::now());
+    retain_seen(&mut plugin.last_cpu_usage_by_sandbox, &sandboxes);
+    retain_seen(&mut plugin.last_io_read_by_sandbox, &sandboxes);
+    retain_seen(&mut plugin.last_io_write_by_sandbox, &sandboxes);
+
+    let mut attributes = Map::new();
+    attributes.insert("plugin".to_string(), json!("docker-sandbox-cgroupfs"));
+    attributes.insert("scope".to_string(), json!(config.collection_scope));
+    attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
+    attributes.insert("resolver".to_string(), json!("docker-pid-cgroup"));
+    attributes.insert("snapshot.scope".to_string(), json!("docker-running"));
+    attributes.insert("snapshot.nodeId".to_string(), json!(config.node_id));
+    attributes.insert(
+        "snapshot.sandboxIds".to_string(),
+        json!(sampled_sandbox_ids),
+    );
+
+    let events = vec![EventRecord {
+        id: format!("docker-sandbox-cgroupfs-observed-{}", now.timestamp()),
+        timestamp: ts,
+        severity: "info".to_string(),
+        event_type: "collector".to_string(),
+        event_name: "sandbox.cgroupfs.sample.observed".to_string(),
+        message: "Docker sandbox cgroupfs collector sampled resolved cgroups".to_string(),
+        source: format!(
+            "runtimepulse-rust-collector/{}/docker-sandbox-cgroupfs",
+            config.node_id
+        ),
+        attributes,
+        sandbox_id: None,
+        node_id: Some(config.node_id.clone()),
+        runtime_type: None,
+        reason: None,
+    }];
+
+    Ok(PluginOutput {
+        metadata: Metadata {
+            clusters: vec![json!({
+                "id": config.cluster_id,
+                "name": config.cluster_id,
+                "environment": "collector"
+            })],
+            nodes: vec![json!({
+                "id": config.node_id,
+                "clusterId": config.cluster_id,
+                "name": config.node_id,
+                "status": "ready",
+                "labels": {
+                    "collector": "runtimepulse-rust-collector",
+                    "plugin": "docker-sandbox-cgroupfs",
+                    "scope": config.collection_scope,
+                }
+            })],
+            images: images.into_values().collect(),
+            sandboxes,
+        },
+        metrics,
+        events,
+        traces: Vec::new(),
+        profiles: Vec::new(),
+    })
 }
 
 fn docker_cgroup_targets(root: &Path) -> Result<Vec<SandboxCgroupTarget>> {
     let ids = docker_running_container_ids()?;
+    docker_cgroup_targets_for_ids(root, &ids)
+}
+
+fn docker_cgroup_targets_for_ids(root: &Path, ids: &[String]) -> Result<Vec<SandboxCgroupTarget>> {
     let containers = docker_inspect_containers(&ids)?;
     let mut targets = Vec::new();
 
@@ -344,7 +370,7 @@ fn docker_cgroup_targets(root: &Path) -> Result<Vec<SandboxCgroupTarget>> {
     Ok(targets)
 }
 
-fn docker_running_container_ids() -> Result<Vec<String>> {
+pub fn docker_running_container_ids() -> Result<Vec<String>> {
     let output = Command::new("docker")
         .args(["ps", "-q", "--no-trunc"])
         .output()?;

@@ -12,6 +12,7 @@ export function createLiveStore() {
     tracesBySandbox: new Map(),
     profilesBySandbox: new Map(),
     sourceBySandbox: new Map(),
+    snapshotScopeBySandbox: new Map(),
     lastUpdatedAt: undefined,
   };
 }
@@ -25,6 +26,7 @@ export function recordLiveBatch(store, payload) {
   for (const span of array(payload.traces)) rememberRow(store.tracesBySandbox, span.sandboxId, span, rowLimit('traces'));
   for (const profile of array(payload.profiles)) rememberRow(store.profilesBySandbox, profile.sandboxId, profile, rowLimit('profiles'));
 
+  reconcileSnapshotEvents(store, payload.events);
   for (const sandbox of store.sandboxes.values()) refreshSandboxDerivedFields(store, sandbox);
   store.lastUpdatedAt = new Date().toISOString();
 }
@@ -115,6 +117,9 @@ function rememberMetadata(store, metadata, source) {
         store.sandboxes.set(normalized.id, mergeSandbox(store.sandboxes.get(normalized.id), normalized));
       }
       if (source) store.sourceBySandbox.set(normalized.id, source);
+      if (stringValue(normalized.attributes?.['snapshot.scope'])) {
+        store.snapshotScopeBySandbox.set(normalized.id, normalized.attributes['snapshot.scope']);
+      }
     }
   }
 }
@@ -260,6 +265,16 @@ function reconcileSnapshotEvents(store, events) {
       if (sandbox.attributes?.['snapshot.scope'] !== scope) continue;
       if (!sandboxIds.has(sandbox.id)) removeLiveSandbox(store, sandbox.id);
     }
+    removeSnapshotTelemetryOutside(store, scope, sandboxIds);
+  }
+}
+
+function removeSnapshotTelemetryOutside(store, scope, sandboxIds) {
+  for (const [sandboxId, sandboxScope] of store.snapshotScopeBySandbox.entries()) {
+    if (sandboxScope !== scope || sandboxIds.has(sandboxId)) continue;
+    store.metricsBySandbox.delete(sandboxId);
+    store.tracesBySandbox.delete(sandboxId);
+    store.profilesBySandbox.delete(sandboxId);
   }
 }
 
