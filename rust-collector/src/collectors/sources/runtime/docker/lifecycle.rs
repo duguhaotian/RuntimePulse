@@ -50,7 +50,7 @@ pub fn collect_recent_docker_lifecycle(
     config: &CollectorConfig,
 ) -> Result<PluginOutput> {
     let since = now.timestamp() - config.interval.as_secs() as i64;
-    let until = now.timestamp();
+    let until = now.timestamp() + 1;
     let output = docker_events_command()
         .args(["--since", &since.to_string(), "--until", &until.to_string()])
         .output()?;
@@ -158,6 +158,8 @@ fn output_from_event(event: DockerLifecycleEvent, config: &CollectorConfig) -> P
         .unwrap_or_else(|| short_id.clone());
     let action = event_action(&event);
     let lifecycle_status = sandbox_status_from_event(action, &event.actor.attributes);
+    let current = is_current_action(action);
+    let removed = is_removed_action(action);
     let severity = event_severity(action, &event.actor.attributes);
 
     let mut attributes = Map::new();
@@ -200,6 +202,9 @@ fn output_from_event(event: DockerLifecycleEvent, config: &CollectorConfig) -> P
             "docker.id": container_id,
             "docker.short_id": short_id,
             "docker.action": action,
+            "lifecycle.action": action,
+            "lifecycle.current": current,
+            "lifecycle.removed": removed,
         }
     });
 
@@ -207,6 +212,9 @@ fn output_from_event(event: DockerLifecycleEvent, config: &CollectorConfig) -> P
         sandbox["startedAt"] = json!(timestamp);
     } else if lifecycle_status == "stopped" || lifecycle_status == "failed" {
         sandbox["stoppedAt"] = json!(timestamp);
+    }
+    if removed {
+        sandbox["removedAt"] = json!(timestamp);
     }
 
     PluginOutput {
@@ -354,6 +362,14 @@ fn sandbox_status_from_event(action: &str, attributes: &HashMap<String, String>)
         "stop" | "die" | "destroy" | "pause" | "create" => "stopped",
         _ => "running",
     }
+}
+
+fn is_current_action(action: &str) -> bool {
+    matches!(action, "start" | "restart" | "unpause")
+}
+
+fn is_removed_action(action: &str) -> bool {
+    matches!(action, "destroy")
 }
 
 fn event_severity(action: &str, attributes: &HashMap<String, String>) -> &'static str {

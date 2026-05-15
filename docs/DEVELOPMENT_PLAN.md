@@ -138,6 +138,7 @@ Implemented:
 - Rust host-side cgroupfs tool reports host/root cgroup v2 CPU, memory, IO, and process count samples as node-level metrics without creating sandbox or image metadata.
 - Rust host-side Docker tool reports real Docker container and image inventory.
 - Rust host-side Docker lifecycle tool reports Docker container create/start/stop/die/kill/oom/destroy events as sandbox lifecycle events through the local outlet.
+- Query API live store applies Docker lifecycle mutations: stop/die update sandbox status and destroy removes the sandbox from the current live container set while preserving event records.
 - Rust host-side Docker sandbox cgroupfs tool resolves cgroup paths from Docker running-container inventory and samples per-sandbox CPU, memory, IO, and process metrics without broad host cgroup scanning.
 
 Collector candidates:

@@ -108,7 +108,11 @@ function rememberMetadata(store, metadata, source) {
   for (const sandbox of array(metadata?.sandboxes)) {
     const normalized = normalizeSandbox(sandbox, store);
     if (normalized) {
-      store.sandboxes.set(normalized.id, normalized);
+      if (isRemovedSandbox(normalized)) {
+        removeLiveSandbox(store, normalized.id);
+      } else {
+        store.sandboxes.set(normalized.id, mergeSandbox(store.sandboxes.get(normalized.id), normalized));
+      }
       if (source) store.sourceBySandbox.set(normalized.id, source);
     }
   }
@@ -198,6 +202,7 @@ function normalizeSandbox(sandbox, store) {
     createdAt,
     startedAt: sandbox.startedAt,
     stoppedAt: sandbox.stoppedAt,
+    removedAt: sandbox.removedAt,
     startupDurationMs: numberOr(sandbox.startupDurationMs, 0),
     cpuAvg: numberOr(sandbox.cpuAvg, 0),
     memoryPeakBytes: numberOr(sandbox.memoryPeakBytes, 0),
@@ -205,6 +210,39 @@ function normalizeSandbox(sandbox, store) {
     labels: isObject(sandbox.labels) ? sandbox.labels : { source: 'collector' },
     attributes: isObject(sandbox.attributes) ? sandbox.attributes : {},
   };
+}
+
+function mergeSandbox(existing, incoming) {
+  if (!existing) return incoming;
+  const lifecycleAction = incoming.attributes?.['lifecycle.action'];
+
+  return {
+    ...existing,
+    ...incoming,
+    createdAt: lifecycleAction ? existing.createdAt : incoming.createdAt ?? existing.createdAt,
+    startedAt: incoming.startedAt ?? existing.startedAt,
+    stoppedAt: incoming.stoppedAt ?? existing.stoppedAt,
+    removedAt: incoming.removedAt ?? existing.removedAt,
+    startupDurationMs: incoming.startupDurationMs || existing.startupDurationMs,
+    cpuAvg: incoming.cpuAvg || existing.cpuAvg,
+    memoryPeakBytes: Math.max(incoming.memoryPeakBytes, existing.memoryPeakBytes),
+    eventCount: Math.max(incoming.eventCount, existing.eventCount),
+    labels: { ...existing.labels, ...incoming.labels },
+    attributes: { ...existing.attributes, ...incoming.attributes },
+  };
+}
+
+function isRemovedSandbox(sandbox) {
+  return sandbox.attributes?.['lifecycle.removed'] === true
+    || sandbox.attributes?.['lifecycle.action'] === 'destroy'
+    || sandbox.removedAt !== undefined;
+}
+
+function removeLiveSandbox(store, sandboxId) {
+  store.sandboxes.delete(sandboxId);
+  store.metricsBySandbox.delete(sandboxId);
+  store.tracesBySandbox.delete(sandboxId);
+  store.profilesBySandbox.delete(sandboxId);
 }
 
 function rememberMetric(store, metric) {
