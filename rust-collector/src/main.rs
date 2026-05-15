@@ -15,6 +15,7 @@ use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
 use collectors::sources::runtime::docker::lifecycle::{
     collect_recent_docker_lifecycle, stream_docker_lifecycle,
 };
+use collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::env;
@@ -35,6 +36,8 @@ fn main() {
         run_host_docker()
     } else if env::args().any(|arg| arg == "host-docker-events") {
         run_host_docker_events()
+    } else if env::args().any(|arg| arg == "host-docker-cgroupfs") {
+        run_host_docker_cgroupfs()
     } else {
         run_outlet()
     };
@@ -322,6 +325,61 @@ fn run_host_docker_events() -> Result<()> {
         );
         Ok(())
     })
+}
+
+fn run_host_docker_cgroupfs() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let client = Client::new();
+    let mut plugin = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
+
+    loop {
+        let started = Instant::now();
+        let now = Utc::now();
+        match plugin.collect(now, &config) {
+            Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
+                Ok(()) => println!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "message": "host_docker_cgroupfs_report_accepted",
+                        "url": config.local_report_url,
+                        "sandboxes": output.metadata.sandboxes.len(),
+                        "metrics": output.metrics.len(),
+                        "events": output.events.len(),
+                    })
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "host_docker_cgroupfs_report_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            },
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "message": "host_docker_cgroupfs_collect_failed",
+                    "error": error.to_string(),
+                })
+            ),
+        }
+
+        if config.once {
+            break;
+        }
+
+        let elapsed = started.elapsed();
+        if config.interval > elapsed {
+            thread::sleep(config.interval - elapsed);
+        }
+    }
+
+    Ok(())
 }
 
 fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin>>> {

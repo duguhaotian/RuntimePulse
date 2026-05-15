@@ -30,6 +30,8 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-procfs`: runs on the host, reads `/proc`, `/proc/pressure/*`, and cgroup-like process signals from the host view, then pushes partial ingest JSON to the outlet over HTTP.
 - `host-cgroupfs`: runs on the host, reads only host/root cgroup v2 CPU, memory, IO, and process counts from `/sys/fs/cgroup`, and reports node-level metrics.
 - `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP.
+- `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet.
+- `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, and process metrics without scanning the whole cgroup tree.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
 
@@ -53,6 +55,13 @@ cd rust-collector
 RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
 RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
 cargo run -- host-docker
+```
+
+```bash
+cd rust-collector
+RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
+RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
+cargo run -- host-docker-cgroupfs
 ```
 
 Useful host tool settings:
@@ -96,8 +105,8 @@ Container cgroupfs metrics should be collected by a lifecycle-aware runtime coll
 
 Expected flow:
 
-1. A Docker/containerd/Kubernetes/runtime-specific collector observes a sandbox/container `started` event.
-2. The collector resolves the exact runtime cgroup path for that sandbox shape.
+1. A Docker/containerd/Kubernetes/runtime-specific collector observes a sandbox/container `started` event or reconciles already-running sandboxes from runtime inventory.
+2. The collector resolves the exact runtime cgroup path for that sandbox shape, such as Docker PID `/proc/<pid>/cgroup` resolution.
 3. A per-sandbox cgroup sampler reports `sandbox.*` metrics against the sandbox id created by the lifecycle event.
 4. The sampler stops or expires when the corresponding `stopped` event is observed.
 
