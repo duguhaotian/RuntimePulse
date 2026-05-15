@@ -1,61 +1,58 @@
-//! Image download source.
+//! Docker image event handler.
 //!
-//! Wraps `docker pull` when the user wants RuntimePulse to observe an eager
-//! image download. Docker CLI does not expose stable resolve/verify/unpack
-//! sub-stage timings, so this source records the real pull command duration as
-//! one `pull` stage instead of fabricating finer-grained stages.
+//! Converts parsed Docker image events into RuntimePulse image observations.
+//! It does not execute pulls itself; pull timelines should be derived from
+//! runtime/snapshotter events when those systems expose stage timing.
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
-use std::process::Command;
-use std::time::Instant;
 
 use crate::collectors::core::config::CollectorConfig;
-use crate::collectors::core::error::{CollectorError, Result};
+use crate::collectors::core::error::Result;
 use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
 use crate::collectors::sources::image::layer::{
     docker_image_id_from_ref_or_digest, docker_image_metadata_row, DockerImageCandidate,
 };
+use crate::collectors::sources::runtime::docker::events::DockerEvent;
 
-pub fn pull_docker_image(
-    image_ref: &str,
-    now: DateTime<Utc>,
+pub fn output_from_event(
+    event: DockerEvent,
     config: &CollectorConfig,
-) -> Result<PluginOutput> {
-    if image_ref.trim().is_empty() {
-        return Err(CollectorError::Config(
-            "host-docker-pull requires an image reference".to_string(),
-        ));
+) -> Result<Option<PluginOutput>> {
+    if event.event_type != "image" || !is_image_action(event_action(&event)) {
+        return Ok(None);
     }
 
-    let started = Instant::now();
-    let output = Command::new("docker").args(["pull", image_ref]).output()?;
-    let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-    if !output.status.success() {
-        return Err(CollectorError::Plugin {
-            plugin: "docker-image-download".to_string(),
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-
-    let image_id = docker_image_id_from_ref_or_digest(image_ref, image_ref);
-    let mut image = docker_image_metadata_row(&DockerImageCandidate {
+    let image_ref = image_ref_from_event(&event);
+    let image_digest = if event.actor.id.is_empty() {
+        event.id.clone()
+    } else {
+        event.actor.id.clone()
+    };
+    let image_id = docker_image_id_from_ref_or_digest(&image_ref, &image_digest);
+    let image = docker_image_metadata_row(&DockerImageCandidate {
         id: image_id.clone(),
-        reference: image_ref.to_string(),
-        digest: image_ref.to_string(),
-    })?;
-    attach_download_timeline(&mut image, &image_id, image_ref, duration_ms);
+        reference: image_ref.clone(),
+        digest: image_digest.clone(),
+    })
+    .unwrap_or_else(|_| fallback_image_row(&image_id, &image_ref, &image_digest));
+    let action = event_action(&event);
+    let timestamp = event_timestamp(&event);
 
-    let ts = timestamp(now);
     let mut attributes = Map::new();
-    attributes.insert("plugin".to_string(), json!("docker-image-download"));
+    attributes.insert("plugin".to_string(), json!("docker-image-events"));
     attributes.insert("scope".to_string(), json!(config.collection_scope));
     attributes.insert("image.id".to_string(), json!(image_id));
     attributes.insert("image.ref".to_string(), json!(image_ref));
-    attributes.insert("durationMs".to_string(), json!(duration_ms));
+    attributes.insert("image.digest".to_string(), json!(image_digest));
+    attributes.insert("dockerAction".to_string(), json!(action));
+    attributes.insert("dockerEventType".to_string(), json!(event.event_type));
+    attributes.insert("dockerScope".to_string(), json!(event.scope));
+    for (key, value) in &event.actor.attributes {
+        attributes.insert(format!("docker.{key}"), json!(value));
+    }
 
-    Ok(PluginOutput {
+    Ok(Some(PluginOutput {
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,
@@ -69,7 +66,7 @@ pub fn pull_docker_image(
                 "status": "ready",
                 "labels": {
                     "collector": "runtimepulse-rust-collector",
-                    "plugin": "docker-image-download",
+                    "plugin": "docker-image-events",
                     "scope": config.collection_scope,
                 }
             })],
@@ -79,17 +76,18 @@ pub fn pull_docker_image(
         metrics: Vec::new(),
         events: vec![EventRecord {
             id: format!(
-                "docker-image-pull-{}-{}",
-                sanitize_id(image_ref),
-                now.timestamp()
+                "docker-image-{}-{}-{}",
+                sanitize_id(&image_ref),
+                sanitize_id(action),
+                event.time_nano
             ),
-            timestamp: ts,
-            severity: "info".to_string(),
+            timestamp,
+            severity: image_event_severity(action).to_string(),
             event_type: "image".to_string(),
-            event_name: "docker.image.pull.completed".to_string(),
-            message: format!("Docker image {image_ref} pull completed."),
+            event_name: format!("docker.image.{action}"),
+            message: format!("Docker image {image_ref} emitted {action}."),
             source: format!(
-                "runtimepulse-rust-collector/{}/docker-image-download",
+                "runtimepulse-rust-collector/{}/docker-image-events",
                 config.node_id
             ),
             attributes,
@@ -100,32 +98,80 @@ pub fn pull_docker_image(
         }],
         traces: Vec::new(),
         profiles: Vec::new(),
-    })
+    }))
 }
 
-fn attach_download_timeline(image: &mut Value, image_id: &str, image_ref: &str, duration_ms: f64) {
-    let size_bytes = image
-        .get("sizeBytes")
-        .and_then(Value::as_u64)
-        .filter(|value| *value > 0);
-
-    if let Some(object) = image.as_object_mut() {
-        object.insert(
-            "downloadTimeline".to_string(),
-            json!([{
-                "id": format!("{image_id}-docker-pull"),
-                "name": "Docker pull",
-                "phase": "pull",
-                "durationMs": duration_ms,
-                "bytes": size_bytes,
-                "detail": format!("Measured elapsed time of `docker pull {image_ref}` on the host."),
-            }]),
-        );
+fn event_action(event: &DockerEvent) -> &str {
+    if event.action.is_empty() {
+        event.status.as_str()
+    } else {
+        event.action.as_str()
     }
 }
 
-fn timestamp(time: DateTime<Utc>) -> String {
-    time.to_rfc3339_opts(SecondsFormat::Millis, true)
+fn is_image_action(action: &str) -> bool {
+    matches!(
+        action,
+        "pull" | "push" | "tag" | "untag" | "delete" | "import" | "load" | "save"
+    )
+}
+
+fn image_ref_from_event(event: &DockerEvent) -> String {
+    event
+        .actor
+        .attributes
+        .get("name")
+        .cloned()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            if event.image.is_empty() {
+                None
+            } else {
+                Some(event.image.clone())
+            }
+        })
+        .or_else(|| {
+            if event.id.is_empty() {
+                None
+            } else {
+                Some(event.id.clone())
+            }
+        })
+        .unwrap_or_else(|| "docker/unknown:latest".to_string())
+}
+
+fn fallback_image_row(image_id: &str, image_ref: &str, image_digest: &str) -> Value {
+    json!({
+        "id": image_id,
+        "ref": image_ref,
+        "digest": if image_digest.is_empty() { format!("collector:{image_id}") } else { image_digest.to_string() },
+        "loadingMode": "eager",
+        "sizeBytes": 0,
+        "layerCount": 0
+    })
+}
+
+fn image_event_severity(action: &str) -> &'static str {
+    match action {
+        "delete" | "untag" => "warning",
+        _ => "info",
+    }
+}
+
+fn event_timestamp(event: &DockerEvent) -> String {
+    if event.time_nano > 0 {
+        let secs = event.time_nano / 1_000_000_000;
+        let nanos = (event.time_nano % 1_000_000_000) as u32;
+        if let Some(time) = DateTime::from_timestamp(secs, nanos) {
+            return timestamp(time);
+        }
+    }
+    if event.time > 0 {
+        if let Some(time) = DateTime::from_timestamp(event.time, 0) {
+            return timestamp(time);
+        }
+    }
+    timestamp(Utc::now())
 }
 
 fn sanitize_id(value: &str) -> String {
@@ -141,4 +187,8 @@ fn sanitize_id(value: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+fn timestamp(time: DateTime<Utc>) -> String {
+    time.to_rfc3339_opts(SecondsFormat::Millis, true)
 }

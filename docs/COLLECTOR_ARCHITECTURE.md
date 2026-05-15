@@ -79,16 +79,27 @@ Node sources must not create sandbox or image inventory records.
 
 ### Runtime Sources
 
-`sources/runtime/` discovers runtime inventory and lifecycle.
+`sources/runtime/` discovers runtime inventory and owns runtime event streams.
 
 Examples:
 
 - Docker inventory
-- Docker lifecycle
+- Docker event stream
 - containerd lifecycle
 - kubelet pod/sandbox lifecycle
 
 Runtime sources create or update sandbox and image metadata. They can also emit lifecycle events that drive sandbox samplers.
+
+Runtime event streams are collected once per runtime and then dispatched by semantic handlers:
+
+```text
+runtime/docker/events.rs
+  -> runtime/docker/lifecycle.rs handles container lifecycle events
+  -> sources/image/download.rs handles image pull/tag/delete events
+  -> sources/sandbox/manager.rs consumes container start/stop events for active-set sampling
+```
+
+This keeps event collection unified while preserving data ownership. Runtime modules parse raw runtime events; image, sandbox, and profiling sources derive domain-specific reports from those events. Multiple collectors should not independently run their own `docker events` or containerd event streams for the same node.
 
 Runtime sources must support two discovery paths:
 
@@ -109,6 +120,13 @@ Examples:
 - snapshotter cache state
 
 Image sources should attach image-level metrics to image ids created by runtime or image inventory sources.
+
+Image collection has two modes:
+
+- existing image state: inspect already-present images and derive metadata/layer/cache state without changing the host
+- pull/process tracking: observe image pull events emitted by Docker/containerd/snapshotters and derive timeline data only when a real pull happens
+
+Collector sources must not initiate production pulls just to create measurements.
 
 ### Sandbox Sources
 
@@ -179,8 +197,10 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 | `host-cgroupfs` | `sources/node/cgroupfs.rs` |
 | `host-docker` | `sources/runtime/docker/inventory.rs` |
 | Docker image metadata | `sources/image/layer.rs` via Docker image inspect/history enrichment |
-| `host-docker-pull <image>` | `sources/image/download.rs` wrapping Docker pull and reporting measured eager pull duration |
-| `host-docker-events` | `sources/runtime/docker/lifecycle.rs` |
+| Docker event stream | `sources/runtime/docker/events.rs` parses Docker container/image events once |
+| Docker container lifecycle | `sources/runtime/docker/lifecycle.rs` converts Docker container events to sandbox lifecycle output |
+| Docker image events | `sources/image/download.rs` converts Docker image events to image pull/tag/delete output |
+| `host-docker-events` | unified Docker event collection plus semantic dispatch |
 | `host-docker-cgroupfs` | `sources/sandbox/cgroupfs.rs` using Docker PID cgroup resolution |
 | `host-docker-sandbox-agent` | `sources/sandbox/manager.rs` combining Docker lifecycle events with active-set cgroupfs sampling |
 | `command` | `adapters/command.rs` |
@@ -193,6 +213,6 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 2. Move outlet HTTP ingress, batching, and sender logic into `outlet/`.
 3. Move command and HTTP plugin implementations into `adapters/`.
 4. Move `host-procfs`, `host-cgroupfs`, and `host-docker` implementations into their target `sources/` modules.
-5. Add runtime lifecycle watchers.
+5. Add unified runtime event watchers and semantic dispatchers.
 6. Add Docker inventory-driven sandbox cgroupfs sampling.
 7. Add runtime startup inventory reconciliation and the sandbox sampler manager. Docker has an initial combined manager through `host-docker-sandbox-agent`; next iterations can split active sandbox sampling into dedicated workers if the single-process sampler becomes too coarse.

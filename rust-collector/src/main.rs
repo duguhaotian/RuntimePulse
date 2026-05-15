@@ -9,13 +9,14 @@ use collectors::core::plugin::CollectorPlugin;
 use collectors::outlet::batcher::collect_once;
 use collectors::outlet::http_ingress::start_local_report_server;
 use collectors::outlet::sender::send_local_report;
-use collectors::sources::image::download::pull_docker_image;
+use collectors::sources::image::download::output_from_event as image_output_from_event;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
-use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
-use collectors::sources::runtime::docker::lifecycle::{
-    collect_recent_docker_lifecycle, stream_docker_lifecycle,
+use collectors::sources::runtime::docker::events::{
+    collect_recent_docker_events, empty_output, merge_output, stream_docker_events, DockerEvent,
 };
+use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
+use collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
 use collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
 use collectors::sources::sandbox::manager::run_docker_sandbox_agent;
 use reqwest::blocking::Client;
@@ -42,8 +43,6 @@ fn main() {
         run_host_docker_cgroupfs()
     } else if env::args().any(|arg| arg == "host-docker-sandbox-agent") {
         run_host_docker_sandbox_agent()
-    } else if env::args().any(|arg| arg == "host-docker-pull") {
-        run_host_docker_pull()
     } else {
         run_outlet()
     };
@@ -284,7 +283,7 @@ fn run_host_docker_events() -> Result<()> {
 
     if config.once {
         let now = Utc::now();
-        match collect_recent_docker_lifecycle(now, &config) {
+        match collect_recent_docker_events(now, &config, docker_event_output) {
             Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
                 Ok(()) => println!(
                     "{}",
@@ -293,6 +292,7 @@ fn run_host_docker_events() -> Result<()> {
                         "message": "host_docker_events_report_accepted",
                         "url": config.local_report_url,
                         "sandboxes": output.metadata.sandboxes.len(),
+                        "images": output.metadata.images.len(),
                         "events": output.events.len(),
                     })
                 ),
@@ -317,7 +317,10 @@ fn run_host_docker_events() -> Result<()> {
         return Ok(());
     }
 
-    stream_docker_lifecycle(&config, |output| {
+    stream_docker_events(&config, |event| {
+        let Some(output) = docker_event_output(event, &config)? else {
+            return Ok(());
+        };
         send_local_report(&client, &config.local_report_url, &output)?;
         println!(
             "{}",
@@ -326,6 +329,7 @@ fn run_host_docker_events() -> Result<()> {
                 "message": "host_docker_event_report_accepted",
                 "url": config.local_report_url,
                 "sandboxes": output.metadata.sandboxes.len(),
+                "images": output.metadata.images.len(),
                 "events": output.events.len(),
             })
         );
@@ -392,33 +396,6 @@ fn run_host_docker_sandbox_agent() -> Result<()> {
     run_docker_sandbox_agent(CollectorConfig::from_env()?)
 }
 
-fn run_host_docker_pull() -> Result<()> {
-    let mut config = CollectorConfig::from_env()?;
-    config.collection_scope = "host".to_string();
-
-    let image_ref = env::args()
-        .skip_while(|arg| arg != "host-docker-pull")
-        .nth(1)
-        .ok_or_else(|| {
-            CollectorError::Config("host-docker-pull requires an image reference".to_string())
-        })?;
-    let client = Client::new();
-    let output = pull_docker_image(&image_ref, Utc::now(), &config)?;
-    send_local_report(&client, &config.local_report_url, &output)?;
-    println!(
-        "{}",
-        json!({
-            "level": "info",
-            "message": "host_docker_pull_report_accepted",
-            "url": config.local_report_url,
-            "image": image_ref,
-            "images": output.metadata.images.len(),
-            "events": output.events.len(),
-        })
-    );
-    Ok(())
-}
-
 fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin>>> {
     let mut plugins: Vec<Box<dyn CollectorPlugin>> = Vec::new();
 
@@ -457,4 +434,25 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
     }
 
     Ok(plugins)
+}
+
+fn docker_event_output(
+    event: DockerEvent,
+    config: &CollectorConfig,
+) -> Result<Option<collectors::core::model::PluginOutput>> {
+    let mut combined = empty_output(config);
+    if let Some(output) = lifecycle_output_from_event(event.clone(), config)? {
+        merge_output(&mut combined, output);
+    }
+    if let Some(output) = image_output_from_event(event, config)? {
+        merge_output(&mut combined, output);
+    }
+    if combined.metadata.sandboxes.is_empty()
+        && combined.metadata.images.is_empty()
+        && combined.events.is_empty()
+    {
+        Ok(None)
+    } else {
+        Ok(Some(combined))
+    }
 }

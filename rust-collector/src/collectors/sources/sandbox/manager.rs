@@ -16,9 +16,10 @@ use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::PluginOutput;
 use crate::collectors::outlet::sender::send_local_report;
-use crate::collectors::sources::runtime::docker::lifecycle::{
-    collect_recent_docker_lifecycle, stream_docker_lifecycle,
+use crate::collectors::sources::runtime::docker::events::{
+    collect_recent_docker_events, stream_docker_events,
 };
+use crate::collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
 use crate::collectors::sources::sandbox::cgroupfs::{
     docker_running_container_ids, DockerSandboxCgroupfsPlugin,
 };
@@ -44,18 +45,17 @@ pub fn run_docker_sandbox_agent(mut config: CollectorConfig) -> Result<()> {
     collect_and_send_recent_lifecycle(&client, &config, Some(&active_docker_ids))?;
 
     let (lifecycle_result_tx, lifecycle_result_rx) = mpsc::channel();
-    let lifecycle_config = config.clone();
-    let lifecycle_client = client.clone();
-    let lifecycle_active_docker_ids = Arc::clone(&active_docker_ids);
+    let event_config = config.clone();
+    let event_client = client.clone();
+    let event_active_docker_ids = Arc::clone(&active_docker_ids);
     thread::spawn(move || {
-        let result = stream_docker_lifecycle(&lifecycle_config, |output| {
-            apply_lifecycle_output(&lifecycle_active_docker_ids, &output)?;
-            send_local_report(
-                &lifecycle_client,
-                &lifecycle_config.local_report_url,
-                &output,
-            )?;
-            log_lifecycle_report(&lifecycle_config, &output);
+        let result = stream_docker_events(&event_config, |event| {
+            let Some(output) = lifecycle_output_from_event(event, &event_config)? else {
+                return Ok(());
+            };
+            apply_lifecycle_output(&event_active_docker_ids, &output)?;
+            send_local_report(&event_client, &event_config.local_report_url, &output)?;
+            log_lifecycle_report(&event_config, &output);
             Ok(())
         });
         let _ = lifecycle_result_tx.send(result);
@@ -110,7 +110,7 @@ fn collect_and_send_recent_lifecycle(
     config: &CollectorConfig,
     active_docker_ids: Option<&Arc<Mutex<HashSet<String>>>>,
 ) -> Result<()> {
-    let output = collect_recent_docker_lifecycle(Utc::now(), config)?;
+    let output = collect_recent_docker_events(Utc::now(), config, lifecycle_output_from_event)?;
     if output.metadata.sandboxes.is_empty() && output.events.is_empty() {
         return Ok(());
     }

@@ -1,132 +1,25 @@
-//! Docker lifecycle source.
+//! Docker container lifecycle handler.
 //!
-//! Observes Docker container lifecycle events and converts them into
-//! RuntimePulse sandbox events. The sandbox sampler manager will later consume
-//! the same event stream to start/stop per-sandbox samplers.
+//! Converts parsed Docker container events into RuntimePulse sandbox lifecycle
+//! output. The raw Docker event stream is owned by `runtime/docker/events.rs`.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Map};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 
 use crate::collectors::core::config::CollectorConfig;
-use crate::collectors::core::error::{CollectorError, Result};
+use crate::collectors::core::error::Result;
 use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
+use crate::collectors::sources::runtime::docker::events::DockerEvent;
 
-#[derive(Debug, Deserialize)]
-struct DockerLifecycleEvent {
-    #[serde(default, rename = "Type")]
-    event_type: String,
-    #[serde(default, rename = "Action")]
-    action: String,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    id: String,
-    #[serde(default, rename = "from")]
-    image: String,
-    #[serde(default, rename = "Actor")]
-    actor: DockerEventActor,
-    #[serde(default)]
-    scope: String,
-    #[serde(default)]
-    time: i64,
-    #[serde(default, rename = "timeNano")]
-    time_nano: i64,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct DockerEventActor {
-    #[serde(default, rename = "ID")]
-    id: String,
-    #[serde(default, rename = "Attributes")]
-    attributes: HashMap<String, String>,
-}
-
-pub fn collect_recent_docker_lifecycle(
-    now: DateTime<Utc>,
+pub fn output_from_event(
+    event: DockerEvent,
     config: &CollectorConfig,
-) -> Result<PluginOutput> {
-    let since = now.timestamp() - config.interval.as_secs() as i64;
-    let until = now.timestamp() + 1;
-    let output = docker_events_command()
-        .args(["--since", &since.to_string(), "--until", &until.to_string()])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(CollectorError::Plugin {
-            plugin: "docker-events".to_string(),
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-
-    let mut combined = empty_output(config);
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        if let Some(output) = output_from_line(line, config)? {
-            merge_output(&mut combined, output);
-        }
-    }
-
-    Ok(combined)
-}
-
-pub fn stream_docker_lifecycle<F>(config: &CollectorConfig, mut on_output: F) -> Result<()>
-where
-    F: FnMut(PluginOutput) -> Result<()>,
-{
-    let mut child = docker_events_command().stdout(Stdio::piped()).spawn()?;
-    let stdout = child.stdout.take().ok_or_else(|| CollectorError::Plugin {
-        plugin: "docker-events".to_string(),
-        message: "docker events did not expose stdout".to_string(),
-    })?;
-
-    for line in BufReader::new(stdout).lines() {
-        let line = line?;
-        if let Some(output) = output_from_line(&line, config)? {
-            on_output(output)?;
-        }
-    }
-
-    let status = child.wait()?;
-    if !status.success() {
-        return Err(CollectorError::Plugin {
-            plugin: "docker-events".to_string(),
-            message: format!("docker events exited with status {status}"),
-        });
-    }
-
-    Ok(())
-}
-
-fn docker_events_command() -> Command {
-    let mut command = Command::new("docker");
-    command.args([
-        "events",
-        "--filter",
-        "type=container",
-        "--format",
-        "{{json .}}",
-    ]);
-    command
-}
-
-fn output_from_line(line: &str, config: &CollectorConfig) -> Result<Option<PluginOutput>> {
-    let line = line.trim();
-    if line.is_empty() {
-        return Ok(None);
-    }
-
-    let event = serde_json::from_str::<DockerLifecycleEvent>(line)?;
+) -> Result<Option<PluginOutput>> {
     if event.event_type != "container" || !is_lifecycle_action(event_action(&event)) {
         return Ok(None);
     }
 
-    Ok(Some(output_from_event(event, config)))
-}
-
-fn output_from_event(event: DockerLifecycleEvent, config: &CollectorConfig) -> PluginOutput {
     let timestamp = event_timestamp(&event);
     let container_id = if event.actor.id.is_empty() {
         event.id.clone()
@@ -217,7 +110,7 @@ fn output_from_event(event: DockerLifecycleEvent, config: &CollectorConfig) -> P
         sandbox["removedAt"] = json!(timestamp);
     }
 
-    PluginOutput {
+    Ok(Some(PluginOutput {
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,
@@ -270,67 +163,10 @@ fn output_from_event(event: DockerLifecycleEvent, config: &CollectorConfig) -> P
         }],
         traces: Vec::new(),
         profiles: Vec::new(),
-    }
+    }))
 }
 
-fn empty_output(config: &CollectorConfig) -> PluginOutput {
-    PluginOutput {
-        metadata: Metadata {
-            clusters: vec![json!({
-                "id": config.cluster_id,
-                "name": config.cluster_id,
-                "environment": "collector"
-            })],
-            nodes: vec![json!({
-                "id": config.node_id,
-                "clusterId": config.cluster_id,
-                "name": config.node_id,
-                "status": "ready",
-                "labels": {
-                    "collector": "runtimepulse-rust-collector",
-                    "plugin": "docker-events",
-                    "scope": config.collection_scope,
-                }
-            })],
-            images: Vec::new(),
-            sandboxes: Vec::new(),
-        },
-        metrics: Vec::new(),
-        events: Vec::new(),
-        traces: Vec::new(),
-        profiles: Vec::new(),
-    }
-}
-
-fn merge_output(target: &mut PluginOutput, output: PluginOutput) {
-    extend_unique_by_id(&mut target.metadata.clusters, output.metadata.clusters);
-    extend_unique_by_id(&mut target.metadata.nodes, output.metadata.nodes);
-    extend_unique_by_id(&mut target.metadata.images, output.metadata.images);
-    extend_unique_by_id(&mut target.metadata.sandboxes, output.metadata.sandboxes);
-    target.metrics.extend(output.metrics);
-    target.events.extend(output.events);
-    target.traces.extend(output.traces);
-    target.profiles.extend(output.profiles);
-}
-
-fn extend_unique_by_id(target: &mut Vec<Value>, rows: Vec<Value>) {
-    for row in rows {
-        let Some(id) = row.get("id").and_then(Value::as_str) else {
-            target.push(row);
-            continue;
-        };
-        if let Some(existing) = target
-            .iter_mut()
-            .find(|item| item.get("id").and_then(Value::as_str) == Some(id))
-        {
-            *existing = row;
-        } else {
-            target.push(row);
-        }
-    }
-}
-
-fn event_action(event: &DockerLifecycleEvent) -> &str {
+fn event_action(event: &DockerEvent) -> &str {
     if event.action.is_empty() {
         event.status.as_str()
     } else {
@@ -403,7 +239,7 @@ fn exit_code(attributes: &HashMap<String, String>) -> Option<i32> {
     attributes.get("exitCode")?.parse::<i32>().ok()
 }
 
-fn event_timestamp(event: &DockerLifecycleEvent) -> String {
+fn event_timestamp(event: &DockerEvent) -> String {
     if event.time_nano > 0 {
         let secs = event.time_nano / 1_000_000_000;
         let nanos = (event.time_nano % 1_000_000_000) as u32;
