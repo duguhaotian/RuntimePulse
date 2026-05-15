@@ -137,6 +137,7 @@ Implemented:
 - Rust host-side procfs tool reports real Linux PSI samples from `/proc/pressure/*` as node pressure metrics.
 - Rust host-side cgroupfs tool reports host/root cgroup v2 CPU, memory, IO, and process count samples as node-level metrics without creating sandbox or image metadata.
 - Rust host-side Docker tool reports real Docker container and image inventory.
+- Docker image inventory now enriches image rows with real `docker image inspect` size/rootfs layers and `docker history` layer command/size breakdown.
 - Rust host-side Docker lifecycle tool reports Docker container create/start/stop/die/kill/oom/destroy events as sandbox lifecycle events through the local outlet.
 - Query API live store applies Docker lifecycle mutations: stop/die update sandbox status and destroy removes the sandbox from the current live container set while preserving event records.
 - Rust host-side Docker sandbox cgroupfs tool resolves cgroup paths from Docker running-container inventory and samples per-sandbox CPU, memory, IO, and process metrics without broad host cgroup scanning.
@@ -148,7 +149,7 @@ Collector candidates:
 - Cgroup metrics collector.
 - Docker/containerd lifecycle collector. Docker lifecycle is implemented; containerd remains pending.
 - Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, and lifecycle event streaming are available through `host-docker-sandbox-agent`; dedicated per-sandbox worker processes remain pending.
-- image metadata and cache collector.
+- image metadata and cache collector. Docker image metadata and layer breakdown are implemented; eager download timeline and lazy block-cache hit curves still require pull/snapshotter event sources.
 - gVisor collector.
 - Kata collector.
 - Firecracker collector.

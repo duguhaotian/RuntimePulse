@@ -17,6 +17,7 @@ use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::core::report::metric;
+use crate::collectors::sources::image::layer::{docker_image_metadata_rows, DockerImageCandidate};
 
 pub struct DockerSandboxCgroupfsPlugin {
     root: PathBuf,
@@ -129,7 +130,7 @@ fn collect_cgroup_targets(
         .last_seen
         .map(|seen| seen.elapsed().as_secs_f64())
         .unwrap_or(0.0);
-    let mut images = BTreeMap::new();
+    let mut image_candidates = BTreeMap::new();
     let mut sandboxes = Vec::new();
     let mut sampled_sandbox_ids = Vec::new();
     let mut metrics = Vec::new();
@@ -140,16 +141,13 @@ fn collect_cgroup_targets(
         };
         sampled_sandbox_ids.push(target.sandbox_id.clone());
 
-        images.entry(target.image_id.clone()).or_insert_with(|| {
-            json!({
-                "id": target.image_id,
-                "ref": target.image_ref,
-                "digest": format!("collector:{}", target.image_id),
-                "loadingMode": "eager",
-                "sizeBytes": 0,
-                "layerCount": 0
-            })
-        });
+        image_candidates
+            .entry(target.image_id.clone())
+            .or_insert_with(|| DockerImageCandidate {
+                id: target.image_id.clone(),
+                reference: target.image_ref.clone(),
+                digest: format!("collector:{}", target.image_id),
+            });
 
         sandboxes.push(json!({
             "id": target.sandbox_id,
@@ -316,7 +314,9 @@ fn collect_cgroup_targets(
                     "scope": config.collection_scope,
                 }
             })],
-            images: images.into_values().collect(),
+            images: docker_image_metadata_rows(image_candidates.into_values().collect())?
+                .into_values()
+                .collect(),
             sandboxes,
         },
         metrics,

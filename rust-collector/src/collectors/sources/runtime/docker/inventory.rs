@@ -12,6 +12,7 @@ use std::process::Command;
 use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
+use crate::collectors::sources::image::layer::{docker_image_metadata_rows, DockerImageCandidate};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -58,7 +59,7 @@ pub fn collect_docker_inventory(
     let ids = docker_container_ids()?;
     let containers = docker_inspect_containers(&ids)?;
     let ts = timestamp(now);
-    let mut images = BTreeMap::new();
+    let mut image_candidates = BTreeMap::new();
     let mut sandboxes = Vec::new();
     let mut events = Vec::new();
 
@@ -84,19 +85,13 @@ pub fn collect_docker_inventory(
             .and_then(|started| duration_ms_between(&created_at, started))
             .unwrap_or(0.0);
 
-        let image_row_id = image_id.clone();
-        let image_row_ref = image_ref.clone();
-        let image_row_digest = container.image.clone();
-        images.entry(image_id.clone()).or_insert_with(|| {
-            json!({
-                "id": image_row_id,
-                "ref": image_row_ref,
-                "digest": image_row_digest,
-                "loadingMode": "eager",
-                "sizeBytes": 0,
-                "layerCount": 0,
-            })
-        });
+        image_candidates
+            .entry(image_id.clone())
+            .or_insert_with(|| DockerImageCandidate {
+                id: image_id.clone(),
+                reference: image_ref.clone(),
+                digest: container.image.clone(),
+            });
 
         sandboxes.push(json!({
             "id": sandbox_id,
@@ -181,7 +176,9 @@ pub fn collect_docker_inventory(
                     "scope": config.collection_scope,
                 }
             })],
-            images: images.into_values().collect(),
+            images: docker_image_metadata_rows(image_candidates.into_values().collect())?
+                .into_values()
+                .collect(),
             sandboxes,
         },
         metrics: Vec::new(),
