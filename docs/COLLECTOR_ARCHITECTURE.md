@@ -25,6 +25,29 @@ rust-collector/src/collectors/
 - Sandbox metrics are driven by runtime inventory reconciliation plus lifecycle events, not by broad host scans.
 - The node-local outlet is the only component that posts to central ingest.
 
+Host-side collectors run as one `host-agent` process on the node. Individual
+host collectors and runtime watchers must not synchronously POST to the outlet
+from their sampling/event threads. They enqueue partial RuntimePulse reports
+into a bounded in-process queue, and a dedicated batch sender flushes those
+reports to the outlet.
+
+```text
+host-agent
+  -> node plugins
+  -> runtime event watchers
+  -> sandbox sampler manager
+  -> bounded report queue
+  -> batch sender
+  -> collector-outlet POST /api/local/ingest
+```
+
+The queue is the host-agent backpressure boundary:
+
+- high-value lifecycle/image failure events should be preserved whenever possible
+- periodic metrics and inventory snapshots may be coalesced or dropped first when the queue is full
+- sender failures should retry on the next flush without blocking sampler/event threads
+- personal-use deployments can start with in-memory buffering; disk spool/WAL can be added later
+
 ## Core
 
 `core/` owns shared collector framework pieces:
@@ -183,7 +206,7 @@ The repo can keep one Rust crate and one binary at first, while still separating
 | Runtime group | Runs with | Owns |
 | --- | --- | --- |
 | `collector-outlet` | collector container | `outlet/`, container-safe `adapters/` |
-| `host-agent` | host process or host-visible deployment | `sources/node/`, `sources/runtime/`, `sources/image/`, host profiling |
+| `host-agent` | host process or host-visible deployment, normally systemd-managed | `sources/node/`, `sources/runtime/`, `sources/image/`, host profiling, bounded report queue, batch sender |
 | `sandbox-agent` | lifecycle-triggered worker managed by host-agent at first | `sources/sandbox/`, sandbox profiling |
 | `third-party-adapters` | outlet, host-agent, or sandbox-agent | `adapters/` used by any source domain |
 
@@ -193,6 +216,7 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 
 | Current command/plugin | Target source ownership |
 | --- | --- |
+| `host-agent` | systemd-friendly host process that runs host collectors, event watchers, sampler manager, and queue-backed sender |
 | `host-procfs` | `sources/node/procfs.rs` plus PSI support |
 | `host-cgroupfs` | `sources/node/cgroupfs.rs` |
 | `host-docker` | `sources/runtime/docker/inventory.rs` |
@@ -207,6 +231,10 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 | `http` | `adapters/http.rs` |
 | `POST /api/local/ingest` | `outlet/http_ingress.rs` and `adapters/local_push.rs` |
 
+The individual `host-*` commands remain useful for debugging and focused
+validation. Production-style node collection should run `host-agent` instead of
+starting each source manually.
+
 ## Next Steps
 
 1. Move shared structs and plugin traits from `main.rs` into `core/`.
@@ -215,4 +243,4 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 4. Move `host-procfs`, `host-cgroupfs`, and `host-docker` implementations into their target `sources/` modules.
 5. Add unified runtime event watchers and semantic dispatchers.
 6. Add Docker inventory-driven sandbox cgroupfs sampling.
-7. Add runtime startup inventory reconciliation and the sandbox sampler manager. Docker has an initial combined manager through `host-docker-sandbox-agent`; next iterations can split active sandbox sampling into dedicated workers if the single-process sampler becomes too coarse.
+7. Add runtime startup inventory reconciliation and the sandbox sampler manager. Docker has an initial combined manager through `host-agent`; next iterations can split active sandbox sampling into dedicated workers if the single-process sampler becomes too coarse.

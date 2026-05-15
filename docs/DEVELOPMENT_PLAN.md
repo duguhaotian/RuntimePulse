@@ -143,11 +143,13 @@ Implemented:
 - Query API live store applies Docker lifecycle mutations: stop/die update sandbox status and destroy removes the sandbox from the current live container set while preserving event records.
 - Rust host-side Docker sandbox cgroupfs tool resolves cgroup paths from Docker running-container inventory and samples per-sandbox CPU, memory, IO, and process metrics without broad host cgroup scanning.
 - Rust host-side Docker sandbox agent combines startup/running-container reconciliation with Docker lifecycle event streaming, maintains the active Docker container set, and samples only those active cgroups.
+- Host collection is converging on a single `host-agent` binary for systemd: host plugins and event watchers enqueue reports into a bounded in-process queue, while a dedicated sender batches HTTP reports to the collector outlet.
 
 Collector candidates:
 
 - Host metrics collector.
 - Cgroup metrics collector.
+- Host-agent queue-backed scheduler/sender that runs host plugins in one process and keeps collector threads off the synchronous HTTP path.
 - Docker/containerd event collector. Docker container lifecycle is implemented; Docker image event dispatch and containerd remain pending.
 - Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, and lifecycle event streaming are available through `host-docker-sandbox-agent`; dedicated per-sandbox worker processes remain pending.
 - image metadata and cache collector. Docker image metadata and layer breakdown are implemented; image pull/tag/delete should come from runtime event dispatch; finer Docker pull sub-stages and lazy block-cache hit curves still require containerd/snapshotter event sources.

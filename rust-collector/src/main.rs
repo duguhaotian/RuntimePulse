@@ -6,6 +6,7 @@ use collectors::adapters::http::HttpPlugin;
 use collectors::core::config::CollectorConfig;
 use collectors::core::error::{CollectorError, Result};
 use collectors::core::plugin::CollectorPlugin;
+use collectors::host_agent::run_host_agent;
 use collectors::outlet::batcher::collect_once;
 use collectors::outlet::http_ingress::start_local_report_server;
 use collectors::outlet::sender::send_local_report;
@@ -33,6 +34,8 @@ fn main() {
 
     let result = if env::args().any(|arg| arg == "host-procfs") {
         run_host_procfs()
+    } else if env::args().any(|arg| arg == "host-agent") {
+        run_host_agent_command()
     } else if env::args().any(|arg| arg == "host-cgroupfs") {
         run_host_cgroupfs()
     } else if env::args().any(|arg| arg == "host-docker") {
@@ -394,6 +397,10 @@ fn run_host_docker_cgroupfs() -> Result<()> {
 
 fn run_host_docker_sandbox_agent() -> Result<()> {
     run_docker_sandbox_agent(CollectorConfig::from_env()?)
+}
+
+fn run_host_agent_command() -> Result<()> {
+    run_host_agent(CollectorConfig::from_env()?)
 }
 
 fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin>>> {
