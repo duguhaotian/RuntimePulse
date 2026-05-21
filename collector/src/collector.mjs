@@ -63,7 +63,7 @@ function buildBatch(now, index) {
       nodes: [
         {
           id: nodeId,
-          clusterId: 'cluster-prod',
+          clusterId: 'runtimepulse-local',
           name: `rp-${nodeId}`,
           status: ioPressure > 0.18 ? 'degraded' : 'ready',
           labels: { collector: 'mock-node-collector' },
@@ -72,7 +72,7 @@ function buildBatch(now, index) {
       sandboxes: [
         {
           id: sandboxId,
-          clusterId: 'cluster-prod',
+          clusterId: 'runtimepulse-local',
           nodeId,
           namespace: 'collector',
           workloadId: `collector-smoke-${runtimeType}`,

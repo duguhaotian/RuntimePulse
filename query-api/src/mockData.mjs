@@ -1,13 +1,13 @@
 const runtimeTypes = ['runc', 'gvisor', 'kata', 'firecracker'];
 
 export const clusters = [
-  { id: 'cluster-prod', name: 'runtimepulse-prod', environment: 'production' },
+  { id: 'runtimepulse-local', name: 'Local observed cluster', environment: 'single-node collector group' },
 ];
 
 export const nodes = [
-  { id: 'node-a', name: 'rp-node-a', clusterId: 'cluster-prod', kernelVersion: '6.8.0', cpuCores: 64, memoryBytes: 256 * 1024 ** 3, status: 'ready' },
-  { id: 'node-b', name: 'rp-node-b', clusterId: 'cluster-prod', kernelVersion: '6.8.0', cpuCores: 48, memoryBytes: 192 * 1024 ** 3, status: 'degraded' },
-  { id: 'node-c', name: 'rp-node-c', clusterId: 'cluster-prod', kernelVersion: '5.15.0', cpuCores: 32, memoryBytes: 128 * 1024 ** 3, status: 'ready' },
+  { id: 'node-a', name: 'rp-node-a', clusterId: 'runtimepulse-local', kernelVersion: '6.8.0', cpuCores: 64, memoryBytes: 256 * 1024 ** 3, status: 'ready' },
+  { id: 'node-b', name: 'rp-node-b', clusterId: 'runtimepulse-local', kernelVersion: '6.8.0', cpuCores: 48, memoryBytes: 192 * 1024 ** 3, status: 'degraded' },
+  { id: 'node-c', name: 'rp-node-c', clusterId: 'runtimepulse-local', kernelVersion: '5.15.0', cpuCores: 32, memoryBytes: 128 * 1024 ** 3, status: 'ready' },
 ];
 
 export const images = [
@@ -166,7 +166,7 @@ function sandbox(id, runtimeType, nodeId, imageId, workloadName, status, startup
   const offset = Number(id.match(/(\d+)$/)?.[1] ?? 1);
   return {
     id,
-    clusterId: 'cluster-prod',
+    clusterId: 'runtimepulse-local',
     nodeId,
     namespace: offset % 2 === 0 ? 'payments' : 'platform',
     workloadId: `pod-${workloadName}-${offset}`,

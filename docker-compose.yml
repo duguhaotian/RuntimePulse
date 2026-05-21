@@ -64,7 +64,7 @@ services:
     environment:
       INGEST_URL: http://runtimepulse-query-api:8081/api/ingest/batch
       RUNTIMEPULSE_COLLECTOR_NODE_ID: rust-node-a
-      RUNTIMEPULSE_COLLECTOR_CLUSTER_ID: cluster-prod
+      RUNTIMEPULSE_COLLECTOR_CLUSTER_ID: runtimepulse-local
       RUNTIMEPULSE_COLLECTOR_INTERVAL_MS: 5000
       RUNTIMEPULSE_COLLECTOR_PLUGINS: none
       RUNTIMEPULSE_COLLECTOR_SCOPE: outlet

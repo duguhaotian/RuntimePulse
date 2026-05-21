@@ -124,11 +124,7 @@ export function liveStoreSnapshot(store) {
 function rememberMetadata(store, metadata, source) {
   for (const cluster of array(metadata?.clusters)) {
     if (!cluster.id) continue;
-    store.clusters.set(cluster.id, {
-      id: cluster.id,
-      name: cluster.name ?? cluster.id,
-      environment: cluster.environment ?? 'collector',
-    });
+    store.clusters.set(cluster.id, normalizeCluster(cluster));
   }
 
   for (const node of array(metadata?.nodes)) {
@@ -163,6 +159,26 @@ function rememberMetadata(store, metadata, source) {
       }
     }
   }
+}
+
+function normalizeCluster(cluster) {
+  const id = cluster.id;
+  const name = cluster.name ?? id;
+  const localClusterNames = new Set(['cluster-prod', 'runtimepulse-prod', 'runtimepulse-local']);
+
+  if (localClusterNames.has(id) || localClusterNames.has(name)) {
+    return {
+      id,
+      name: 'Local observed cluster',
+      environment: 'single-node collector group',
+    };
+  }
+
+  return {
+    id,
+    name,
+    environment: cluster.environment ?? 'collector',
+  };
 }
 
 function liveSourceSnapshots(store) {
@@ -254,7 +270,7 @@ function normalizeNode(node) {
   return {
     id: node.id,
     name: node.name ?? node.id,
-    clusterId: node.clusterId ?? 'cluster-prod',
+    clusterId: node.clusterId ?? 'runtimepulse-local',
     kernelVersion: node.kernelVersion ?? 'collector-observed',
     cpuCores: numberOr(node.cpuCores, 0),
     memoryBytes: numberOr(node.memoryBytes, 0),
@@ -353,7 +369,7 @@ function normalizeSandbox(sandbox, store) {
 
   return {
     id: sandbox.id,
-    clusterId: sandbox.clusterId ?? store.nodes.get(sandbox.nodeId)?.clusterId ?? 'cluster-prod',
+    clusterId: sandbox.clusterId ?? store.nodes.get(sandbox.nodeId)?.clusterId ?? 'runtimepulse-local',
     nodeId: sandbox.nodeId,
     namespace: sandbox.namespace ?? 'collector',
     workloadId: sandbox.workloadId ?? sandbox.workloadName ?? sandbox.id,

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
 import type { Cluster, Image, Node, RuntimeType, Sandbox } from '../../domain/model';
 import { runtimeColors } from '../../utils/colors';
+import { clusterDescription, clusterDisplayName } from '../../utils/cluster';
 import { formatDateTime } from '../../utils/time';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
 
@@ -80,14 +81,16 @@ export function SandboxExplorer({ api, onSelectNode }: ClusterExplorerProps) {
           const clusterImages = uniqueImages(clusterSandboxes, images);
           const cpuAvg = average(clusterSandboxes.map((sandbox) => sandbox.cpuAvg));
           const avgStartup = average(clusterSandboxes.map((sandbox) => sandbox.startupDurationMs));
+          const displayName = clusterDisplayName(cluster);
+          const description = clusterDescription(cluster);
 
           return (
             <article className="level-card cluster-card" key={cluster.id}>
               <div className="level-card-header">
                 <div>
                   <span className="level-kicker">Cluster</span>
-                  <h3>{cluster.name}</h3>
-                  <p>{cluster.environment} · {cluster.id}</p>
+                  <h3>{displayName}</h3>
+                  <p>{description}</p>
                 </div>
                 <span className="data-pill">Live query</span>
               </div>
@@ -103,7 +106,7 @@ export function SandboxExplorer({ api, onSelectNode }: ClusterExplorerProps) {
                   ['Nodes', String(clusterNodes.length)],
                   ['Images', String(clusterImages.length)],
                   ['Capacity', `${clusterNodes.reduce((sum, node) => sum + node.cpuCores, 0)} cores / ${formatBytes(clusterNodes.reduce((sum, node) => sum + node.memoryBytes, 0))}`],
-                  ['Environment', cluster.environment],
+                  ['Scope', cluster.environment],
                 ]}
               />
 

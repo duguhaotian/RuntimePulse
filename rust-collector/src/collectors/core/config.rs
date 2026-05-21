@@ -60,7 +60,7 @@ impl CollectorConfig {
                 .or_else(|_| env::var("COLLECTOR_NODE_ID"))
                 .unwrap_or_else(|_| "rust-node-a".to_string()),
             cluster_id: env::var("RUNTIMEPULSE_COLLECTOR_CLUSTER_ID")
-                .unwrap_or_else(|_| "cluster-prod".to_string()),
+                .unwrap_or_else(|_| "runtimepulse-local".to_string()),
             interval: Duration::from_millis(interval_ms.max(1000)),
             local_report_addr: env::var("RUNTIMEPULSE_LOCAL_REPORT_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:9091".to_string()),

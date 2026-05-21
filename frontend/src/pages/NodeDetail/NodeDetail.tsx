@@ -5,6 +5,7 @@ import type { Cluster, EventRecord, Image, MetricSeries, Node, Sandbox, TraceSpa
 import { MetricChart } from '../../components/charts/MetricChart';
 import { EventList } from '../../components/timeline/EventList';
 import { EventTimeline } from '../../components/timeline/EventTimeline';
+import { clusterDisplayName } from '../../utils/cluster';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
 import { formatDateTime, toMs } from '../../utils/time';
 import { RuntimeBadge, StatusBadge, SummaryCard } from '../SandboxExplorer/SandboxExplorer';
@@ -158,6 +159,7 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
   const selectedSandbox = modal?.type === 'sandbox' ? sandboxes.find((sandbox) => sandbox.id === modal.id) : undefined;
   const selectedSandboxImage = selectedSandbox ? images.find((image) => image.id === selectedSandbox.imageId) : undefined;
   const selectedSandboxMetrics = selectedSandbox ? metrics[selectedSandbox.id] ?? [] : [];
+  const nodeClusterName = clusterDisplayName(cluster, node?.clusterId);
 
   if (!node) return <div className="empty-state">Loading node...</div>;
 
@@ -169,7 +171,7 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
         <div>
           <p className="eyebrow">Node level</p>
           <h2>{node.name}</h2>
-          <p>{cluster?.name ?? node.clusterId} / {node.id}。在此查看节点上的沙箱和镜像，并继续下钻到沙箱详情。</p>
+          <p>{nodeClusterName} / {node.id}。在此查看节点上的沙箱和镜像，并继续下钻到沙箱详情。</p>
         </div>
         <div className="header-actions">
           {lastRefreshAt && <span className="refresh-pill">Updated {formatDateTime(lastRefreshAt)}</span>}
@@ -186,7 +188,8 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
           </div>
         </div>
         <div className="node-static-grid">
-          <NodeFact label="Cluster" value={cluster?.name ?? node.clusterId} />
+          <NodeFact label="Cluster" value={nodeClusterName} />
+          <NodeFact label="Cluster ID" value={node.clusterId} />
           <NodeFact label="Node ID" value={node.id} />
           <NodeFact label="Node name" value={node.name} />
           <NodeFact label="Kernel" value={node.kernelVersion} />
