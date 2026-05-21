@@ -47,13 +47,33 @@ cargo run -- host-procfs
 ```
 
 For Kubernetes, prefer containerd inventory/events and add CRI/Kubelet events as
-extra lifecycle context:
+extra lifecycle context. Regular container resource metrics should come from the
+existing Kubernetes metrics platform, typically Prometheus fed by kubelet/cAdvisor:
 
 ```bash
-RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,kubelet-events,image-cache \
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,kubelet-events,kubernetes-metrics,image-cache \
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
+RUNTIMEPULSE_PROMETHEUS_URL=http://prometheus.monitoring.svc:9090 \
 RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
 runtimepulse-collector host-agent
+```
+
+The `kubernetes-metrics` source imports Prometheus vector query results and maps
+common kubelet/cAdvisor metrics into RuntimePulse sandbox series such as
+`sandbox.cpu.usage_ratio`, `sandbox.memory.working_set_bytes`,
+`sandbox.network.rx_bytes`, `sandbox.network.tx_bytes`, `sandbox.io.read_bytes`,
+and `sandbox.io.write_bytes`. Query strings can be overridden with
+`RUNTIMEPULSE_PROMETHEUS_QUERY_*` variables when a cluster uses different metric
+labels.
+
+Local adapter smoke test:
+
+```bash
+node rust-collector/examples/mock-prometheus.mjs &
+RUNTIMEPULSE_COLLECTOR_ONCE=true \
+RUNTIMEPULSE_HOST_AGENT_SOURCES=kubernetes-metrics \
+RUNTIMEPULSE_PROMETHEUS_URL=http://127.0.0.1:19090 \
+cargo run --manifest-path rust-collector/Cargo.toml -- host-agent
 ```
 
 CRI/Kubelet event collection can also be enabled by itself through the unified

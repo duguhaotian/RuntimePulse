@@ -27,6 +27,7 @@ use crate::collectors::core::report::node_metric;
 use crate::collectors::outlet::sender::send_local_report;
 use crate::collectors::sources::image::cache::ImageCachePlugin;
 use crate::collectors::sources::image::download::output_from_event as image_output_from_event;
+use crate::collectors::sources::kubernetes::metrics::KubernetesMetricsPlugin;
 use crate::collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use crate::collectors::sources::node::procfs::ProcfsPlugin;
 use crate::collectors::sources::node::psi::PsiPlugin;
@@ -73,6 +74,7 @@ struct HostAgentSources {
     docker_events: bool,
     containerd_events: bool,
     kubelet_events: bool,
+    kubernetes_metrics: bool,
     docker_sandbox_cgroupfs: bool,
     image_cache: bool,
     command: bool,
@@ -192,6 +194,15 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut cgroupfs = CgroupfsPlugin::new(config.cgroup_root.clone(), config.cgroup_max_entries);
     let mut docker_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
+    let mut kubernetes_metrics = if sources.kubernetes_metrics {
+        Some(KubernetesMetricsPlugin::from_env().ok_or_else(|| {
+            CollectorError::Config(
+                "kubernetes-metrics source requires RUNTIMEPULSE_PROMETHEUS_URL".to_string(),
+            )
+        })?)
+    } else {
+        None
+    };
     let mut adapter_plugins = build_host_adapter_plugins(&config, &sources)?;
 
     loop {
@@ -205,6 +216,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut cgroupfs,
             &mut docker_cgroupfs,
             &mut image_cache,
+            kubernetes_metrics.as_mut(),
             &mut adapter_plugins,
             active_docker_ids.as_ref(),
             &stats,
@@ -259,6 +271,7 @@ fn collect_periodic(
     cgroupfs: &mut CgroupfsPlugin,
     docker_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     image_cache: &mut ImageCachePlugin,
+    kubernetes_metrics: Option<&mut KubernetesMetricsPlugin>,
     adapter_plugins: &mut [Box<dyn CollectorPlugin>],
     active_docker_ids: Option<&ActiveDockerIds>,
     stats: &Arc<HostAgentStats>,
@@ -300,6 +313,11 @@ fn collect_periodic(
     if sources.image_cache {
         collect_source("host-image-cache", tx, stats, || {
             image_cache.collect(now, config)
+        });
+    }
+    if let Some(kubernetes_metrics) = kubernetes_metrics {
+        collect_source("host-kubernetes-metrics", tx, stats, || {
+            kubernetes_metrics.collect(now, config)
         });
     }
     for plugin in adapter_plugins {
@@ -1599,6 +1617,7 @@ impl HostAgentSources {
             docker_events: false,
             containerd_events: false,
             kubelet_events: false,
+            kubernetes_metrics: false,
             docker_sandbox_cgroupfs: false,
             image_cache: false,
             command: false,
@@ -1618,6 +1637,12 @@ impl HostAgentSources {
                 "containerd-events" | "host-containerd-events" => sources.containerd_events = true,
                 "kubelet-events" | "host-kubelet-events" | "cri-events" | "host-cri-events" => {
                     sources.kubelet_events = true;
+                }
+                "kubernetes-metrics"
+                | "k8s-metrics"
+                | "prometheus-metrics"
+                | "host-kubernetes-metrics" => {
+                    sources.kubernetes_metrics = true;
                 }
                 "docker-sandbox-cgroupfs" | "host-docker-cgroupfs" | "sandbox-cgroupfs" => {
                     sources.docker_sandbox_cgroupfs = true;
@@ -1667,6 +1692,9 @@ impl HostAgentSources {
         }
         if self.kubelet_events {
             names.push("kubelet-events");
+        }
+        if self.kubernetes_metrics {
+            names.push("kubernetes-metrics");
         }
         if self.docker_sandbox_cgroupfs {
             names.push("docker-sandbox-cgroupfs");

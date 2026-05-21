@@ -95,6 +95,13 @@ registry pull sub-stage timings.
 Docker sources are retained for single-node and local validation scenarios.
 They are not the preferred Kubernetes path.
 
+Regular Kubernetes resource metrics should be imported from the cluster's
+existing metrics platform, typically Prometheus scraping kubelet/cAdvisor. The
+`kubernetes-metrics` host-agent source maps those Prometheus series into
+RuntimePulse sandbox metrics. RuntimePulse host-side collectors should focus on
+runtime/image/startup/profile gaps that the standard metrics platform does not
+cover.
+
 `command` and `http` adapters can also run inside host-agent for host-visible
 third-party tools. They must emit RuntimePulse partial output and are enqueued
 through the same bounded queue, batching sender, and spool path as native host
@@ -308,7 +315,7 @@ starting each source manually.
 ## Next Steps
 
 1. Complete the Kubernetes path on containerd: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
-2. Add containerd/Kubernetes sandbox metric resolution, so cgroup sampling is driven by containerd task metadata instead of Docker PID inventory.
+2. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
 3. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place.
 4. Add Kata and Firecracker sandbox sources after the containerd/Kubernetes path is stable.
 5. Add eBPF/perf profiling sources and profile artifact ingestion.
