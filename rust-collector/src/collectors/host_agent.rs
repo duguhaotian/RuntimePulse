@@ -32,8 +32,10 @@ use crate::collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use crate::collectors::sources::node::procfs::ProcfsPlugin;
 use crate::collectors::sources::node::psi::PsiPlugin;
 use crate::collectors::sources::runtime::containerd::{
-    collect_containerd_inventory, output_from_runtime_event as containerd_output_from_event,
-    stream_containerd_events, ContainerdRuntimeEvent,
+    collect_containerd_inventory, collect_containerd_task_targets, containerd_image_id_from_ref,
+    output_from_runtime_event as containerd_output_from_event, runtime_type_from_containerd_name,
+    sandbox_identity_from_containerd_event, stream_containerd_events, ContainerdEvent,
+    ContainerdRuntimeEvent,
 };
 use crate::collectors::sources::runtime::docker::events::{
     merge_output, stream_docker_events, DockerEvent,
@@ -43,11 +45,15 @@ use crate::collectors::sources::runtime::docker::lifecycle::output_from_event as
 use crate::collectors::sources::runtime::kubelet::{
     output_from_cri_event, stream_cri_events, CriEvent,
 };
-use crate::collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
+use crate::collectors::sources::sandbox::cgroupfs::{
+    ContainerdSandboxCgroupTarget, DockerSandboxCgroupfsPlugin,
+};
 use crate::collectors::sources::sandbox::manager::{
     active_docker_ids_snapshot, apply_lifecycle_output, docker_active_ids_from_inventory,
     ActiveDockerIds,
 };
+
+type ActiveContainerdTargets = Arc<Mutex<HashMap<String, ContainerdSandboxCgroupTarget>>>;
 
 const DEFAULT_QUEUE_CAPACITY: usize = 512;
 const DEFAULT_FLUSH_MS: u64 = 1000;
@@ -76,6 +82,7 @@ struct HostAgentSources {
     kubelet_events: bool,
     kubernetes_metrics: bool,
     docker_sandbox_cgroupfs: bool,
+    containerd_sandbox_cgroupfs: bool,
     image_cache: bool,
     command: bool,
     http: bool,
@@ -147,6 +154,11 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     } else {
         None
     };
+    let active_containerd_targets = if sources.containerd_sandbox_cgroupfs {
+        Some(active_containerd_targets_from_inventory()?)
+    } else {
+        None
+    };
 
     let docker_event_thread = if !config.once && sources.needs_docker_event_stream() {
         let event_tx = tx.clone();
@@ -170,9 +182,15 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let containerd_event_thread = if !config.once && sources.containerd_events {
         let event_tx = tx.clone();
         let event_config = config.clone();
+        let event_active_containerd_targets = active_containerd_targets.clone();
         let event_stats = Arc::clone(&stats);
         Some(thread::spawn(move || {
-            run_containerd_event_worker(event_config, event_tx, event_stats)
+            run_containerd_event_worker(
+                event_config,
+                event_tx,
+                event_active_containerd_targets,
+                event_stats,
+            )
         }))
     } else {
         None
@@ -219,6 +237,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             kubernetes_metrics.as_mut(),
             &mut adapter_plugins,
             active_docker_ids.as_ref(),
+            active_containerd_targets.as_ref(),
             &stats,
         );
 
@@ -274,6 +293,7 @@ fn collect_periodic(
     kubernetes_metrics: Option<&mut KubernetesMetricsPlugin>,
     adapter_plugins: &mut [Box<dyn CollectorPlugin>],
     active_docker_ids: Option<&ActiveDockerIds>,
+    active_containerd_targets: Option<&ActiveContainerdTargets>,
     stats: &Arc<HostAgentStats>,
 ) {
     let now = Utc::now();
@@ -308,6 +328,15 @@ fn collect_periodic(
                         docker_ids.as_deref().unwrap_or_default(),
                     )
                 })
+        });
+    }
+    if sources.containerd_sandbox_cgroupfs {
+        collect_source("host-containerd-cgroupfs", tx, stats, || {
+            let targets = active_containerd_targets
+                .map(active_containerd_targets_snapshot)
+                .transpose()?
+                .unwrap_or_default();
+            docker_cgroupfs.collect_for_containerd_targets(now, config, &targets)
         });
     }
     if sources.image_cache {
@@ -392,6 +421,7 @@ fn run_docker_event_worker(
 fn run_containerd_event_worker(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
+    active_containerd_targets: Option<ActiveContainerdTargets>,
     stats: Arc<HostAgentStats>,
 ) -> Result<()> {
     if config.once {
@@ -407,6 +437,9 @@ fn run_containerd_event_worker(
             containerd_event_timestamp(&event),
         );
         let trace_output = startup_trace_tracker.output_from_event(&event, &config);
+        if let Some(active) = active_containerd_targets.as_ref() {
+            apply_containerd_runtime_event(active, &event);
+        }
         if let Some(output) = containerd_output_from_event(event, &config)? {
             enqueue_report("containerd-events", &tx, output, &stats);
         }
@@ -1174,6 +1207,108 @@ fn has_plugin_output_payload(output: &PluginOutput) -> bool {
         || !output.profiles.is_empty()
 }
 
+fn active_containerd_targets_from_inventory() -> Result<ActiveContainerdTargets> {
+    let mut targets = HashMap::new();
+
+    for task in collect_containerd_task_targets()? {
+        let event = ContainerdEvent {
+            namespace: task.namespace.clone(),
+            action: "task_create".to_string(),
+            container_id: task.container_id.clone(),
+            image: Some(task.image_ref),
+            runtime_name: Some(task.runtime_name),
+            labels: task.labels,
+            timestamp: Utc::now(),
+            exit_status: None,
+            pid: Some(task.pid),
+            topic: "inventory/tasks".to_string(),
+        };
+        targets.insert(
+            containerd_event_key(&event.namespace, &event.container_id),
+            containerd_target_from_event(&event, u64::from(task.pid)),
+        );
+    }
+
+    Ok(Arc::new(Mutex::new(targets)))
+}
+
+fn active_containerd_targets_snapshot(
+    active_targets: &ActiveContainerdTargets,
+) -> Result<Vec<ContainerdSandboxCgroupTarget>> {
+    Ok(active_targets
+        .lock()
+        .map_err(|_| CollectorError::Plugin {
+            plugin: "containerd-sandbox-cgroupfs".to_string(),
+            message: "active containerd target set lock poisoned".to_string(),
+        })?
+        .values()
+        .cloned()
+        .collect())
+}
+
+fn apply_containerd_runtime_event(
+    active_targets: &ActiveContainerdTargets,
+    event: &ContainerdRuntimeEvent,
+) {
+    let ContainerdRuntimeEvent::Container(event) = event else {
+        return;
+    };
+    let key = containerd_event_key(&event.namespace, &event.container_id);
+
+    if matches!(
+        event.action.as_str(),
+        "exit" | "task_delete" | "delete" | "oom"
+    ) {
+        if let Ok(mut targets) = active_targets.lock() {
+            targets.remove(&key);
+        }
+        return;
+    }
+
+    if !matches!(event.action.as_str(), "task_create" | "start" | "resume") {
+        return;
+    }
+
+    let Some(pid) = event.pid.filter(|pid| *pid > 0).map(u64::from) else {
+        return;
+    };
+
+    let target = containerd_target_from_event(event, pid);
+    if let Ok(mut targets) = active_targets.lock() {
+        targets.insert(key, target);
+    }
+}
+
+fn containerd_target_from_event(
+    event: &ContainerdEvent,
+    pid: u64,
+) -> ContainerdSandboxCgroupTarget {
+    let identity = sandbox_identity_from_containerd_event(event);
+    let image_ref = event
+        .image
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "containerd/unknown:latest".to_string());
+    let runtime_version = event
+        .runtime_name
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "containerd".to_string());
+
+    ContainerdSandboxCgroupTarget {
+        sandbox_id: identity.sandbox_id,
+        containerd_id: event.container_id.clone(),
+        containerd_namespace: event.namespace.clone(),
+        workload_name: identity.workload_name,
+        namespace: identity.namespace,
+        image_id: containerd_image_id_from_ref(&event.namespace, &image_ref),
+        image_ref,
+        runtime_type: runtime_type_from_containerd_name(&runtime_version),
+        runtime_version,
+        pid,
+    }
+}
+
 #[derive(Default)]
 struct DockerStartupTraceTracker {
     pending: HashMap<String, DockerCreateEvent>,
@@ -1619,6 +1754,7 @@ impl HostAgentSources {
             kubelet_events: false,
             kubernetes_metrics: false,
             docker_sandbox_cgroupfs: false,
+            containerd_sandbox_cgroupfs: false,
             image_cache: false,
             command: false,
             http: false,
@@ -1646,6 +1782,10 @@ impl HostAgentSources {
                 }
                 "docker-sandbox-cgroupfs" | "host-docker-cgroupfs" | "sandbox-cgroupfs" => {
                     sources.docker_sandbox_cgroupfs = true;
+                }
+                "containerd-sandbox-cgroupfs" | "host-containerd-cgroupfs" => {
+                    sources.containerd_sandbox_cgroupfs = true;
+                    sources.containerd_events = true;
                 }
                 "image-cache" | "host-image-cache" | "snapshotter-cache" => {
                     sources.image_cache = true;
@@ -1698,6 +1838,9 @@ impl HostAgentSources {
         }
         if self.docker_sandbox_cgroupfs {
             names.push("docker-sandbox-cgroupfs");
+        }
+        if self.containerd_sandbox_cgroupfs {
+            names.push("containerd-sandbox-cgroupfs");
         }
         if self.image_cache {
             names.push("image-cache");

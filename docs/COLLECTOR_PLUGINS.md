@@ -31,6 +31,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-cgroupfs`: runs on the host, reads only host/root cgroup v2 CPU, memory, IO, and process counts from `/sys/fs/cgroup`, and reports node-level metrics.
 - `host-containerd`: runs on the host, reads containerd inventory through the containerd client, and is the preferred Kubernetes path when pointed at the `k8s.io` namespace.
 - `host-containerd-events`: runs on the host, follows containerd events, and is the preferred Kubernetes lifecycle stream.
+- `host-containerd-cgroupfs`: runs on the host, samples only containerd containers made active by task events, and resolves cgroup paths from the task PID. It is the Kubernetes/containerd fallback when the standard metrics platform does not expose a needed sandbox metric.
 - `host-kubelet-events`: runs on the host, follows CRI/Kubelet lifecycle events from a configurable JSONL command such as `crictl events --output json`, and enriches Kubernetes sandbox lifecycle records around the containerd path.
 - `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP. This is the single-node/local validation path, not the Kubernetes path.
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet for single-node Docker scenarios.
@@ -51,7 +52,7 @@ extra lifecycle context. Regular container resource metrics should come from the
 existing Kubernetes metrics platform, typically Prometheus fed by kubelet/cAdvisor:
 
 ```bash
-RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,kubelet-events,kubernetes-metrics,image-cache \
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,containerd-sandbox-cgroupfs,kubelet-events,kubernetes-metrics,image-cache \
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
 RUNTIMEPULSE_PROMETHEUS_URL=http://prometheus.monitoring.svc:9090 \
 RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
@@ -227,9 +228,9 @@ Container cgroupfs metrics should be collected by a lifecycle-aware runtime coll
 Expected flow:
 
 1. A Docker/containerd/Kubernetes/runtime-specific collector observes a sandbox/container `started` event or reconciles already-running sandboxes from runtime inventory.
-2. The collector resolves the exact runtime cgroup path for that sandbox shape, such as Docker PID `/proc/<pid>/cgroup` resolution.
+2. The collector resolves the exact runtime cgroup path for that sandbox shape, such as Docker PID or containerd task PID `/proc/<pid>/cgroup` resolution.
 3. A per-sandbox cgroup sampler reports `sandbox.*` metrics against the sandbox id created by the lifecycle event.
-4. The sampler stops or expires when the corresponding `stopped` event is observed.
+4. The sampler stops or expires when the corresponding `stopped`/`exit`/`delete` event is observed.
 
 ## Local HTTP Reports
 

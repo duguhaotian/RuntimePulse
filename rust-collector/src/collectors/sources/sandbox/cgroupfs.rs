@@ -64,8 +64,11 @@ struct DockerHostConfig {
 
 struct SandboxCgroupTarget {
     sandbox_id: String,
-    docker_id: String,
-    docker_name: String,
+    runtime_source: String,
+    runtime_id_key: String,
+    runtime_id: String,
+    runtime_name_key: String,
+    runtime_name: String,
     workload_name: String,
     namespace: String,
     image_id: String,
@@ -75,6 +78,20 @@ struct SandboxCgroupTarget {
     pid: u64,
     cgroup_path: PathBuf,
     cgroup_relative_path: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContainerdSandboxCgroupTarget {
+    pub sandbox_id: String,
+    pub containerd_id: String,
+    pub containerd_namespace: String,
+    pub workload_name: String,
+    pub namespace: String,
+    pub image_id: String,
+    pub image_ref: String,
+    pub runtime_type: String,
+    pub runtime_version: String,
+    pub pid: u64,
 }
 
 struct SandboxCgroupSample {
@@ -111,6 +128,20 @@ impl DockerSandboxCgroupfsPlugin {
             now,
             config,
             docker_cgroup_targets_for_ids(&self.root, docker_ids)?,
+        )
+    }
+
+    pub fn collect_for_containerd_targets(
+        &mut self,
+        now: DateTime<Utc>,
+        config: &CollectorConfig,
+        targets: &[ContainerdSandboxCgroupTarget],
+    ) -> Result<PluginOutput> {
+        collect_cgroup_targets(
+            self,
+            now,
+            config,
+            containerd_cgroup_targets_for_targets(&self.root, targets),
         )
     }
 }
@@ -156,6 +187,24 @@ fn collect_cgroup_targets(
                 digest: format!("collector:{}", target.image_id),
             });
 
+        let mut attributes = Map::new();
+        attributes.insert(
+            "collector.scope".to_string(),
+            json!(config.collection_scope),
+        );
+        attributes.insert("runtime.source".to_string(), json!(target.runtime_source));
+        attributes.insert(
+            "snapshot.scope".to_string(),
+            json!(format!("{}-running", target.runtime_source)),
+        );
+        attributes.insert("lifecycle.current".to_string(), json!(true));
+        attributes.insert(target.runtime_id_key.clone(), json!(target.runtime_id));
+        attributes.insert(target.runtime_name_key.clone(), json!(target.runtime_name));
+        attributes.insert(
+            "cgroup.path".to_string(),
+            json!(target.cgroup_relative_path),
+        );
+
         sandboxes.push(json!({
             "id": target.sandbox_id,
             "clusterId": config.cluster_id,
@@ -173,18 +222,10 @@ fn collect_cgroup_targets(
             "memoryPeakBytes": sample.memory_current.unwrap_or(0),
             "labels": {
                 "collector": "runtimepulse-rust-collector",
-                "plugin": "docker-sandbox-cgroupfs",
+                "plugin": format!("{}-sandbox-cgroupfs", target.runtime_source),
                 "scope": config.collection_scope,
             },
-            "attributes": {
-                "collector.scope": config.collection_scope,
-                "runtime.source": "docker",
-                "snapshot.scope": "docker-running",
-                "lifecycle.current": true,
-                "docker.id": target.docker_id,
-                "docker.name": target.docker_name,
-                "cgroup.path": target.cgroup_relative_path,
-            }
+            "attributes": attributes
         }));
 
         let previous_cpu = plugin.last_cpu_usage_by_sandbox.insert(
@@ -331,8 +372,7 @@ fn collect_cgroup_targets(
     attributes.insert("plugin".to_string(), json!("docker-sandbox-cgroupfs"));
     attributes.insert("scope".to_string(), json!(config.collection_scope));
     attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
-    attributes.insert("resolver".to_string(), json!("docker-pid-cgroup"));
-    attributes.insert("snapshot.scope".to_string(), json!("docker-running"));
+    attributes.insert("resolver".to_string(), json!("runtime-pid-cgroup"));
     attributes.insert("snapshot.nodeId".to_string(), json!(config.node_id));
     attributes.insert(
         "snapshot.sandboxIds".to_string(),
@@ -345,7 +385,7 @@ fn collect_cgroup_targets(
         severity: "info".to_string(),
         event_type: "collector".to_string(),
         event_name: "sandbox.cgroupfs.sample.observed".to_string(),
-        message: "Docker sandbox cgroupfs collector sampled resolved cgroups".to_string(),
+        message: "Sandbox cgroupfs collector sampled runtime-resolved cgroups".to_string(),
         source: format!(
             "runtimepulse-rust-collector/{}/docker-sandbox-cgroupfs",
             config.node_id
@@ -376,9 +416,7 @@ fn collect_cgroup_targets(
                     "scope": config.collection_scope,
                 }
             })],
-            images: docker_image_metadata_rows(image_candidates.into_values().collect())?
-                .into_values()
-                .collect(),
+            images: image_metadata_rows(image_candidates.into_values().collect()),
             sandboxes,
         },
         metrics,
@@ -386,6 +424,30 @@ fn collect_cgroup_targets(
         traces: Vec::new(),
         profiles: Vec::new(),
     })
+}
+
+fn image_metadata_rows(candidates: Vec<DockerImageCandidate>) -> Vec<serde_json::Value> {
+    let fallback_rows = candidates
+        .iter()
+        .map(|candidate| {
+            json!({
+                "id": candidate.id,
+                "ref": candidate.reference,
+                "digest": candidate.digest,
+                "loadingMode": "eager",
+                "sizeBytes": 0,
+                "layerCount": 0,
+                "attributes": {
+                    "collector.source": "sandbox-cgroupfs",
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    match docker_image_metadata_rows(candidates) {
+        Ok(rows) => rows.into_values().collect(),
+        Err(_) => fallback_rows,
+    }
 }
 
 fn docker_cgroup_targets(root: &Path) -> Result<Vec<SandboxCgroupTarget>> {
@@ -416,8 +478,11 @@ fn docker_cgroup_targets_for_ids(root: &Path, ids: &[String]) -> Result<Vec<Sand
 
         targets.push(SandboxCgroupTarget {
             sandbox_id: docker_sandbox_id(&container.id),
-            docker_id: container.id.clone(),
-            docker_name: container.name.trim_start_matches('/').to_string(),
+            runtime_source: "docker".to_string(),
+            runtime_id_key: "docker.id".to_string(),
+            runtime_id: container.id.clone(),
+            runtime_name_key: "docker.name".to_string(),
+            runtime_name: container.name.trim_start_matches('/').to_string(),
             workload_name: docker_workload_name(&container),
             namespace: docker_namespace(&container),
             image_id: image_id_from_ref_or_digest(&image_ref, &container.image),
@@ -431,6 +496,35 @@ fn docker_cgroup_targets_for_ids(root: &Path, ids: &[String]) -> Result<Vec<Sand
     }
 
     Ok(targets)
+}
+
+fn containerd_cgroup_targets_for_targets(
+    root: &Path,
+    targets: &[ContainerdSandboxCgroupTarget],
+) -> Vec<SandboxCgroupTarget> {
+    targets
+        .iter()
+        .filter_map(|target| {
+            let (cgroup_path, cgroup_relative_path) = resolve_pid_cgroup_path(root, target.pid)?;
+            Some(SandboxCgroupTarget {
+                sandbox_id: target.sandbox_id.clone(),
+                runtime_source: "containerd".to_string(),
+                runtime_id_key: "containerd.id".to_string(),
+                runtime_id: target.containerd_id.clone(),
+                runtime_name_key: "containerd.namespace".to_string(),
+                runtime_name: target.containerd_namespace.clone(),
+                workload_name: target.workload_name.clone(),
+                namespace: target.namespace.clone(),
+                image_id: target.image_id.clone(),
+                image_ref: target.image_ref.clone(),
+                runtime_type: target.runtime_type.clone(),
+                runtime_version: target.runtime_version.clone(),
+                pid: target.pid,
+                cgroup_path,
+                cgroup_relative_path,
+            })
+        })
+        .collect()
 }
 
 pub fn docker_running_container_ids() -> Result<Vec<String>> {

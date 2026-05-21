@@ -12,7 +12,7 @@ use containerd_client::events::{
 };
 use containerd_client::services::v1::{
     Container, GetContainerRequest, Image, Info, ListContainersRequest, ListContentRequest,
-    ListImagesRequest, ListNamespacesRequest, SubscribeRequest,
+    ListImagesRequest, ListNamespacesRequest, ListTasksRequest, SubscribeRequest,
 };
 use containerd_client::tonic::{Code, Request};
 use containerd_client::{with_namespace, Client};
@@ -62,16 +62,27 @@ pub enum ContainerdRuntimeEvent {
     Image(ContainerdImageEvent),
 }
 
-struct ContainerdSandboxIdentity {
-    sandbox_id: String,
-    namespace: String,
-    workload_id: String,
-    workload_name: String,
-    runtime_sandbox_id: String,
-    kubernetes_namespace: String,
-    pod_name: String,
-    container_name: String,
-    pod_uid: String,
+#[derive(Clone, Debug)]
+pub struct ContainerdSandboxIdentity {
+    pub sandbox_id: String,
+    pub namespace: String,
+    pub workload_id: String,
+    pub workload_name: String,
+    pub runtime_sandbox_id: String,
+    pub kubernetes_namespace: String,
+    pub pod_name: String,
+    pub container_name: String,
+    pub pod_uid: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContainerdTaskTarget {
+    pub container_id: String,
+    pub namespace: String,
+    pub image_ref: String,
+    pub runtime_name: String,
+    pub labels: HashMap<String, String>,
+    pub pid: u32,
 }
 
 pub fn collect_containerd_inventory(
@@ -83,6 +94,14 @@ pub fn collect_containerd_inventory(
         .enable_io()
         .build()?;
     runtime.block_on(collect_containerd_inventory_async(now, config, socket))
+}
+
+pub fn collect_containerd_task_targets() -> Result<Vec<ContainerdTaskTarget>> {
+    let socket = containerd_socket_path();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+    runtime.block_on(collect_containerd_task_targets_async(socket))
 }
 
 pub fn stream_containerd_events<F>(config: &CollectorConfig, mut on_event: F) -> Result<()>
@@ -269,6 +288,20 @@ pub fn output_from_event(
         traces: Vec::new(),
         profiles: Vec::new(),
     }))
+}
+
+pub fn sandbox_identity_from_containerd_event(
+    event: &ContainerdEvent,
+) -> ContainerdSandboxIdentity {
+    containerd_identity_from_labels(&event.namespace, &event.container_id, &event.labels)
+}
+
+pub fn runtime_type_from_containerd_name(runtime: &str) -> String {
+    runtime_type_from_name(runtime)
+}
+
+pub fn containerd_image_id_from_ref(namespace: &str, image_ref: &str) -> String {
+    containerd_image_id(namespace, image_ref)
 }
 
 fn output_from_image_event(
@@ -557,6 +590,55 @@ async fn collect_containerd_inventory_async(
         traces: Vec::new(),
         profiles: Vec::new(),
     })
+}
+
+async fn collect_containerd_task_targets_async(
+    socket: PathBuf,
+) -> Result<Vec<ContainerdTaskTarget>> {
+    let client = Client::from_path(socket)
+        .await
+        .map_err(|error| CollectorError::Plugin {
+            plugin: "containerd".to_string(),
+            message: error.to_string(),
+        })?;
+    let namespaces = if let Some(namespaces) = namespace_filter() {
+        namespaces
+    } else {
+        async_list_namespaces(&client).await?
+    };
+    let mut targets = Vec::new();
+
+    for namespace in namespaces {
+        let containers = async_list_containers(&client, &namespace).await?;
+        let containers_by_id = containers
+            .into_iter()
+            .map(|container| (container.id.clone(), container))
+            .collect::<HashMap<_, _>>();
+
+        for task in async_list_tasks(&client, &namespace).await? {
+            if task.pid == 0 {
+                continue;
+            }
+            let Some(container) = containers_by_id.get(&task.container_id) else {
+                continue;
+            };
+            targets.push(ContainerdTaskTarget {
+                container_id: task.container_id,
+                namespace: namespace.clone(),
+                image_ref: if container.image.is_empty() {
+                    "containerd/unknown:latest".to_string()
+                } else {
+                    container.image.clone()
+                },
+                runtime_name: runtime_name_from_containerd(container)
+                    .unwrap_or_else(|| "containerd".to_string()),
+                labels: container.labels.clone(),
+                pid: task.pid,
+            });
+        }
+    }
+
+    Ok(targets)
 }
 
 async fn stream_containerd_events_async<F>(
@@ -931,6 +1013,23 @@ async fn async_list_containers(client: &Client, namespace: &str) -> Result<Vec<C
         .await
         .map_err(containerd_status)?;
     Ok(response.into_inner().containers)
+}
+
+async fn async_list_tasks(
+    client: &Client,
+    namespace: &str,
+) -> Result<Vec<containerd_client::types::v1::Process>> {
+    let response = client
+        .tasks()
+        .list(with_namespace!(
+            ListTasksRequest {
+                filter: String::new()
+            },
+            namespace
+        ))
+        .await
+        .map_err(containerd_status)?;
+    Ok(response.into_inner().tasks)
 }
 
 async fn async_list_content(client: &Client, namespace: &str) -> Result<Vec<Info>> {

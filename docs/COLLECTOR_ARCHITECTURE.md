@@ -92,6 +92,13 @@ pairs. It also turns content and snapshot events into first-pass image timeline
 observations, without pretending that generic containerd events contain full
 registry pull sub-stage timings.
 
+`containerd-sandbox-cgroupfs` reuses the lifecycle-owned containerd event stream
+to maintain an active task set keyed by namespace/container id. It samples only
+those task PIDs via `/proc/<pid>/cgroup`, so it avoids broad cgroup scanning and
+keeps Kubernetes/containerd sandbox metrics aligned with the same
+`k8s-{namespace}-{pod}-{container}` identity used by inventory, events, and
+Prometheus metrics.
+
 Docker sources are retained for single-node and local validation scenarios.
 They are not the preferred Kubernetes path.
 
