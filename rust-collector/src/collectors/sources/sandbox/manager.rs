@@ -24,16 +24,22 @@ use crate::collectors::sources::sandbox::cgroupfs::{
     docker_running_container_ids, DockerSandboxCgroupfsPlugin,
 };
 
+pub type ActiveDockerIds = Arc<Mutex<HashSet<String>>>;
+
+pub fn docker_active_ids_from_inventory() -> Result<ActiveDockerIds> {
+    Ok(Arc::new(Mutex::new(
+        docker_running_container_ids()?
+            .into_iter()
+            .collect::<HashSet<_>>(),
+    )))
+}
+
 pub fn run_docker_sandbox_agent(mut config: CollectorConfig) -> Result<()> {
     config.collection_scope = "host".to_string();
 
     let client = Client::new();
     let mut sampler = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
-    let active_docker_ids = Arc::new(Mutex::new(
-        docker_running_container_ids()?
-            .into_iter()
-            .collect::<HashSet<_>>(),
-    ));
+    let active_docker_ids = docker_active_ids_from_inventory()?;
 
     if config.once {
         let docker_ids = active_docker_ids_snapshot(&active_docker_ids)?;
@@ -123,9 +129,7 @@ fn collect_and_send_recent_lifecycle(
     Ok(())
 }
 
-fn active_docker_ids_snapshot(
-    active_docker_ids: &Arc<Mutex<HashSet<String>>>,
-) -> Result<Vec<String>> {
+pub fn active_docker_ids_snapshot(active_docker_ids: &ActiveDockerIds) -> Result<Vec<String>> {
     let mut ids = active_docker_ids
         .lock()
         .map_err(|_| CollectorError::Plugin {
@@ -139,8 +143,8 @@ fn active_docker_ids_snapshot(
     Ok(ids)
 }
 
-fn apply_lifecycle_output(
-    active_docker_ids: &Arc<Mutex<HashSet<String>>>,
+pub fn apply_lifecycle_output(
+    active_docker_ids: &ActiveDockerIds,
     output: &PluginOutput,
 ) -> Result<()> {
     let mut active_docker_ids = active_docker_ids

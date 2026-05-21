@@ -454,7 +454,7 @@ function RecentTraceList({ recent }: { recent: IngestRecent }) {
             <tr key={`${span.traceId}-${span.spanId}-${span.acceptedAt}`}>
               <td><strong>{span.spanName}</strong></td>
               <td>{formatMetricValue(span.durationMs, 'ms')}</td>
-              <td>{span.sandboxId ?? span.traceId}</td>
+              <td>{span.sandboxId ?? span.imageId ?? span.traceId}</td>
               <td>{span.status}</td>
               <td>{formatDateTime(span.acceptedAt)}</td>
             </tr>

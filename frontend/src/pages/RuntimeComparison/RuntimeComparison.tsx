@@ -145,7 +145,7 @@ export function RuntimeComparison({ api }: RuntimeComparisonProps) {
             <strong>{currentTitle}</strong>
             <span>{scope === 'runtime' ? 'Starting point for runtime-wide overhead comparison.' : 'Aggregate sandbox records to highlight environment-specific overhead.'}</span>
           </div>
-          <div className="column-pills">
+          <div className="context-pills">
             <span>{scope}</span>
             <span>{currentRows.length} groups</span>
           </div>
@@ -243,7 +243,7 @@ function StartupTemperaturePanel({ rows }: { rows: StartupTemperatureRow[] }) {
           <strong>Cold vs warm start</strong>
           <span>Observed cache heuristic: first run per image is cold, later runs reuse image/cache state.</span>
         </div>
-        <div className="column-pills">
+        <div className="context-pills">
           <span>cache</span>
           <span>startup</span>
         </div>

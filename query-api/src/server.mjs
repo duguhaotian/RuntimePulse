@@ -21,14 +21,20 @@ import {
 } from './mockData.mjs';
 import {
   createLiveStore,
+  liveEventsForNode,
   liveClusters,
   liveEventsForSandbox,
+  liveEventsForImage,
   liveImages,
+  liveMetricsForImage,
+  liveMetricsForNode,
   liveMetricsForSandbox,
   liveNodes,
   liveProfilesForSandbox,
+  liveSandboxHistory,
   liveSandboxes,
   liveStoreSnapshot,
+  liveTraceForImage,
   liveTraceForSandbox,
   recordLiveBatch,
 } from './liveData.mjs';
@@ -74,6 +80,7 @@ async function handleRequest(request, response) {
   if (path === '/nodes') return sendData(response, nodeRows());
   if (path === '/images') return sendData(response, imageRows());
   if (path === '/sandboxes') return sendData(response, filterSandboxRows(allSandboxes(), Object.fromEntries(url.searchParams)));
+  if (path === '/sandboxes/history') return sendData(response, filterSandboxRows(allSandboxHistory(), Object.fromEntries(url.searchParams)));
   if (path === '/runtimes/compare') return sendData(response, runtimeComparisonRows());
 
   const match = path.match(/^\/(sandboxes|nodes|images)\/([^/]+)(?:\/([^/]+))?$/);
@@ -82,8 +89,8 @@ async function handleRequest(request, response) {
   const [, resource, rawId, child] = match;
   const id = decodeURIComponent(rawId);
 
-  if (resource === 'nodes') return sendOptional(response, nodeRows().find((node) => node.id === id));
-  if (resource === 'images') return sendOptional(response, imageRows().find((image) => image.id === id));
+  if (resource === 'nodes') return sendNodeResource(response, id, child, timeRangeFromSearchParams(url.searchParams));
+  if (resource === 'images') return sendImageResource(response, id, child, timeRangeFromSearchParams(url.searchParams));
   if (resource === 'sandboxes') return sendSandboxResource(response, id, child, timeRangeFromSearchParams(url.searchParams));
 
   return sendJson(response, 404, { error: 'not_found' });
@@ -115,7 +122,7 @@ async function handleIngestBatch(request, response) {
 }
 
 function sendSandboxResource(response, id, child, range) {
-  const sandbox = allSandboxes().find((item) => item.id === id);
+  const sandbox = sandboxById(id);
   if (!sandbox) return sendJson(response, 404, { error: 'not_found' });
 
   if (!child) return sendData(response, sandbox);
@@ -137,8 +144,42 @@ function sendSandboxResource(response, id, child, range) {
   return sendJson(response, 404, { error: 'not_found' });
 }
 
+function sendNodeResource(response, id, child, range) {
+  const node = nodeRows().find((item) => item.id === id);
+  if (!node) return sendJson(response, 404, { error: 'not_found' });
+
+  if (!child) return sendData(response, node);
+  if (child === 'metrics') return sendData(response, filterMetricSeries(liveMetricsForNode(liveStore, id), range));
+  if (child === 'events') return sendData(response, filterTimestamped(liveEventsForNode(liveStore, id), range, 'timestamp'));
+
+  return sendJson(response, 404, { error: 'not_found' });
+}
+
+function sendImageResource(response, id, child, range) {
+  const image = imageRows().find((item) => item.id === id);
+
+  if (!image && child === 'events') return sendData(response, filterTimestamped(liveEventsForImage(liveStore, id), range, 'timestamp'));
+  if (!image && child === 'metrics') return sendData(response, filterMetricSeries(liveMetricsForImage(liveStore, id), range));
+  if (!image && child === 'trace') return sendData(response, filterTraceSpans(liveTraceForImage(liveStore, id), range));
+  if (!image) return sendJson(response, 404, { error: 'not_found' });
+  if (!child) return sendData(response, image);
+  if (child === 'metrics') return sendData(response, filterMetricSeries(liveMetricsForImage(liveStore, id), range));
+  if (child === 'events') return sendData(response, filterTimestamped(liveEventsForImage(liveStore, id), range, 'timestamp'));
+  if (child === 'trace') return sendData(response, filterTraceSpans(liveTraceForImage(liveStore, id), range));
+
+  return sendJson(response, 404, { error: 'not_found' });
+}
+
 function allSandboxes() {
   return mergeSeededRows(sandboxes, liveSandboxes(liveStore));
+}
+
+function allSandboxHistory() {
+  return mergeSeededRows(sandboxes, liveSandboxHistory(liveStore));
+}
+
+function sandboxById(id) {
+  return allSandboxes().find((item) => item.id === id) ?? allSandboxHistory().find((item) => item.id === id);
 }
 
 function metricsForSandboxMerged(id) {

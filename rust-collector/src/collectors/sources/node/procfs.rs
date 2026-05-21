@@ -11,7 +11,7 @@ use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
 use crate::collectors::core::plugin::CollectorPlugin;
-use crate::collectors::core::report::metric;
+use crate::collectors::core::report::node_metric;
 
 pub struct ProcfsPlugin {
     last_cpu: Option<CpuSnapshot>,
@@ -29,14 +29,6 @@ struct CpuSnapshot {
 struct DiskSnapshot {
     read_sectors: u64,
     write_sectors: u64,
-}
-
-struct PsiSnapshot {
-    cpu_some: f64,
-    io_some: f64,
-    io_full: f64,
-    memory_some: f64,
-    memory_full: f64,
 }
 
 #[derive(Debug)]
@@ -66,11 +58,9 @@ impl CollectorPlugin for ProcfsPlugin {
         let cpu = read_cpu_snapshot()?;
         let memory = read_memory_snapshot()?;
         let disk = read_disk_snapshot()?;
-        let psi = read_psi_snapshot();
         let process_count = count_processes()?;
         let container_count = count_container_like_processes().unwrap_or(0);
         let load_avg = read_load_average().unwrap_or(0.0);
-        let uptime_seconds = read_uptime_seconds().unwrap_or(0.0);
         let sample_interval = self
             .last_seen
             .map(|seen| seen.elapsed().as_secs_f64())
@@ -87,13 +77,6 @@ impl CollectorPlugin for ProcfsPlugin {
             .last_disk
             .map(|last| sector_delta_bytes(last.write_sectors, disk.write_sectors, sample_interval))
             .unwrap_or(0.0);
-        let sandbox_id = format!("node-observer-{}", sanitize_id(&config.node_id));
-        let image_ref = "runtimepulse/node-observer:rust";
-        let image_id = "runtimepulse-node-observer";
-        let runtime_type = "runc";
-        let created_at =
-            timestamp(now - chrono::Duration::seconds(uptime_seconds.min(3600.0) as i64));
-
         self.last_cpu = Some(cpu);
         self.last_disk = Some(disk);
         self.last_seen = Some(Instant::now());
@@ -118,222 +101,76 @@ impl CollectorPlugin for ProcfsPlugin {
                     "scope": config.collection_scope,
                 }
             })],
-            images: vec![json!({
-                "id": image_id,
-                "ref": image_ref,
-                "digest": "collector:runtimepulse-node-observer",
-                "loadingMode": "eager",
-                "sizeBytes": 0,
-                "layerCount": 0
-            })],
-            sandboxes: vec![json!({
-                "id": sandbox_id,
-                "clusterId": config.cluster_id,
-                "nodeId": config.node_id,
-                "namespace": "node",
-                "workloadId": "runtimepulse-rust-collector",
-                "workloadName": "node-observer",
-                "imageId": image_id,
-                "imageRef": image_ref,
-                "runtimeType": runtime_type,
-                "runtimeVersion": "rust-procfs",
-                "status": "running",
-                "createdAt": created_at,
-                "startedAt": ts,
-                "startupDurationMs": 0,
-                "cpuAvg": cpu_usage,
-                "memoryPeakBytes": memory.used_bytes,
-                "labels": {
-                    "collector": "runtimepulse-rust-collector",
-                    "plugin": "procfs",
-                    "scope": config.collection_scope,
-                },
-                "attributes": {
-                    "collector.scope": config.collection_scope,
-                    "process.count": process_count,
-                    "container.process.count": container_count,
-                    "load.avg.1m": load_avg
-                }
-            })],
+            images: Vec::new(),
+            sandboxes: Vec::new(),
         };
 
-        let mut metrics = vec![
-            metric(
+        let metrics = vec![
+            node_metric(
                 &ts,
                 "node.cpu.usage_ratio",
                 cpu_usage,
                 "ratio",
                 "cpu",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
-            metric(
+            node_metric(
                 &ts,
                 "node.memory.used_bytes",
                 memory.used_bytes as f64,
                 "bytes",
                 "memory",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
-            metric(
+            node_metric(
                 &ts,
                 "node.memory.available_bytes",
                 memory.available_bytes as f64,
                 "bytes",
                 "memory",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
-            metric(
+            node_metric(
                 &ts,
                 "node.io.read_bytes",
                 read_bytes,
                 "bytes/s",
                 "io",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
-            metric(
+            node_metric(
                 &ts,
                 "node.io.write_bytes",
                 write_bytes,
                 "bytes/s",
                 "io",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
-            metric(
+            node_metric(
                 &ts,
                 "node.process.count",
                 process_count as f64,
                 "count",
                 "runtime",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
-            metric(
+            node_metric(
                 &ts,
                 "node.container.count",
                 container_count as f64,
                 "count",
                 "lifecycle",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
-            metric(
+            node_metric(
                 &ts,
                 "node.load.1m",
                 load_avg,
                 "count",
                 "runtime",
                 &config.node_id,
-                &sandbox_id,
-                runtime_type,
-            ),
-            metric(
-                &ts,
-                "sandbox.cpu.usage_ratio",
-                cpu_usage,
-                "ratio",
-                "cpu",
-                &config.node_id,
-                &sandbox_id,
-                runtime_type,
-            ),
-            metric(
-                &ts,
-                "sandbox.memory.working_set_bytes",
-                memory.used_bytes as f64,
-                "bytes",
-                "memory",
-                &config.node_id,
-                &sandbox_id,
-                runtime_type,
-            ),
-            metric(
-                &ts,
-                "sandbox.io.read_bytes",
-                read_bytes,
-                "bytes/s",
-                "io",
-                &config.node_id,
-                &sandbox_id,
-                runtime_type,
-            ),
-            metric(
-                &ts,
-                "sandbox.startup.duration_ms",
-                0.0,
-                "ms",
-                "startup",
-                &config.node_id,
-                &sandbox_id,
-                runtime_type,
             ),
         ];
-        if let Some(psi) = psi {
-            metrics.extend([
-                metric(
-                    &ts,
-                    "node.psi.cpu.some",
-                    psi.cpu_some,
-                    "ratio",
-                    "pressure",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ),
-                metric(
-                    &ts,
-                    "node.psi.io.some",
-                    psi.io_some,
-                    "ratio",
-                    "pressure",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ),
-                metric(
-                    &ts,
-                    "node.psi.io.full",
-                    psi.io_full,
-                    "ratio",
-                    "pressure",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ),
-                metric(
-                    &ts,
-                    "node.psi.memory.some",
-                    psi.memory_some,
-                    "ratio",
-                    "pressure",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ),
-                metric(
-                    &ts,
-                    "node.psi.memory.full",
-                    psi.memory_full,
-                    "ratio",
-                    "pressure",
-                    &config.node_id,
-                    &sandbox_id,
-                    runtime_type,
-                ),
-            ]);
-        }
-
         let mut attributes = Map::new();
         attributes.insert("plugin".to_string(), json!("procfs"));
         attributes.insert("scope".to_string(), json!(config.collection_scope));
@@ -341,7 +178,7 @@ impl CollectorPlugin for ProcfsPlugin {
         attributes.insert("containerProcessCount".to_string(), json!(container_count));
 
         let events = vec![EventRecord {
-            id: format!("{}-procfs-observed-{}", sandbox_id, now.timestamp()),
+            id: format!("host-procfs-observed-{}", now.timestamp()),
             timestamp: ts,
             severity: "info".to_string(),
             event_type: "collector".to_string(),
@@ -349,9 +186,10 @@ impl CollectorPlugin for ProcfsPlugin {
             message: "Rust procfs collector sampled node metrics".to_string(),
             source: format!("runtimepulse-rust-collector/{}/procfs", config.node_id),
             attributes,
-            sandbox_id: Some(sandbox_id),
+            sandbox_id: None,
+            image_id: None,
             node_id: Some(config.node_id.clone()),
-            runtime_type: Some(runtime_type.to_string()),
+            runtime_type: None,
             reason: None,
         }];
 
@@ -452,45 +290,6 @@ fn read_load_average() -> Result<f64> {
         .unwrap_or(0.0))
 }
 
-fn read_uptime_seconds() -> Result<f64> {
-    let uptime = fs::read_to_string("/proc/uptime")?;
-    Ok(uptime
-        .split_whitespace()
-        .next()
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.0))
-}
-
-fn read_psi_snapshot() -> Option<PsiSnapshot> {
-    Some(PsiSnapshot {
-        cpu_some: read_psi_avg10("/proc/pressure/cpu", "some")?,
-        io_some: read_psi_avg10("/proc/pressure/io", "some")?,
-        io_full: read_psi_avg10("/proc/pressure/io", "full").unwrap_or(0.0),
-        memory_some: read_psi_avg10("/proc/pressure/memory", "some")?,
-        memory_full: read_psi_avg10("/proc/pressure/memory", "full").unwrap_or(0.0),
-    })
-}
-
-fn read_psi_avg10(path: &str, line_name: &str) -> Option<f64> {
-    let pressure = fs::read_to_string(path).ok()?;
-    let line = pressure
-        .lines()
-        .find(|line| line.starts_with(&format!("{line_name} ")))?;
-
-    parse_psi_field(line, "avg10").map(|value| (value / 100.0).clamp(0.0, 1.0))
-}
-
-fn parse_psi_field(line: &str, field_name: &str) -> Option<f64> {
-    line.split_whitespace().find_map(|part| {
-        let (key, value) = part.split_once('=')?;
-        if key == field_name {
-            value.parse::<f64>().ok()
-        } else {
-            None
-        }
-    })
-}
-
 fn cpu_core_count() -> Result<u64> {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
     Ok(cpuinfo
@@ -534,21 +333,6 @@ fn meminfo_kib(meminfo: &str, key: &str) -> Option<u64> {
 
 fn is_virtual_block_device(name: &str) -> bool {
     name.starts_with("loop") || name.starts_with("ram") || name.starts_with("dm-")
-}
-
-fn sanitize_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|char| {
-            if char.is_ascii_alphanumeric() {
-                char.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
 }
 
 fn timestamp(time: DateTime<Utc>) -> String {

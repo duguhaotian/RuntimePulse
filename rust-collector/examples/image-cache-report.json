@@ -1,0 +1,38 @@
+[
+  {
+    "imageId": "docker-image-registry-local-ml-heavy-v8",
+    "imageRef": "registry.local/ml-heavy:v8",
+    "imageDigest": "sha256:mlheavy8",
+    "loadingMode": "lazy",
+    "sizeBytes": 4939212390,
+    "layerCount": 91,
+    "timestamp": "2026-05-21T00:00:00.000Z",
+    "snapshotter": "nydus",
+    "cache": {
+      "requestedBlocks": 12000,
+      "hitBlocks": 9800,
+      "localReadBytes": 1284505600,
+      "remoteReadBytes": 288358400,
+      "blockSizeBytes": 131072
+    },
+    "downloadTimeline": [
+      {
+        "id": "ml-heavy-resolve",
+        "name": "Resolve manifest",
+        "phase": "resolve",
+        "durationMs": 84,
+        "timestamp": "2026-05-21T00:00:00.000Z",
+        "detail": "Snapshotter exporter observed manifest resolve."
+      },
+      {
+        "id": "ml-heavy-prefetch",
+        "name": "Prefetch bootstrap",
+        "phase": "pull",
+        "durationMs": 1270,
+        "bytes": 104857600,
+        "timestamp": "2026-05-21T00:00:00.084Z",
+        "detail": "Snapshotter exporter observed bootstrap and hot block prefetch."
+      }
+    ]
+  }
+]

@@ -6,6 +6,10 @@ import { formatDuration } from '../../utils/units';
 
 type EventTimelineProps = {
   events: EventRecord[];
+  bounds?: {
+    startTime: string;
+    endTime: string;
+  };
   selectedEventId?: string;
   onSelectEvent?: (event: EventRecord) => void;
 };
@@ -19,12 +23,14 @@ type TimelineStage = {
   events: EventRecord[];
 };
 
-export function EventTimeline({ events, selectedEventId, onSelectEvent }: EventTimelineProps) {
-  const stages = useMemo(() => buildStages(events), [events]);
+export function EventTimeline({ bounds, events, selectedEventId, onSelectEvent }: EventTimelineProps) {
+  const stages = useMemo(() => buildStages(events, bounds), [bounds, events]);
   const selectedStageFromEvent = selectedEventId ? stages.find((stage) => stage.events.some((event) => event.id === selectedEventId)) : undefined;
   const [selectedStageId, setSelectedStageId] = useState<string>();
   const selectedStage = stages.find((stage) => stage.id === (selectedStageId ?? selectedStageFromEvent?.id)) ?? stages[0];
-  const start = Math.min(...stages.map((stage) => stage.start), Date.now());
+  if (stages.length === 0) return <div className="empty-state">No lifecycle events available.</div>;
+
+  const start = bounds ? toMs(bounds.startTime) : Math.min(...stages.map((stage) => stage.start));
   const end = Math.max(...stages.map((stage) => stage.end), start + 1);
   const duration = Math.max(end - start, 1);
 
@@ -32,8 +38,6 @@ export function EventTimeline({ events, selectedEventId, onSelectEvent }: EventT
     setSelectedStageId(stage.id);
     onSelectEvent?.(stage.events[0]);
   }
-
-  if (events.length === 0) return <div className="empty-state">No lifecycle events available.</div>;
 
   return (
     <div className="event-stage-timeline">
@@ -98,8 +102,15 @@ export function EventTimeline({ events, selectedEventId, onSelectEvent }: EventT
   );
 }
 
-function buildStages(events: EventRecord[]): TimelineStage[] {
-  const sorted = [...events].sort((left, right) => toMs(left.timestamp) - toMs(right.timestamp));
+function buildStages(events: EventRecord[], bounds?: EventTimelineProps['bounds']): TimelineStage[] {
+  const boundsStart = bounds ? toMs(bounds.startTime) : undefined;
+  const boundsEnd = bounds ? toMs(bounds.endTime) : undefined;
+  const sorted = [...events]
+    .filter((event) => {
+      const timestamp = toMs(event.timestamp);
+      return (boundsStart === undefined || timestamp >= boundsStart) && (boundsEnd === undefined || timestamp <= boundsEnd);
+    })
+    .sort((left, right) => toMs(left.timestamp) - toMs(right.timestamp));
   const stageMap = new Map<string, EventRecord[]>();
 
   sorted.forEach((event) => {
@@ -112,7 +123,8 @@ function buildStages(events: EventRecord[]): TimelineStage[] {
     const nextStageEvents = allStages[index + 1]?.[1] ?? [];
     const nextStageStart = nextStageEvents.length > 0 ? Math.min(...nextStageEvents.map((event) => toMs(event.timestamp))) : undefined;
     const eventEnd = Math.max(...phaseEvents.map((event) => toMs(event.timestamp)));
-    const end = Math.max(nextStageStart ?? eventEnd + 250, eventEnd + 250);
+    const inferredEnd = Math.max(nextStageStart ?? eventEnd + 250, eventEnd + 250);
+    const end = Math.max(start + 1, Math.min(inferredEnd, boundsEnd ?? inferredEnd));
     const severity = phaseEvents.some((event) => event.severity === 'error') ? 'error' : phaseEvents.some((event) => event.severity === 'warning') ? 'warning' : 'info';
 
     return {

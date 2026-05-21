@@ -35,7 +35,7 @@ reports to the outlet.
 host-agent
   -> node plugins
   -> runtime event watchers
-  -> sandbox sampler manager
+  -> sandbox sampler manager backed by runtime active sets
   -> bounded report queue
   -> batch sender
   -> collector-outlet POST /api/local/ingest
@@ -45,8 +45,69 @@ The queue is the host-agent backpressure boundary:
 
 - high-value lifecycle/image failure events should be preserved whenever possible
 - periodic metrics and inventory snapshots may be coalesced or dropped first when the queue is full
-- sender failures should retry on the next flush without blocking sampler/event threads
-- personal-use deployments can start with in-memory buffering; disk spool/WAL can be added later
+- sender failures should retry without blocking sampler/event threads
+- personal-use deployments persist failed sender batches as JSON spool files and replay them on later flushes
+
+The host-agent reports its own health as node-level metrics:
+
+- `host_agent.up`
+- `host_agent.queue.depth`
+- `host_agent.reports.enqueued_total`
+- `host_agent.reports.dropped_total`
+- `host_agent.collect.errors_total`
+- `host_agent.sender.batches_sent_total`
+- `host_agent.sender.batches_failed_total`
+- `host_agent.sender.reports_sent_total`
+- `host_agent.spool.files`
+- `host_agent.spool.batches_spooled_total`
+- `host_agent.spool.batches_replayed_total`
+- `host_agent.source.collect.duration_ms`
+- `host_agent.source.collect.success`
+- `host_agent.source.collect.errors_total`
+
+The first host-agent implementation is configured with
+`RUNTIMEPULSE_HOST_AGENT_SOURCES`. The default source set is:
+
+```text
+procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs,image-cache
+```
+
+`procfs` reports node CPU, memory, IO, process, and load metrics. `psi` reports
+node pressure stall metrics from `/proc/pressure/*` as a separate host source,
+so pressure collection health can be tracked independently.
+
+`docker-sandbox-cgroupfs` uses Docker startup inventory to initialize an active
+container set, then Docker lifecycle events keep that set current. Periodic
+sampling reads only cgroups resolved from that active set.
+
+`containerd-inventory` and `containerd-events` are optional host-agent sources.
+They use containerd's Rust client over the host Unix socket and are intended for
+root/systemd deployment. The event source owns one containerd event
+subscription, then dispatches container/task lifecycle updates into RuntimePulse
+sandbox metadata and event records, and derives `container.startup` trace spans
+from create/task-start pairs. It also turns content and snapshot events into
+first-pass image timeline observations, without pretending that generic
+containerd events contain full registry pull sub-stage timings.
+
+`command` and `http` adapters can also run inside host-agent for host-visible
+third-party tools. They must emit RuntimePulse partial output and are enqueued
+through the same bounded queue, batching sender, and spool path as native host
+sources.
+
+`image-cache` reads RuntimePulse JSON/JSONL emitted by real snapshotter/cache
+tools. It is the P0 path for precise image stage durations and lazy-loading
+block cache hit curves. RuntimePulse still does not initiate pulls to create
+measurements.
+
+Host-agent also reports self-observability metrics for outlet backpressure,
+spool usage, per-source collection health, and runtime event stream health. This
+lets the UI distinguish central ingest/outlet problems from runtime watcher
+problems such as a stopped Docker or containerd event stream.
+
+Failed sender batches are written to `RUNTIMEPULSE_HOST_AGENT_SPOOL_DIR`
+(``/tmp/runtimepulse/host-agent-spool`` by default) up to
+`RUNTIMEPULSE_HOST_AGENT_SPOOL_MAX_FILES` files. The sender replays the oldest
+spooled files before sending new in-memory batches.
 
 ## Core
 
@@ -139,7 +200,7 @@ Examples:
 
 - eager download timeline
 - layer timing
-- lazy-loading cache and block hit data
+- lazy-loading cache and block hit data from snapshotter/cache reports
 - snapshotter cache state
 
 Image sources should attach image-level metrics to image ids created by runtime or image inventory sources.
@@ -216,19 +277,22 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 
 | Current command/plugin | Target source ownership |
 | --- | --- |
-| `host-agent` | systemd-friendly host process that runs host collectors, event watchers, sampler manager, and queue-backed sender |
+| `host-agent` | systemd-friendly host process that runs configurable host collectors, Docker event dispatch, image-cache report ingestion, active-set sandbox sampling, and queue-backed sender |
 | `host-procfs` | `sources/node/procfs.rs` plus PSI support |
 | `host-cgroupfs` | `sources/node/cgroupfs.rs` |
 | `host-docker` | `sources/runtime/docker/inventory.rs` |
+| `host-containerd` | `sources/runtime/containerd.rs` inventory through containerd gRPC over Unix socket plus content-store image enrichment |
+| `host-containerd-events` | `sources/runtime/containerd.rs` containerd event subscription plus lifecycle and image content/snapshot conversion |
 | Docker image metadata | `sources/image/layer.rs` via Docker image inspect/history enrichment |
 | Docker event stream | `sources/runtime/docker/events.rs` parses Docker container/image events once |
 | Docker container lifecycle | `sources/runtime/docker/lifecycle.rs` converts Docker container events to sandbox lifecycle output |
 | Docker image events | `sources/image/download.rs` converts Docker image events to image pull/tag/delete output |
+| Snapshotter/image cache reports | `sources/image/cache.rs` converts real exporter JSON/JSONL into image stage spans and lazy block-cache curves |
 | `host-docker-events` | unified Docker event collection plus semantic dispatch |
 | `host-docker-cgroupfs` | `sources/sandbox/cgroupfs.rs` using Docker PID cgroup resolution |
-| `host-docker-sandbox-agent` | `sources/sandbox/manager.rs` combining Docker lifecycle events with active-set cgroupfs sampling |
-| `command` | `adapters/command.rs` |
-| `http` | `adapters/http.rs` |
+| `host-docker-sandbox-agent` | Debug command for `sources/sandbox/manager.rs`; the same active-set helpers are now reused by `host-agent` |
+| `command` | `adapters/command.rs`; outlet plugin and optional host-agent source |
+| `http` | `adapters/http.rs`; outlet plugin and optional host-agent source |
 | `POST /api/local/ingest` | `outlet/http_ingress.rs` and `adapters/local_push.rs` |
 
 The individual `host-*` commands remain useful for debugging and focused
@@ -237,10 +301,8 @@ starting each source manually.
 
 ## Next Steps
 
-1. Move shared structs and plugin traits from `main.rs` into `core/`.
-2. Move outlet HTTP ingress, batching, and sender logic into `outlet/`.
-3. Move command and HTTP plugin implementations into `adapters/`.
-4. Move `host-procfs`, `host-cgroupfs`, and `host-docker` implementations into their target `sources/` modules.
-5. Add unified runtime event watchers and semantic dispatchers.
-6. Add Docker inventory-driven sandbox cgroupfs sampling.
-7. Add runtime startup inventory reconciliation and the sandbox sampler manager. Docker has an initial combined manager through `host-agent`; next iterations can split active sandbox sampling into dedicated workers if the single-process sampler becomes too coarse.
+1. Add kubelet/CRI event sources.
+2. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place.
+3. Add gVisor, Kata, and Firecracker sandbox sources.
+4. Add eBPF/perf profiling sources and profile artifact ingestion.
+6. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.

@@ -1,0 +1,19 @@
+[Unit]
+Description=RuntimePulse host agent
+Documentation=README.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/runtimepulse/host-agent.env
+StateDirectory=runtimepulse
+ExecStart=/usr/local/bin/runtimepulse-collector host-agent
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

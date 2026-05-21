@@ -35,6 +35,9 @@ export const mockRuntimePulseApi: RuntimePulseApi = {
   async listSandboxes(query) {
     return filterSandboxes(query);
   },
+  async listSandboxHistory(query) {
+    return filterSandboxes(query);
+  },
   async getSandbox(id) {
     return sandboxes.find((sandbox) => sandbox.id === id);
   },
@@ -43,6 +46,21 @@ export const mockRuntimePulseApi: RuntimePulseApi = {
   },
   async getImage(id) {
     return images.find((image) => image.id === id);
+  },
+  async getNodeMetrics() {
+    return [];
+  },
+  async getNodeEvents() {
+    return [];
+  },
+  async getImageMetrics() {
+    return [];
+  },
+  async getImageEvents() {
+    return [];
+  },
+  async getImageTrace() {
+    return [];
   },
   async getSandboxMetrics(id) {
     return metricsForSandbox(id);

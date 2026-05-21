@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
 import type { AnalysisFinding, EventRecord, FlamegraphFrame, Image, MetricSeries, Node, ProfileArtifact, Sandbox, SandboxAnalysis, TraceSpan } from '../../domain/model';
 import { MetricChart } from '../../components/charts/MetricChart';
+import { EventList } from '../../components/timeline/EventList';
 import { EventTimeline } from '../../components/timeline/EventTimeline';
 import { TraceWaterfall } from '../../components/trace/TraceWaterfall';
 import { RuntimeBadge } from '../SandboxExplorer/SandboxExplorer';
@@ -37,6 +38,8 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   const [node, setNode] = useState<Node>();
   const [image, setImage] = useState<Image>();
   const [metrics, setMetrics] = useState<MetricSeries[]>([]);
+  const [imageMetrics, setImageMetrics] = useState<MetricSeries[]>([]);
+  const [imageEvents, setImageEvents] = useState<EventRecord[]>([]);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [spans, setSpans] = useState<TraceSpan[]>([]);
   const [profiles, setProfiles] = useState<ProfileArtifact[]>([]);
@@ -54,9 +57,11 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
     const refresh = () => {
       api.getSandbox(sandboxId).then(async (nextSandbox) => {
         if (!mounted || !nextSandbox) return;
-        const [nextNode, nextImage, nextMetrics, nextEvents, nextSpans, nextProfiles, nextAnalysis] = await Promise.all([
+        const [nextNode, nextImage, nextImageMetrics, nextImageEvents, nextMetrics, nextEvents, nextSpans, nextProfiles, nextAnalysis] = await Promise.all([
           api.getNode(nextSandbox.nodeId),
           api.getImage(nextSandbox.imageId),
+          api.getImageMetrics(nextSandbox.imageId),
+          api.getImageEvents(nextSandbox.imageId),
           api.getSandboxMetrics(sandboxId),
           api.getSandboxEvents(sandboxId),
           api.getSandboxTrace(sandboxId),
@@ -67,6 +72,8 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
         setSandbox(nextSandbox);
         setNode(nextNode);
         setImage(nextImage);
+        setImageMetrics(nextImageMetrics);
+        setImageEvents(nextImageEvents);
         setMetrics(nextMetrics);
         setEvents(nextEvents);
         setSpans(nextSpans);
@@ -120,6 +127,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   }
 
   if (!sandbox) return <div className="empty-state">Loading sandbox...</div>;
+  const startupBounds = sandboxStartupBounds(sandbox);
 
   return (
     <section className="page-stack run-detail-page">
@@ -184,11 +192,11 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {tab === 'overview' && (
         <div className="overview-stack">
           {analysis && <AnalysisPanel analysis={analysis} spans={spans} onSelectSpan={setSelectedSpan} />}
-          {image && <ContainerImageAccessPanel sandbox={sandbox} image={image} ioSeries={pressureSeries.io} networkSeries={pressureSeries.network} />}
+          {image && <ContainerImageAccessPanel sandbox={sandbox} image={image} imageEvents={imageEvents} imageMetrics={imageMetrics} ioSeries={pressureSeries.io} networkSeries={pressureSeries.network} />}
           <div className="overview-timeline-stack">
             <div className="panel-card">
               <h3>Lifecycle Timeline</h3>
-              <EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
+              <EventTimeline bounds={startupBounds} events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
             </div>
             <div className="panel-card">
               <h3>Startup Trace</h3>
@@ -217,7 +225,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
         </div>
       )}
 
-      {tab === 'timeline' && <div className="panel-card"><EventTimeline events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} /></div>}
+      {tab === 'timeline' && <div className="panel-card"><EventTimeline bounds={startupBounds} events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} /></div>}
       {tab === 'trace' && (
         <div className="trace-full-width">
           <div className="panel-card"><TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} /></div>
@@ -485,21 +493,26 @@ function Info({ label, value, hot }: { label: string; value: string; hot?: boole
 function ContainerImageAccessPanel({
   sandbox,
   image,
+  imageEvents,
+  imageMetrics,
   ioSeries,
   networkSeries,
 }: {
   sandbox: Sandbox;
   image: Image;
+  imageEvents: EventRecord[];
+  imageMetrics: MetricSeries[];
   ioSeries?: MetricSeries;
   networkSeries?: MetricSeries;
 }) {
+  const startupBounds = sandboxStartupBounds(sandbox);
   const layers = image.layers ?? [];
   const avgIo = averageMetricValue(ioSeries);
   const peakIo = Math.max(...(ioSeries?.points.map((point) => point.value) ?? [0]), 0);
   const avgNetwork = averageMetricValue(networkSeries);
   const requestedBlocks = imageRequestedBlocks(image);
-  const blockHitRatio = imageBlockHitRatio(image);
-  const remoteReadBytes = imageRemoteReadBytes(image);
+  const blockHitRatio = latestMetricValue(imageMetrics.find((series) => series.name === 'image.lazy.cache_hit_ratio')) ?? imageBlockHitRatio(image);
+  const remoteReadBytes = latestMetricValue(imageMetrics.find((series) => series.name === 'image.lazy.remote_read_bytes')) ?? imageRemoteReadBytes(image);
   const downloadDuration = imageDownloadDuration(image);
 
   return (
@@ -538,23 +551,27 @@ function ContainerImageAccessPanel({
         </div>
       </div>
       {image.loadingMode === 'lazy' ? (
-        <LazyImageTemporalPanel image={image} />
+        <LazyImageTemporalPanel image={image} metrics={imageMetrics} />
       ) : (
-        <ImageDownloadTimeline image={image} />
+        <ImageDownloadTimeline bounds={startupBounds} image={image} metrics={imageMetrics} />
       )}
+      <div className="container-image-events">
+        <h3>Image events</h3>
+        <EventList emptyLabel="No image events available." events={imageEvents} />
+      </div>
     </div>
   );
 }
 
-function LazyImageTemporalPanel({ image }: { image: Image }) {
+function LazyImageTemporalPanel({ image, metrics = [] }: { image: Image; metrics?: MetricSeries[] }) {
   const layers = image.layers ?? [];
-  const cacheSeries = lazyImageCacheSeries(image);
+  const cacheSeries = lazyImageCacheSeries(image, metrics);
 
   return (
     <div className="container-layer-access">
       <div className="image-temporal-grid">
-        <MetricChart height={180} series={[cacheSeries.hitRatio]} />
-        <MetricChart height={180} series={[cacheSeries.remoteRead]} />
+        <MetricChart height={180} series={[cacheSeries.hitRatio]} subtitle="Block-level cache hit ratio over time" title="Lazy cache hit ratio" />
+        <MetricChart height={180} series={[cacheSeries.remoteRead]} subtitle="Remote bytes read because blocks missed cache" title="Lazy remote reads" />
       </div>
       {layers.map((layer) => {
         return (
@@ -574,27 +591,30 @@ function LazyImageTemporalPanel({ image }: { image: Image }) {
   );
 }
 
-function ImageDownloadTimeline({ image }: { image: Image }) {
+function ImageDownloadTimeline({ bounds, image, metrics = [] }: { bounds?: { startTime: string; endTime: string }; image: Image; metrics?: MetricSeries[] }) {
   const steps = image.downloadTimeline ?? [];
   const totalDuration = imageDownloadDuration(image);
   const maxDuration = Math.max(...steps.map((step) => step.durationMs), 1);
-  const downloadSeries = eagerImageDownloadSeries(image);
+  const downloadSeries = eagerImageDownloadSeries(image, metrics, bounds);
+  const observedOnly = totalDuration === 0 && steps.length > 0;
 
   return (
     <div className="image-download-panel">
       <div className="image-layer-header">
         <div>
           <h3>Image download timeline</h3>
-          <p>{image.ref} · non-lazy pull before container start</p>
+          <p>{image.ref} · {observedOnly ? 'observed image events; precise pull timing needs lower-level data' : 'non-lazy pull before container start'}</p>
         </div>
         <div className="image-cache-summary">
-          <strong>{formatDuration(totalDuration)}</strong>
-          <span>download path</span>
+          <strong>{observedOnly ? String(steps.length) : formatDuration(totalDuration)}</strong>
+          <span>{observedOnly ? 'observed stages' : 'download path'}</span>
         </div>
       </div>
-      <div className="image-temporal-grid single">
-        <MetricChart height={210} series={downloadSeries} stacked />
-      </div>
+      {!observedOnly && (
+        <div className="image-temporal-grid single">
+          <MetricChart height={210} series={downloadSeries} stacked subtitle="Stacked duration of image download stages" title="Image download stages" />
+        </div>
+      )}
       <div className="download-timeline">
         {steps.map((step) => (
           <article className="download-step" key={step.id}>
@@ -602,8 +622,8 @@ function ImageDownloadTimeline({ image }: { image: Image }) {
               <strong>{step.name}</strong>
               <span>{step.detail}</span>
             </div>
-            <div className="download-step-track"><i className={step.phase} style={{ width: `${Math.max(6, step.durationMs / maxDuration * 100)}%` }} /></div>
-            <em>{formatDuration(step.durationMs)}{step.bytes ? ` · ${formatBytes(step.bytes)}` : ''}</em>
+            <div className={`download-step-track ${step.durationMs === 0 ? 'observed' : ''}`}><i className={step.phase} style={{ width: `${step.durationMs === 0 ? 100 : Math.max(6, step.durationMs / maxDuration * 100)}%` }} /></div>
+            <em>{step.durationMs === 0 ? 'observed' : formatDuration(step.durationMs)}{step.bytes ? ` · ${formatBytes(step.bytes)}` : ''}</em>
           </article>
         ))}
       </div>
@@ -614,6 +634,10 @@ function ImageDownloadTimeline({ image }: { image: Image }) {
 function averageMetricValue(series?: MetricSeries) {
   if (!series || series.points.length === 0) return 0;
   return series.points.reduce((sum, point) => sum + point.value, 0) / series.points.length;
+}
+
+function latestMetricValue(series?: MetricSeries) {
+  return series?.points.at(-1)?.value;
 }
 
 function imageRequestedBlocks(image: Image) {
@@ -640,7 +664,16 @@ function layerBlockHitRatio(layer: NonNullable<Image['layers']>[number]) {
   return ratio(layer.cacheHitBlockCount, layer.requestedBlockCount);
 }
 
-function lazyImageCacheSeries(image: Image): { hitRatio: MetricSeries; remoteRead: MetricSeries } {
+function lazyImageCacheSeries(image: Image, metrics: MetricSeries[] = []): { hitRatio: MetricSeries; remoteRead: MetricSeries } {
+  const realHitRatio = metrics.find((series) => series.name === 'image.lazy.cache_hit_ratio');
+  const realRemoteRead = metrics.find((series) => series.name === 'image.lazy.remote_read_bytes');
+  if (realHitRatio && realRemoteRead) {
+    return {
+      hitRatio: realHitRatio,
+      remoteRead: realRemoteRead,
+    };
+  }
+
   const layers = image.layers ?? [];
   const start = Date.now() - 47 * 60_000;
   const points = Array.from({ length: 48 }, (_, index) => {
@@ -684,9 +717,17 @@ function lazyImageCacheSeries(image: Image): { hitRatio: MetricSeries; remoteRea
   };
 }
 
-function eagerImageDownloadSeries(image: Image): MetricSeries[] {
+function eagerImageDownloadSeries(image: Image, metrics: MetricSeries[] = [], bounds?: { startTime: string; endTime: string }): MetricSeries[] {
+  const realSeries = metrics.filter((series) => series.name.startsWith('image.eager.') && series.name.endsWith('_ms'));
+  if (realSeries.length > 0) return realSeries;
+
   const steps = image.downloadTimeline ?? [];
-  const start = Date.now() - Math.max(imageDownloadDuration(image), 1);
+  const totalDuration = Math.max(imageDownloadDuration(image), 1);
+  const boundStart = bounds ? new Date(bounds.startTime).getTime() : undefined;
+  const boundEnd = bounds ? new Date(bounds.endTime).getTime() : undefined;
+  const start = boundStart !== undefined && boundEnd !== undefined
+    ? Math.max(boundStart, boundEnd - totalDuration)
+    : Date.now() - totalDuration;
   let cursor = start;
   const timeline = [{ timestamp: new Date(start).toISOString(), completedStepIndex: -1 }];
 
@@ -706,6 +747,18 @@ function eagerImageDownloadSeries(image: Image): MetricSeries[] {
       value: point.completedStepIndex >= stepIndex ? step.durationMs : 0,
     })),
   }));
+}
+
+function sandboxStartupBounds(sandbox: Sandbox) {
+  const start = new Date(sandbox.createdAt).getTime();
+  const end = sandbox.startedAt
+    ? new Date(sandbox.startedAt).getTime()
+    : start + Math.max(sandbox.startupDurationMs, 1);
+
+  return {
+    startTime: new Date(start).toISOString(),
+    endTime: new Date(Math.max(start + 1, end)).toISOString(),
+  };
 }
 
 function ratio(numerator: number, denominator: number) {

@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
-import type { Cluster, Image, MetricSeries, Node, Sandbox, TraceSpan } from '../../domain/model';
+import type { Cluster, EventRecord, Image, MetricSeries, Node, Sandbox, TraceSpan } from '../../domain/model';
 import { MetricChart } from '../../components/charts/MetricChart';
+import { EventList } from '../../components/timeline/EventList';
+import { EventTimeline } from '../../components/timeline/EventTimeline';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
 import { formatDateTime, toMs } from '../../utils/time';
 import { RuntimeBadge, StatusBadge, SummaryCard } from '../SandboxExplorer/SandboxExplorer';
@@ -20,8 +22,14 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
   const [node, setNode] = useState<Node>();
   const [cluster, setCluster] = useState<Cluster>();
   const [sandboxes, setSandboxes] = useState<Sandbox[]>([]);
+  const [sandboxHistory, setSandboxHistory] = useState<Sandbox[]>([]);
   const [images, setImages] = useState<Image[]>([]);
   const [metrics, setMetrics] = useState<Record<string, MetricSeries[]>>({});
+  const [nodeMetrics, setNodeMetrics] = useState<MetricSeries[]>([]);
+  const [nodeEvents, setNodeEvents] = useState<EventRecord[]>([]);
+  const [imageMetrics, setImageMetrics] = useState<Record<string, MetricSeries[]>>({});
+  const [imageEvents, setImageEvents] = useState<Record<string, EventRecord[]>>({});
+  const [imageTraces, setImageTraces] = useState<Record<string, TraceSpan[]>>({});
   const [traces, setTraces] = useState<Record<string, TraceSpan[]>>({});
   const [lastRefreshAt, setLastRefreshAt] = useState<string>();
   const [selectedLifecycleRange, setSelectedLifecycleRange] = useState<ContainerRange>();
@@ -35,23 +43,37 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
       api.getNode(nodeId).then(async (nextNode) => {
         if (!mounted || !nextNode) return;
 
-        const [clusters, allImages, allSandboxes] = await Promise.all([
+        const [clusters, allImages, allSandboxes, allSandboxHistory] = await Promise.all([
           api.listClusters(),
           api.listImages(),
           api.listSandboxes(),
+          api.listSandboxHistory(),
         ]);
         const nodeSandboxes = allSandboxes.filter((sandbox) => sandbox.nodeId === nextNode.id);
-        const nodeImages = allImages.filter((image) => nodeSandboxes.some((sandbox) => sandbox.imageId === image.id));
-        const [metricEntries, traceEntries] = await Promise.all([
-          Promise.all(nodeSandboxes.map(async (sandbox) => [sandbox.id, await api.getSandboxMetrics(sandbox.id)] as const)),
-          Promise.all(nodeSandboxes.map(async (sandbox) => [sandbox.id, await api.getSandboxTrace(sandbox.id)] as const)),
+        const nodeSandboxHistory = mergeSandboxRows(nodeSandboxes, allSandboxHistory.filter((sandbox) => sandbox.nodeId === nextNode.id));
+        const nodeImageIds = new Set(nodeSandboxHistory.map((sandbox) => sandbox.imageId));
+        const nodeImages = allImages.filter((image) => nodeImageIds.has(image.id) || imageBelongsToNode(image, nextNode.id));
+        const [nextNodeMetrics, nextNodeEvents, imageMetricEntries, imageEventEntries, imageTraceEntries, metricEntries, traceEntries] = await Promise.all([
+          api.getNodeMetrics(nextNode.id),
+          api.getNodeEvents(nextNode.id),
+          Promise.all(nodeImages.map(async (image) => [image.id, await api.getImageMetrics(image.id)] as const)),
+          Promise.all(nodeImages.map(async (image) => [image.id, await api.getImageEvents(image.id)] as const)),
+          Promise.all(nodeImages.map(async (image) => [image.id, await api.getImageTrace(image.id)] as const)),
+          Promise.all(nodeSandboxHistory.map(async (sandbox) => [sandbox.id, await api.getSandboxMetrics(sandbox.id)] as const)),
+          Promise.all(nodeSandboxHistory.map(async (sandbox) => [sandbox.id, await api.getSandboxTrace(sandbox.id)] as const)),
         ]);
 
         if (!mounted) return;
         setNode(nextNode);
         setCluster(clusters.find((item) => item.id === nextNode.clusterId));
         setSandboxes(nodeSandboxes);
+        setSandboxHistory(nodeSandboxHistory);
         setImages(nodeImages);
+        setNodeMetrics(nextNodeMetrics);
+        setNodeEvents(nextNodeEvents);
+        setImageMetrics(Object.fromEntries(imageMetricEntries));
+        setImageEvents(Object.fromEntries(imageEventEntries));
+        setImageTraces(Object.fromEntries(imageTraceEntries));
         setMetrics(Object.fromEntries(metricEntries));
         setTraces(Object.fromEntries(traceEntries));
         setLastRefreshAt(new Date().toISOString());
@@ -89,12 +111,33 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
   const pressureSeries = useMemo(() => {
     const allSeries = Object.values(metrics).flat();
     return {
-      cpu: aggregateSeries(allSeries.filter((series) => series.name === 'sandbox.cpu.usage_ratio'), 'avg'),
-      io: aggregateSeries(allSeries.filter((series) => series.name === 'sandbox.io.read_bytes'), 'sum'),
-      memory: aggregateSeries(allSeries.filter((series) => series.name === 'sandbox.memory.working_set_bytes'), 'sum'),
-      psi: aggregateSeries(allSeries.filter((series) => series.name === 'node.psi.io.some'), 'avg'),
+      cpu: nodeMetricOrAggregate(nodeMetrics, 'node.cpu.usage_ratio', allSeries.filter((series) => series.name === 'sandbox.cpu.usage_ratio'), 'avg'),
+      io: nodeMetricOrAggregate(nodeMetrics, 'node.io.read_bytes', allSeries.filter((series) => series.name === 'sandbox.io.read_bytes'), 'sum'),
+      memory: nodeMetricOrAggregate(nodeMetrics, 'node.memory.used_bytes', allSeries.filter((series) => series.name === 'sandbox.memory.working_set_bytes'), 'sum'),
+      psi: nodeMetricOrAggregate(nodeMetrics, 'node.psi.io.some', [], 'avg'),
     };
-  }, [metrics]);
+  }, [metrics, nodeMetrics]);
+
+  const hostAgentSeries = useMemo(() => {
+    return {
+      enqueued: nodeMetrics.find((series) => series.name === 'host_agent.reports.enqueued_total'),
+      queueDepth: nodeMetrics.find((series) => series.name === 'host_agent.queue.depth'),
+      dropped: nodeMetrics.find((series) => series.name === 'host_agent.reports.dropped_total'),
+      collectErrors: nodeMetrics.find((series) => series.name === 'host_agent.collect.errors_total'),
+      failedBatches: nodeMetrics.find((series) => series.name === 'host_agent.sender.batches_failed_total'),
+      sentBatches: nodeMetrics.find((series) => series.name === 'host_agent.sender.batches_sent_total'),
+      sentReports: nodeMetrics.find((series) => series.name === 'host_agent.sender.reports_sent_total'),
+      spoolFiles: nodeMetrics.find((series) => series.name === 'host_agent.spool.files'),
+      spooledBatches: nodeMetrics.find((series) => series.name === 'host_agent.spool.batches_spooled_total'),
+      replayedBatches: nodeMetrics.find((series) => series.name === 'host_agent.spool.batches_replayed_total'),
+      up: nodeMetrics.find((series) => series.name === 'host_agent.up'),
+    };
+  }, [nodeMetrics]);
+  const hostAgentSourceRows = useMemo(() => hostAgentSourceHealthRows(nodeMetrics), [nodeMetrics]);
+  const hostAgentEventStreamRows = useMemo(() => hostAgentEventStreamRowsFromMetrics(nodeMetrics), [nodeMetrics]);
+  const hostAgentHealth = useMemo(() => {
+    return buildHostAgentHealth(hostAgentSeries, hostAgentSourceRows, hostAgentEventStreamRows);
+  }, [hostAgentEventStreamRows, hostAgentSeries, hostAgentSourceRows]);
 
   const temporalSeries = useMemo(() => {
     const reference = pressureSeries.cpu ?? pressureSeries.io ?? pressureSeries.memory ?? pressureSeries.psi;
@@ -155,18 +198,118 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
       <section className="node-section-card">
         <div className="section-titlebar">
           <div>
+            <strong>Node events</strong>
+            <span>host 采集、容器生命周期、镜像快照等节点维度事件。</span>
+          </div>
+        </div>
+        <div className="node-events-panel">
+          <EventList emptyLabel="No node events available." events={nodeEvents} />
+        </div>
+      </section>
+
+      <section className="node-section-card">
+        <div className="section-titlebar">
+          <div>
             <strong>Direct dynamic data</strong>
             <span>节点 CPU/IO、容器总体信息、镜像总体信息。</span>
           </div>
         </div>
         <div className="node-temporal-grid">
-          <MetricChart height={190} series={[pressureSeries.cpu, pressureSeries.psi].filter((series): series is MetricSeries => Boolean(series))} />
-          <MetricChart height={190} series={[pressureSeries.io].filter((series): series is MetricSeries => Boolean(series))} />
-          <MetricChart height={190} series={[pressureSeries.memory].filter((series): series is MetricSeries => Boolean(series))} />
-          <MetricChart height={190} series={temporalSeries.container} />
-          <MetricChart height={190} series={temporalSeries.image} />
+          <MetricChart height={190} series={[pressureSeries.cpu, pressureSeries.psi].filter((series): series is MetricSeries => Boolean(series))} subtitle="CPU utilization and IO pressure over time" title="CPU and pressure" />
+          <MetricChart height={190} series={[pressureSeries.io].filter((series): series is MetricSeries => Boolean(series))} subtitle="Node-level read bytes reported by host collectors" title="Node IO reads" />
+          <MetricChart height={190} series={[pressureSeries.memory].filter((series): series is MetricSeries => Boolean(series))} subtitle="Host memory usage or sandbox working-set aggregate" title="Memory usage" />
+          <MetricChart height={190} series={temporalSeries.container} subtitle="Running, failed, and slow-start container counts" title="Container overview" />
+          <MetricChart height={190} series={temporalSeries.image} subtitle="Lazy remote reads and non-lazy download bytes" title="Image IO overview" />
         </div>
         <NodePressureOverlay node={node} ioSeries={pressureSeries.io} psiSeries={pressureSeries.psi} />
+      </section>
+
+      <section className="node-section-card">
+        <div className="section-titlebar">
+          <div>
+            <strong>Collector health</strong>
+            <span>host-agent 队列、丢弃、采集错误和发送状态。</span>
+          </div>
+        </div>
+        <HostAgentHealthSummary health={hostAgentHealth} />
+        <div className="node-temporal-grid">
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.queueDepth].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Pending reports waiting for the outlet sender"
+            title="Queue depth"
+          />
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.dropped, hostAgentSeries.collectErrors, hostAgentSeries.failedBatches, hostAgentSeries.spooledBatches].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Dropped reports, collection errors, failed sends, and spooled batches"
+            title="Failures and drops"
+          />
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.sentBatches, hostAgentSeries.sentReports, hostAgentSeries.replayedBatches].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Batches, reports, and replayed spool batches accepted by the outlet"
+            title="Sender throughput"
+          />
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.spoolFiles, hostAgentSeries.up].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Local spool backlog and host-agent liveness"
+            title="Spool and agent state"
+          />
+        </div>
+        {hostAgentSourceRows.length > 0 && (
+          <div className="recent-sample-table node-health-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Status</th>
+                  <th>Last Duration</th>
+                  <th>Errors</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hostAgentSourceRows.map((row) => (
+                  <tr key={row.source}>
+                    <td><strong>{row.source}</strong></td>
+                    <td><span className={`source-health-pill ${row.success ? 'ready' : 'warning'}`}>{row.success ? 'ok' : 'failed'}</span></td>
+                    <td>{formatDuration(row.durationMs)}</td>
+                    <td>{row.errorsTotal.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {hostAgentEventStreamRows.length > 0 && (
+          <div className="recent-sample-table node-health-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Event stream</th>
+                  <th>Enabled</th>
+                  <th>Running</th>
+                  <th>Events</th>
+                  <th>Errors</th>
+                  <th>Last Event</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hostAgentEventStreamRows.map((row) => (
+                  <tr key={row.stream}>
+                    <td><strong>{row.stream}</strong></td>
+                    <td><span className={`source-health-pill ${row.enabled ? 'ready' : ''}`}>{row.enabled ? 'yes' : 'no'}</span></td>
+                    <td><span className={`source-health-pill ${row.running ? 'ready' : row.enabled ? 'warning' : ''}`}>{row.running ? 'running' : 'stopped'}</span></td>
+                    <td>{Math.round(row.eventsTotal).toLocaleString()}</td>
+                    <td className={row.errorsTotal > 0 ? 'hot-value' : ''}>{Math.round(row.errorsTotal).toLocaleString()}</td>
+                    <td>{row.eventsTotal > 0 ? formatDuration(row.lastEventAgeSeconds * 1000) : 'No events'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className="node-section-card">
@@ -178,7 +321,7 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
         </div>
         <ContainerChangeOverview
           onSelectRange={setSelectedLifecycleRange}
-          sandboxes={sandboxes}
+          sandboxes={sandboxHistory}
           selectedRange={selectedLifecycleRange}
           traces={traces}
         />
@@ -223,15 +366,16 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
           <div className="table-titlebar">
             <div>
               <strong>Container list</strong>
-              <span>点击容器查看镜像和 IO 明细</span>
-            </div>
-            <div className="column-pills">
-              <span>dynamic</span>
-              <span>static</span>
+              <span>点击容器查看镜像和 IO 明细；状态和趋势为动态数据，工作负载和镜像为静态关联信息。</span>
             </div>
           </div>
           <table>
             <thead>
+              <tr className="node-column-groups">
+                <th colSpan={2}>Container identity</th>
+                <th colSpan={3}>Dynamic runtime data</th>
+                <th colSpan={2}>Static workload data</th>
+              </tr>
               <tr>
                 <th>Container</th>
                 <th>Runtime</th>
@@ -261,13 +405,20 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
 
       {selectedImage && (
         <DetailModal title="Image detail" onClose={() => setModal(undefined)}>
-          <ImageDetail image={selectedImage} sandboxes={sandboxes.filter((sandbox) => sandbox.imageId === selectedImage.id)} />
+          <ImageDetail
+            events={imageEvents[selectedImage.id] ?? []}
+            image={selectedImage}
+            metrics={imageMetrics[selectedImage.id] ?? []}
+            sandboxes={sandboxes.filter((sandbox) => sandbox.imageId === selectedImage.id)}
+            traces={imageTraces[selectedImage.id] ?? []}
+          />
         </DetailModal>
       )}
       {selectedSandbox && (
         <DetailModal title="Container detail" onClose={() => setModal(undefined)}>
           <ContainerDetail
             image={selectedSandboxImage}
+            imageMetrics={selectedSandboxImage ? imageMetrics[selectedSandboxImage.id] ?? [] : []}
             metrics={selectedSandboxMetrics}
             onOpenSandbox={() => onSelectSandbox(selectedSandbox.id)}
             sandbox={selectedSandbox}
@@ -281,6 +432,52 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
 function NodeFact({ label, value }: { label: string; value: string }) {
   return (
     <div className="node-fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+type HostAgentHealth = {
+  status: 'ready' | 'warning' | 'danger';
+  statusLabel: string;
+  queueDepth: number;
+  droppedReports: number;
+  failedBatches: number;
+  collectErrors: number;
+  spooledBatches: number;
+  spoolFiles: number;
+  sentReports: number;
+  failingEventStreams: number;
+  eventStreamErrors: number;
+  failingSources: number;
+};
+
+function HostAgentHealthSummary({ health }: { health: HostAgentHealth }) {
+  return (
+    <div className="host-agent-health-summary">
+      <div className={`host-agent-status-card ${health.status}`}>
+        <span>Outlet health</span>
+        <strong>{health.statusLabel}</strong>
+        <em>
+          {health.queueDepth > 0
+            ? `${Math.round(health.queueDepth)} reports queued`
+            : `${Math.round(health.sentReports).toLocaleString()} reports sent`}
+        </em>
+      </div>
+      <HealthFact label="Queue depth" value={Math.round(health.queueDepth).toLocaleString()} hot={health.queueDepth > 0} />
+      <HealthFact label="Dropped reports" value={Math.round(health.droppedReports).toLocaleString()} hot={health.droppedReports > 0} />
+      <HealthFact label="Failed batches" value={Math.round(health.failedBatches).toLocaleString()} hot={health.failedBatches > 0} />
+      <HealthFact label="Collect errors" value={Math.round(health.collectErrors).toLocaleString()} hot={health.collectErrors > 0 || health.failingSources > 0} />
+      <HealthFact label="Event streams" value={health.failingEventStreams > 0 ? `${health.failingEventStreams} down` : 'OK'} hot={health.failingEventStreams > 0 || health.eventStreamErrors > 0} />
+      <HealthFact label="Spool files" value={Math.round(health.spoolFiles).toLocaleString()} hot={health.spoolFiles > 0 || health.spooledBatches > 0} />
+    </div>
+  );
+}
+
+function HealthFact({ hot = false, label, value }: { hot?: boolean; label: string; value: string }) {
+  return (
+    <div className={`host-agent-health-fact ${hot ? 'hot' : ''}`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -307,7 +504,7 @@ function ContainerChangeOverview({
 
   return (
     <div className="container-change-panel">
-      <MetricChart height={190} onSelectRange={onSelectRange} selectable selectedRange={selectedRange} series={overviewSeries} />
+      <MetricChart height={190} onSelectRange={onSelectRange} selectable selectedRange={selectedRange} series={overviewSeries} subtitle="Drag a range to inspect merged lifecycle phases" title="Container startup concurrency" />
       <div className="range-selection-bar">
         {selectedRange ? (
           <span>{formatDateTime(selectedRange.from)} - {formatDateTime(selectedRange.to)}</span>
@@ -553,7 +750,7 @@ function DetailModal({ title, children, onClose }: { title: string; children: Re
   );
 }
 
-function ImageDetail({ image, sandboxes }: { image: Image; sandboxes: Sandbox[] }) {
+function ImageDetail({ events, image, metrics, sandboxes, traces }: { events: EventRecord[]; image: Image; metrics: MetricSeries[]; sandboxes: Sandbox[]; traces: TraceSpan[] }) {
   return (
     <div className="modal-stack">
       <div className="image-modal-summary">
@@ -564,18 +761,30 @@ function ImageDetail({ image, sandboxes }: { image: Image; sandboxes: Sandbox[] 
         <NodeFact label="Layers" value={String(image.layerCount)} />
         <NodeFact label="Containers" value={String(sandboxes.length)} />
       </div>
-      <ImageLayerPanel image={image} />
+      <ImageLayerPanel image={image} metrics={metrics} />
+      {traces.length > 0 && (
+        <div className="panel-card image-trace-panel">
+          <h3>Image stage trace</h3>
+          <EventTimeline events={imageTraceEvents(traces)} />
+        </div>
+      )}
+      <div className="panel-card">
+        <h3>Image events</h3>
+        <EventList emptyLabel="No image events available." events={events} />
+      </div>
     </div>
   );
 }
 
 function ContainerDetail({
   image,
+  imageMetrics,
   metrics,
   onOpenSandbox,
   sandbox,
 }: {
   image?: Image;
+  imageMetrics: MetricSeries[];
   metrics: MetricSeries[];
   onOpenSandbox: () => void;
   sandbox: Sandbox;
@@ -595,9 +804,9 @@ function ContainerDetail({
         <NodeFact label="Image" value={image?.ref ?? sandbox.imageRef} />
       </div>
       <div className="modal-metric-grid">
-        {cpuSeries && <MetricChart height={160} series={[cpuSeries]} />}
-        {ioSeries && <MetricChart height={160} series={[ioSeries]} />}
-        {memorySeries && <MetricChart height={160} series={[memorySeries]} />}
+        {cpuSeries && <MetricChart height={160} series={[cpuSeries]} subtitle="Container CPU utilization over time" title="Container CPU" />}
+        {ioSeries && <MetricChart height={160} series={[ioSeries]} subtitle="Container read bytes over time" title="Container IO reads" />}
+        {memorySeries && <MetricChart height={160} series={[memorySeries]} subtitle="Container working set over time" title="Container memory" />}
       </div>
       <div className="container-detail-grid">
         <SummaryCard label="Peak IO Read" value={formatBytes(peakIo)} caption="sandbox.io.read_bytes" tone={peakIo > 64 * 1024 ** 2 ? 'warning' : undefined} />
@@ -605,7 +814,7 @@ function ContainerDetail({
         <SummaryCard label="Memory Peak" value={formatBytes(sandbox.memoryPeakBytes)} caption="container working set" />
         <SummaryCard label="Created" value={formatDateTime(sandbox.createdAt)} caption="container metadata" />
       </div>
-      {image && <ImageLayerPanel image={image} />}
+      {image && <ImageLayerPanel image={image} metrics={imageMetrics} />}
       <div className="modal-actions">
         <button className="primary" onClick={onOpenSandbox}>Open sandbox detail</button>
       </div>
@@ -658,15 +867,15 @@ function NodePressureOverlay({ node, ioSeries, psiSeries }: { node: Node; ioSeri
   );
 }
 
-function ImageLayerPanel({ image }: { image: Image }) {
-  if (image.loadingMode === 'eager') return <ImageDownloadTimeline image={image} />;
+function ImageLayerPanel({ image, metrics = [] }: { image: Image; metrics?: MetricSeries[] }) {
+  if (image.loadingMode === 'eager') return <ImageDownloadTimeline image={image} metrics={metrics} />;
 
   const layers = image.layers ?? [];
   const totalDuration = layers.reduce((sum, layer) => sum + layer.pullDurationMs + layer.unpackDurationMs, 0);
   const blockHitRatio = imageBlockHitRatio(image);
   const remoteReadBytes = imageRemoteReadBytes(image);
   const largestLayer = layers.reduce((largest, layer) => (layer.sizeBytes > largest.sizeBytes ? layer : largest), layers[0]);
-  const cacheSeries = lazyImageCacheSeries(image);
+  const cacheSeries = lazyImageCacheSeries(image, metrics);
 
   return (
     <div className="panel-card image-layer-panel">
@@ -687,8 +896,8 @@ function ImageLayerPanel({ image }: { image: Image }) {
         <SummaryCard label="Largest Layer" value={largestLayer ? formatBytes(largestLayer.sizeBytes) : '-'} caption="static image layer" tone={(largestLayer?.sizeBytes ?? 0) > 1024 ** 3 ? 'warning' : undefined} />
       </div>
       <div className="image-temporal-grid">
-        <MetricChart height={180} series={[cacheSeries.hitRatio]} />
-        <MetricChart height={180} series={[cacheSeries.remoteRead]} />
+        <MetricChart height={180} series={[cacheSeries.hitRatio]} subtitle="Block-level cache hit ratio over time" title="Lazy cache hit ratio" />
+        <MetricChart height={180} series={[cacheSeries.remoteRead]} subtitle="Remote bytes read because blocks missed cache" title="Lazy remote reads" />
       </div>
       <div className="image-layer-list">
         {layers.map((layer) => {
@@ -710,32 +919,35 @@ function ImageLayerPanel({ image }: { image: Image }) {
   );
 }
 
-function ImageDownloadTimeline({ image }: { image: Image }) {
+function ImageDownloadTimeline({ image, metrics = [] }: { image: Image; metrics?: MetricSeries[] }) {
   const steps = image.downloadTimeline ?? [];
   const totalDuration = imageDownloadDuration(image);
   const maxDuration = Math.max(...steps.map((step) => step.durationMs), 1);
-  const downloadSeries = eagerImageDownloadSeries(image);
+  const downloadSeries = eagerImageDownloadSeries(image, metrics);
+  const observedOnly = totalDuration === 0 && steps.length > 0;
 
   return (
     <div className="panel-card image-download-panel">
       <div className="image-layer-header">
         <div>
           <h3>Image download timeline</h3>
-          <p>{image.ref} · non-lazy pull before container start</p>
+          <p>{image.ref} · {observedOnly ? 'observed image events; precise pull timing needs lower-level data' : 'non-lazy pull before container start'}</p>
         </div>
         <div className="image-cache-summary">
-          <strong>{formatDuration(totalDuration)}</strong>
-          <span>download path</span>
+          <strong>{observedOnly ? String(steps.length) : formatDuration(totalDuration)}</strong>
+          <span>{observedOnly ? 'observed stages' : 'download path'}</span>
         </div>
       </div>
       <div className="image-layer-summary">
-        <SummaryCard label="Total Download" value={formatDuration(totalDuration)} caption="resolve to snapshot ready" tone={totalDuration > 7000 ? 'warning' : undefined} />
+        <SummaryCard label="Total Download" value={observedOnly ? 'Observed only' : formatDuration(totalDuration)} caption={observedOnly ? 'no duration from Docker event' : 'resolve to snapshot ready'} tone={totalDuration > 7000 ? 'warning' : undefined} />
         <SummaryCard label="Downloaded Bytes" value={formatBytes(image.sizeBytes)} caption="full image materialized" />
         <SummaryCard label="Layers" value={String(image.layerCount)} caption="full layer pull" />
       </div>
-      <div className="image-temporal-grid single">
-        <MetricChart height={210} series={downloadSeries} stacked />
-      </div>
+      {!observedOnly && (
+        <div className="image-temporal-grid single">
+          <MetricChart height={210} series={downloadSeries} stacked subtitle="Stacked duration of image download stages" title="Image download stages" />
+        </div>
+      )}
       <div className="download-timeline">
         {steps.map((step) => (
           <article className="download-step" key={step.id}>
@@ -743,8 +955,8 @@ function ImageDownloadTimeline({ image }: { image: Image }) {
               <strong>{step.name}</strong>
               <span>{step.detail}</span>
             </div>
-            <div className="download-step-track"><i className={step.phase} style={{ width: `${Math.max(6, step.durationMs / maxDuration * 100)}%` }} /></div>
-            <em>{formatDuration(step.durationMs)}{step.bytes ? ` · ${formatBytes(step.bytes)}` : ''}</em>
+            <div className={`download-step-track ${step.durationMs === 0 ? 'observed' : ''}`}><i className={step.phase} style={{ width: `${step.durationMs === 0 ? 100 : Math.max(6, step.durationMs / maxDuration * 100)}%` }} /></div>
+            <em>{step.durationMs === 0 ? 'observed' : formatDuration(step.durationMs)}{step.bytes ? ` · ${formatBytes(step.bytes)}` : ''}</em>
           </article>
         ))}
       </div>
@@ -766,6 +978,26 @@ function aggregateSeries(seriesList: MetricSeries[], mode: 'avg' | 'sum'): Metri
       return { timestamp: point.timestamp, value };
     }),
   };
+}
+
+function nodeMetricOrAggregate(
+  nodeMetrics: MetricSeries[],
+  metricName: string,
+  fallbackSeries: MetricSeries[],
+  mode: 'avg' | 'sum',
+): MetricSeries | undefined {
+  return nodeMetrics.find((series) => series.name === metricName) ?? aggregateSeries(fallbackSeries, mode);
+}
+
+function imageBelongsToNode(image: Image, nodeId: string) {
+  const snapshotNodeId = image.attributes?.['snapshot.nodeId'];
+  return typeof snapshotNodeId === 'string' && snapshotNodeId === nodeId;
+}
+
+function mergeSandboxRows(currentRows: Sandbox[], historyRows: Sandbox[]) {
+  const rows = new Map(currentRows.map((sandbox) => [sandbox.id, sandbox]));
+  for (const sandbox of historyRows) rows.set(sandbox.id, { ...rows.get(sandbox.id), ...sandbox });
+  return Array.from(rows.values());
 }
 
 function timelineSeries(
@@ -796,7 +1028,16 @@ function timelineSeries(
   };
 }
 
-function lazyImageCacheSeries(image: Image): { hitRatio: MetricSeries; remoteRead: MetricSeries } {
+function lazyImageCacheSeries(image: Image, metrics: MetricSeries[] = []): { hitRatio: MetricSeries; remoteRead: MetricSeries } {
+  const realHitRatio = metrics.find((series) => series.name === 'image.lazy.cache_hit_ratio');
+  const realRemoteRead = metrics.find((series) => series.name === 'image.lazy.remote_read_bytes');
+  if (realHitRatio && realRemoteRead) {
+    return {
+      hitRatio: realHitRatio,
+      remoteRead: realRemoteRead,
+    };
+  }
+
   const layers = image.layers ?? [];
   const start = Date.now() - 47 * 60_000;
   const points = Array.from({ length: 48 }, (_, index) => {
@@ -840,9 +1081,17 @@ function lazyImageCacheSeries(image: Image): { hitRatio: MetricSeries; remoteRea
   };
 }
 
-function eagerImageDownloadSeries(image: Image): MetricSeries[] {
+function eagerImageDownloadSeries(image: Image, metrics: MetricSeries[] = []): MetricSeries[] {
+  const realSeries = metrics.filter((series) => series.name.startsWith('image.eager.') && series.name.endsWith('_ms'));
+  if (realSeries.length > 0) return realSeries;
+
   const steps = image.downloadTimeline ?? [];
-  const start = Date.now() - Math.max(imageDownloadDuration(image), 1);
+  const stepStart = steps
+    .map((step) => step.timestamp)
+    .find((timestamp): timestamp is string => Boolean(timestamp));
+  const start = stepStart
+    ? new Date(stepStart).getTime()
+    : stableImageTimelineStart(image);
   let cursor = start;
   const timeline = [{ timestamp: new Date(start).toISOString(), completedStepIndex: -1 }];
 
@@ -864,9 +1113,147 @@ function eagerImageDownloadSeries(image: Image): MetricSeries[] {
   }));
 }
 
+function stableImageTimelineStart(image: Image) {
+  const seed = Array.from(image.id).reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return Date.UTC(2026, 0, 1, 0, 0, 0) + seed * 1000;
+}
+
 function averageMetricValue(series?: MetricSeries) {
   if (!series || series.points.length === 0) return 0;
   return average(series.points.map((point) => point.value));
+}
+
+function hostAgentSourceHealthRows(series: MetricSeries[]) {
+  const durations = series.filter((item) => item.name === 'host_agent.source.collect.duration_ms');
+  const success = series.filter((item) => item.name === 'host_agent.source.collect.success');
+  const errors = series.filter((item) => item.name === 'host_agent.source.collect.errors_total');
+
+  return durations
+    .map((durationSeries) => {
+      const source = stringAttribute(durationSeries, 'collector.source') ?? durationSeries.id;
+      const successSeries = success.find((item) => stringAttribute(item, 'collector.source') === source);
+      const errorSeries = errors.find((item) => stringAttribute(item, 'collector.source') === source);
+
+      return {
+        source,
+        durationMs: latestMetricValue(durationSeries),
+        success: latestMetricValue(successSeries) >= 1,
+        errorsTotal: latestMetricValue(errorSeries),
+      };
+    })
+    .sort((left, right) => right.durationMs - left.durationMs);
+}
+
+function hostAgentEventStreamRowsFromMetrics(series: MetricSeries[]) {
+  const streams = Array.from(new Set(series
+    .filter((item) => item.name.startsWith('host_agent.event_stream.'))
+    .map((item) => stringAttribute(item, 'collector.event_stream'))
+    .filter((stream): stream is string => Boolean(stream))));
+
+  return streams.map((stream) => {
+    const streamSeries = (name: string) => series.find((item) => item.name === name && stringAttribute(item, 'collector.event_stream') === stream);
+    return {
+      stream,
+      enabled: latestMetricValue(streamSeries('host_agent.event_stream.enabled')) >= 1,
+      running: latestMetricValue(streamSeries('host_agent.event_stream.running')) >= 1,
+      eventsTotal: latestMetricValue(streamSeries('host_agent.event_stream.events_total')),
+      errorsTotal: latestMetricValue(streamSeries('host_agent.event_stream.errors_total')),
+      restartsTotal: latestMetricValue(streamSeries('host_agent.event_stream.restarts_total')),
+      lastEventAgeSeconds: latestMetricValue(streamSeries('host_agent.event_stream.last_event_age_seconds')),
+    };
+  }).sort((left, right) => left.stream.localeCompare(right.stream));
+}
+
+function buildHostAgentHealth(
+  series: {
+    collectErrors?: MetricSeries;
+    dropped?: MetricSeries;
+    failedBatches?: MetricSeries;
+    queueDepth?: MetricSeries;
+    sentReports?: MetricSeries;
+    spoolFiles?: MetricSeries;
+    spooledBatches?: MetricSeries;
+    up?: MetricSeries;
+  },
+  sourceRows: Array<{ success: boolean }>,
+  eventStreamRows: Array<{ enabled: boolean; errorsTotal: number; running: boolean }>,
+): HostAgentHealth {
+  const queueDepth = latestMetricValue(series.queueDepth);
+  const droppedReports = latestMetricValue(series.dropped);
+  const failedBatches = latestMetricValue(series.failedBatches);
+  const collectErrors = latestMetricValue(series.collectErrors);
+  const spooledBatches = latestMetricValue(series.spooledBatches);
+  const spoolFiles = latestMetricValue(series.spoolFiles);
+  const sentReports = latestMetricValue(series.sentReports);
+  const up = latestMetricValue(series.up);
+  const failingSources = sourceRows.filter((row) => !row.success).length;
+  const failingEventStreams = eventStreamRows.filter((row) => row.enabled && !row.running).length;
+  const eventStreamErrors = eventStreamRows.reduce((sum, row) => sum + row.errorsTotal, 0);
+  const status: HostAgentHealth['status'] = up < 1 || droppedReports > 0
+    ? 'danger'
+    : failedBatches > 0
+      || collectErrors > 0
+      || spooledBatches > 0
+      || spoolFiles > 0
+      || failingSources > 0
+      || failingEventStreams > 0
+      || eventStreamErrors > 0
+      || queueDepth > 8
+      ? 'warning'
+      : 'ready';
+  const statusLabel = status === 'ready' ? 'Healthy' : status === 'warning' ? 'Backpressure' : 'Dropping';
+
+  return {
+    collectErrors,
+    droppedReports,
+    eventStreamErrors,
+    failedBatches,
+    failingEventStreams,
+    failingSources,
+    queueDepth,
+    sentReports,
+    spooledBatches,
+    spoolFiles,
+    status,
+    statusLabel,
+  };
+}
+
+function latestMetricValue(series?: MetricSeries) {
+  return series?.points.at(-1)?.value ?? 0;
+}
+
+function stringAttribute(series: MetricSeries, name: string) {
+  const value = series.attributes?.[name];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function imageTraceEvents(spans: TraceSpan[]): EventRecord[] {
+  return spans.map((span) => ({
+    id: span.spanId,
+    timestamp: span.startTime,
+    severity: stringFromUnknown(span.attributes.dockerAction) === 'delete' || stringFromUnknown(span.attributes.dockerAction) === 'untag'
+      ? 'warning'
+      : span.status === 'error' ? 'error' : 'info',
+    eventType: 'image',
+    eventName: span.spanName,
+    message: imageTraceMessage(span),
+    source: stringFromUnknown(span.attributes.source) ?? stringFromUnknown(span.attributes.plugin) ?? 'image-trace',
+    attributes: span.attributes,
+    imageId: span.imageId ?? stringFromUnknown(span.attributes['image.id']),
+    nodeId: stringFromUnknown(span.attributes.nodeId),
+  }));
+}
+
+function imageTraceMessage(span: TraceSpan) {
+  const action = stringFromUnknown(span.attributes.dockerAction) ?? stringFromUnknown(span.attributes['image.action']);
+  const imageRef = stringFromUnknown(span.attributes['image.ref']);
+  const suffix = span.durationMs > 0 ? formatDuration(span.durationMs) : 'observed';
+  return [imageRef, action, suffix].filter(Boolean).join(' · ');
+}
+
+function stringFromUnknown(value: unknown) {
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
 }
 
 function imageRequestedBlocks(image: Image) {

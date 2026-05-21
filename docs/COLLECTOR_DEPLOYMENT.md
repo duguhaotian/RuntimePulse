@@ -88,11 +88,101 @@ Examples:
 - an image-cache probe reading snapshotter state
 - an eBPF profiler that needs host privileges
 
+For the current implementation these host-side sources are normally run by one
+`host-agent` process:
+
+```bash
+runtimepulse-collector host-agent
+```
+
+The default source set is configured with:
+
+```text
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs
+```
+
+Enable snapshotter/cache report ingestion when a node has a real exporter:
+
+```text
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs,image-cache
+RUNTIMEPULSE_IMAGE_CACHE_REPORT_PATH=/var/lib/runtimepulse/image-cache-report.json
+```
+
+Optional third-party host tools can be pulled by the same host-agent process:
+
+```text
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,cgroupfs,command,http
+RUNTIMEPULSE_COMMAND_PLUGIN_NAME=my-host-tool
+RUNTIMEPULSE_COMMAND_PLUGIN_CMD='my-host-tool --format runtimepulse-json'
+RUNTIMEPULSE_HTTP_PLUGIN_NAME=my-side-service
+RUNTIMEPULSE_HTTP_PLUGIN_URL=http://127.0.0.1:19090/runtimepulse
+RUNTIMEPULSE_ADAPTER_TIMEOUT_MS=3000
+```
+
+The command stdout or HTTP response body must be a RuntimePulse partial output.
+These adapter sources use the host-agent queue, batching sender, and spool just
+like native sources. Multiple adapters can be configured with indexed variables
+such as `RUNTIMEPULSE_COMMAND_PLUGIN_0_CMD` and
+`RUNTIMEPULSE_HTTP_PLUGIN_0_URL`. Use `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` or
+plugin-specific timeout variables to keep slow third-party tools from blocking
+the host-agent collection loop.
+
+The host-agent is expected to run as root in the systemd deployment because it
+needs host-wide `/proc`, `/proc/pressure/*`, cgroupfs, Docker, containerd, and
+future eBPF/profile visibility. `containerd-inventory` can be added to the source list when
+containerd metadata should be collected. `containerd-events` can be added when
+container/task lifecycle updates should come from containerd's event service.
+Both sources connect directly to containerd's gRPC API over
+`RUNTIMEPULSE_CONTAINERD_SOCKET`; they do not shell out to `ctr`.
+
+```text
+RUNTIMEPULSE_CONTAINERD_SOCKET=/run/containerd/containerd.sock
+RUNTIMEPULSE_CONTAINERD_NAMESPACES=moby,k8s.io
+```
+
+If `RUNTIMEPULSE_CONTAINERD_NAMESPACES` is empty, namespaces are discovered from
+the containerd namespace service for inventory. Event streaming subscribes to
+all namespaces unless this variable is set, in which case it applies
+containerd namespace filters.
+
+The Docker sandbox cgroupfs source initializes from Docker's running-container
+inventory and then uses Docker lifecycle events to maintain the active set.
+Only the active set is sampled.
+
+The host-agent also reports its own node-level health metrics:
+
+```text
+host_agent.up
+host_agent.queue.depth
+host_agent.reports.enqueued_total
+host_agent.reports.dropped_total
+host_agent.collect.errors_total
+host_agent.sender.batches_sent_total
+host_agent.sender.batches_failed_total
+host_agent.sender.reports_sent_total
+host_agent.spool.files
+host_agent.spool.batches_spooled_total
+host_agent.spool.batches_replayed_total
+host_agent.source.collect.duration_ms
+host_agent.source.collect.success
+host_agent.source.collect.errors_total
+```
+
+When the outlet is unavailable, the sender writes failed batches as JSON files
+under `RUNTIMEPULSE_HOST_AGENT_SPOOL_DIR` and replays them before later
+in-memory batches. For systemd deployments the starter service uses
+`StateDirectory=runtimepulse`, and the example env points the spool to:
+
+```text
+/var/lib/runtimepulse/host-agent-spool
+```
+
 ### 3. Optional Host Mounts
 
 If a plugin can run safely inside the collector container but needs host files, mount only the required paths:
 
 - `/proc`
+- `/proc/pressure`
 - `/sys`
 - `/run/containerd/containerd.sock`
 - image store or snapshotter paths
@@ -120,6 +210,7 @@ Use one containerized collector outlet with pluginized backends:
 - host-side `procfs` for node CPU, memory, IO, process, and PSI metrics.
 - host-side `cgroupfs` for host/root cgroup v2 CPU, memory, IO, and process samples.
 - host-side `docker` for container and image inventory metadata.
+- host-side `image-cache` for real snapshotter/exporter image stage timing and lazy block-cache curves.
 - `command` for existing binaries.
 - `http` for API-based tools that the collector pulls.
 - `local-http` input for host-side and sidecar tools that push reports.
@@ -240,3 +331,25 @@ Use the existing Rust collector as the outlet container:
 - Keep central delivery through `POST /api/ingest/batch`.
 
 This keeps the system small and still supports host-only collectors.
+
+### systemd Host Agent
+
+The repository includes a starter unit and environment file:
+
+```text
+deploy/systemd/runtimepulse-host-agent.service
+deploy/systemd/runtimepulse-host-agent.env
+```
+
+Suggested local install path:
+
+```bash
+sudo install -m 0755 rust-collector/target/release/runtimepulse-collector /usr/local/bin/runtimepulse-collector
+sudo install -d -m 0755 /etc/runtimepulse
+sudo install -m 0644 deploy/systemd/runtimepulse-host-agent.env /etc/runtimepulse/host-agent.env
+sudo install -m 0644 deploy/systemd/runtimepulse-host-agent.service /etc/systemd/system/runtimepulse-host-agent.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now runtimepulse-host-agent
+```
+
+The starter unit sets `User=root` and `Group=root`.

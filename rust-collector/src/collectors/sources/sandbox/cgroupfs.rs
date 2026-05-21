@@ -291,6 +291,7 @@ fn collect_cgroup_targets(
         ),
         attributes,
         sandbox_id: None,
+        image_id: None,
         node_id: Some(config.node_id.clone()),
         runtime_type: None,
         reason: None,

@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
+use std::time::Duration;
 
 use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::Result;
@@ -12,6 +13,7 @@ pub struct HttpPlugin {
     pub name: String,
     pub url: String,
     pub client: Client,
+    pub timeout: Duration,
 }
 
 impl CollectorPlugin for HttpPlugin {
@@ -23,6 +25,7 @@ impl CollectorPlugin for HttpPlugin {
         Ok(self
             .client
             .get(&self.url)
+            .timeout(self.timeout)
             .send()?
             .error_for_status()?
             .json()?)

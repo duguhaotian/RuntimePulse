@@ -34,6 +34,7 @@ export type Image = {
   layerCount: number;
   layers?: ImageLayer[];
   downloadTimeline?: ImageDownloadStep[];
+  attributes?: Record<string, unknown>;
 };
 
 export type ImageLayer = {
@@ -56,6 +57,7 @@ export type ImageDownloadStep = {
   phase: 'resolve' | 'pull' | 'verify' | 'unpack' | 'snapshot';
   durationMs: number;
   bytes?: number;
+  timestamp?: string;
   detail: string;
 };
 
@@ -92,10 +94,12 @@ export type MetricSeries = {
   name: string;
   label: string;
   unit: string;
-  group: 'cpu' | 'memory' | 'io' | 'network' | 'runtime' | 'startup' | 'pressure';
+  group: 'cpu' | 'memory' | 'io' | 'network' | 'runtime' | 'startup' | 'pressure' | 'lifecycle' | 'collector';
   sandboxId?: string;
+  imageId?: string;
   nodeId?: string;
   runtimeType?: RuntimeType;
+  attributes?: Record<string, unknown>;
   points: MetricPoint[];
 };
 
@@ -106,6 +110,7 @@ export type EventRecord = {
   eventType: string;
   eventName: string;
   sandboxId?: string;
+  imageId?: string;
   nodeId?: string;
   runtimeType?: RuntimeType;
   reason?: string;
@@ -118,7 +123,8 @@ export type TraceSpan = {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
-  sandboxId: string;
+  sandboxId?: string;
+  imageId?: string;
   spanName: string;
   startTime: string;
   endTime: string;
@@ -297,6 +303,7 @@ export type RecentTraceSample = {
   spanId: string;
   parentSpanId?: string;
   sandboxId?: string;
+  imageId?: string;
   spanName: string;
   startTime: string;
   endTime: string;

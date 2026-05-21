@@ -157,6 +157,7 @@ pub fn output_from_event(
             ),
             attributes,
             sandbox_id: Some(docker_sandbox_id(&container_id)),
+            image_id: None,
             node_id: Some(config.node_id.clone()),
             runtime_type: Some("runc".to_string()),
             reason: event_reason(action, &event.actor.attributes),

@@ -34,6 +34,9 @@ export function createHttpRuntimePulseApi(baseUrl: string): RuntimePulseApi {
     listSandboxes(query) {
       return request<Sandbox[]>('/sandboxes', sandboxQueryParams(query));
     },
+    listSandboxHistory(query) {
+      return request<Sandbox[]>('/sandboxes/history', sandboxQueryParams(query));
+    },
     getSandbox(id) {
       return requestOptional<Sandbox>(request, `/sandboxes/${encodeURIComponent(id)}`);
     },
@@ -42,6 +45,21 @@ export function createHttpRuntimePulseApi(baseUrl: string): RuntimePulseApi {
     },
     getImage(id) {
       return requestOptional<Image>(request, `/images/${encodeURIComponent(id)}`);
+    },
+    getNodeMetrics(id, range) {
+      return request<MetricSeries[]>(`/nodes/${encodeURIComponent(id)}/metrics`, timeRangeParams(range));
+    },
+    getNodeEvents(id, range) {
+      return request<EventRecord[]>(`/nodes/${encodeURIComponent(id)}/events`, timeRangeParams(range));
+    },
+    getImageMetrics(id, range) {
+      return request<MetricSeries[]>(`/images/${encodeURIComponent(id)}/metrics`, timeRangeParams(range));
+    },
+    getImageEvents(id, range) {
+      return request<EventRecord[]>(`/images/${encodeURIComponent(id)}/events`, timeRangeParams(range));
+    },
+    getImageTrace(id, range) {
+      return request<TraceSpan[]>(`/images/${encodeURIComponent(id)}/trace`, timeRangeParams(range));
     },
     getSandboxMetrics(id, range) {
       return request<MetricSeries[]>(`/sandboxes/${encodeURIComponent(id)}/metrics`, timeRangeParams(range));

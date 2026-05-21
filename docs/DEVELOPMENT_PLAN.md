@@ -118,6 +118,9 @@ Implemented:
 - Recent ingest sample endpoint: `GET /api/ingest/recent` keeps bounded in-memory previews of recent batches, metrics, events, trace spans, and profiles for debugging.
 - Collectors page recent sample preview for latest ingested metrics, events, trace spans, and profiles.
 - Collectors page tabbed recent sample browser for metrics, events, trace spans, and profiles.
+- Node metric query endpoint: `GET /api/nodes/{id}/metrics` exposes node-level collector metrics such as host-agent health and node PSI/CPU/IO curves.
+- Node event query endpoint: `GET /api/nodes/{id}/events` exposes host collector, sandbox lifecycle, and image snapshot events at node scope.
+- Image metric query endpoint: `GET /api/images/{id}/metrics` exposes image-level collector metrics such as observed image size, layer count, and future lazy-cache/download timeline samples.
 - Docker Compose runs two mock node collectors to validate multi-source ingest aggregation.
 - Collectors page source filter for recent samples, so multi-node ingest can be inspected per source.
 - Mock node collector emits profile artifacts so the ingest boundary exercises all frontend domain output types.
@@ -138,21 +141,34 @@ Implemented:
 - Rust host-side cgroupfs tool reports host/root cgroup v2 CPU, memory, IO, and process count samples as node-level metrics without creating sandbox or image metadata.
 - Rust host-side Docker tool reports real Docker container and image inventory.
 - Docker image inventory now enriches image rows with real `docker image inspect` size/rootfs layers and `docker history` layer command/size breakdown.
+- Docker image inventory now emits image-level metric series for observed image size, layer count, and lazy-cache summary fields when those fields are available from image metadata.
+- Query API exposes image-level metrics and events through `GET /api/images/{id}/metrics` and `GET /api/images/{id}/events`; Node and Sandbox detail views consume these endpoints for image detail panels.
 - Docker event handling is moving toward one runtime-owned event stream with semantic dispatch for container lifecycle, sandbox sampler state, and image pull/tag/delete observations.
 - Rust host-side Docker lifecycle tool reports Docker container create/start/stop/die/kill/oom/destroy events as sandbox lifecycle events through the local outlet.
 - Query API live store applies Docker lifecycle mutations: stop/die update sandbox status and destroy removes the sandbox from the current live container set while preserving event records.
+- Query API derives sandbox startup summaries from runtime startup trace spans and gives Docker/containerd event-derived startup traces priority over periodic inventory snapshots.
 - Rust host-side Docker sandbox cgroupfs tool resolves cgroup paths from Docker running-container inventory and samples per-sandbox CPU, memory, IO, and process metrics without broad host cgroup scanning.
 - Rust host-side Docker sandbox agent combines startup/running-container reconciliation with Docker lifecycle event streaming, maintains the active Docker container set, and samples only those active cgroups.
-- Host collection is converging on a single `host-agent` binary for systemd: host plugins and event watchers enqueue reports into a bounded in-process queue, while a dedicated sender batches HTTP reports to the collector outlet.
+- Host collection is converging on a single `host-agent` binary for systemd: configurable host sources and event watchers enqueue reports into a bounded in-process queue, while a dedicated sender batches HTTP reports to the collector outlet.
+- Rust host-side containerd inventory source is available as optional `containerd-inventory`/`host-containerd`, using containerd's gRPC API over the host Unix socket.
+- containerd inventory enriches existing image rows from the content store when available, deriving layer-like content entries, byte totals, and layer counts without reading blob payloads.
+- Rust host-side containerd event streaming is available as optional `containerd-events`/`host-containerd-events`, using one runtime-owned subscription and converting container/task lifecycle events into RuntimePulse sandbox updates, `container.startup` trace spans, plus first-pass content/snapshot image timeline observations.
+- The host-agent default source set is `procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs`; Docker sandbox cgroupfs sampling is driven by startup inventory plus lifecycle-maintained active container ids, not broad cgroup scanning.
+- Host-agent self-observability reports node-level metrics for queue depth, enqueued/dropped reports, collector errors, sender success/failure counters, and runtime event stream health.
+- Host-agent sender persists failed batches as local JSON spool files and replays them before later in-memory batches after the outlet recovers.
+- Host-agent can run optional `command` and `http` adapter sources, so third-party host tools that emit RuntimePulse partial output join the same queue, batching, spool, and outlet path.
+- Host-agent can run `image-cache`/`host-image-cache` to ingest real snapshotter/exporter JSON or JSONL reports for precise image stage spans and lazy block-cache hit curves.
+- Node detail page consumes node-level metric series directly, so host-agent health and node pressure are visible without relying on sandbox-level series.
 
 Collector candidates:
 
-- Host metrics collector.
+- Host metrics collector. `procfs` now reports node CPU, memory, IO, process, and load metrics; `psi` reports node pressure metrics as an independent host source.
 - Cgroup metrics collector.
-- Host-agent queue-backed scheduler/sender that runs host plugins in one process and keeps collector threads off the synchronous HTTP path.
-- Docker/containerd event collector. Docker container lifecycle is implemented; Docker image event dispatch and containerd remain pending.
-- Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, and lifecycle event streaming are available through `host-docker-sandbox-agent`; dedicated per-sandbox worker processes remain pending.
-- image metadata and cache collector. Docker image metadata and layer breakdown are implemented; image pull/tag/delete should come from runtime event dispatch; finer Docker pull sub-stages and lazy block-cache hit curves still require containerd/snapshotter event sources.
+- Host-agent queue-backed scheduler/sender that runs host plugins in one process and keeps collector threads off the synchronous HTTP path. First implementation, self-observability, and local spool replay are in place.
+- Third-party collector adapters. `command` and `http` adapters work in the outlet path and can also be enabled as host-agent sources for host-visible tools.
+- Docker/containerd event collector. Docker container lifecycle, Docker image event dispatch, and Docker/containerd startup trace spans are implemented; containerd inventory plus first-pass container/task/content/snapshot event streaming are available as optional host-agent sources.
+- Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, lifecycle event streaming, and stopped-container cleanup are integrated into `host-agent`.
+- image metadata and cache collector. Docker image metadata/layer breakdown and containerd content-store image enrichment are implemented; Docker image pull/tag/delete and containerd content/snapshot timeline observations come from runtime event dispatch; precise pull sub-stage durations and lazy block-cache hit curves are ingested from real snapshotter/exporter JSON reports through `image-cache`.
 - gVisor collector.
 - Kata collector.
 - Firecracker collector.

@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -149,9 +150,46 @@ fn extend_unique_by_id(target: &mut Vec<serde_json::Value>, rows: Vec<serde_json
             .iter_mut()
             .find(|item| item.get("id").and_then(serde_json::Value::as_str) == Some(id))
         {
-            *existing = row;
+            *existing = merge_metadata_row(existing, row);
         } else {
             target.push(row);
         }
     }
+}
+
+fn merge_metadata_row(existing: &Value, incoming: Value) -> Value {
+    let (Some(existing_object), Some(incoming_object)) =
+        (existing.as_object(), incoming.as_object())
+    else {
+        return incoming;
+    };
+    let mut merged = existing_object.clone();
+    for (key, value) in incoming_object {
+        if meaningful_json_value(value) || !merged.contains_key(key) {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
+fn meaningful_json_value(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Number(number) => number.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => meaningful_string(value),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        Value::Bool(_) => true,
+    }
+}
+
+fn meaningful_string(value: &str) -> bool {
+    !value.is_empty()
+        && !value.ends_with("-observed")
+        && value != "collector-observed"
+        && !value.starts_with("collector:")
+        && value != "containerd:unknown"
+        && value != "collector/unknown:latest"
+        && value != "containerd/unknown:latest"
+        && value != "docker/unknown:latest"
 }

@@ -32,6 +32,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP.
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet.
 - `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, and process metrics without scanning the whole cgroup tree.
+- `host-image-cache`: runs on the host, reads a RuntimePulse JSON/JSONL report emitted by a real snapshotter or image-cache exporter, and reports lazy block-cache metrics plus precise image stage spans.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
 
@@ -83,9 +84,20 @@ Use this for existing tools that already expose useful data.
 RUNTIMEPULSE_COLLECTOR_PLUGINS=command
 RUNTIMEPULSE_COMMAND_PLUGIN_NAME=containerd-exporter
 RUNTIMEPULSE_COMMAND_PLUGIN_CMD='containerd-exporter --format runtimepulse-json'
+RUNTIMEPULSE_COMMAND_PLUGIN_TIMEOUT_MS=3000
 ```
 
 The command must write JSON shaped like `rust-collector/examples/command-plugin-output.json`.
+Multiple command plugins can be configured with indexed variables:
+
+```bash
+RUNTIMEPULSE_COLLECTOR_PLUGINS=command
+RUNTIMEPULSE_COMMAND_PLUGIN_0_NAME=snapshotter-exporter
+RUNTIMEPULSE_COMMAND_PLUGIN_0_CMD='snapshotter-exporter --format runtimepulse-json'
+RUNTIMEPULSE_COMMAND_PLUGIN_0_TIMEOUT_MS=5000
+RUNTIMEPULSE_COMMAND_PLUGIN_1_NAME=perf-summary
+RUNTIMEPULSE_COMMAND_PLUGIN_1_CMD='perf-summary --runtimepulse-json'
+```
 
 ## HTTP Plugin
 
@@ -95,9 +107,68 @@ Use this for tools that expose a local or remote API.
 RUNTIMEPULSE_COLLECTOR_PLUGINS=http
 RUNTIMEPULSE_HTTP_PLUGIN_NAME=image-cache-agent
 RUNTIMEPULSE_HTTP_PLUGIN_URL=http://image-cache-agent:9090/runtimepulse
+RUNTIMEPULSE_HTTP_PLUGIN_TIMEOUT_MS=3000
 ```
 
 The endpoint must return the same partial ingest JSON shape as the command plugin.
+Multiple HTTP plugins can be configured the same way:
+
+```bash
+RUNTIMEPULSE_COLLECTOR_PLUGINS=http
+RUNTIMEPULSE_HTTP_PLUGIN_0_NAME=image-cache-agent
+RUNTIMEPULSE_HTTP_PLUGIN_0_URL=http://127.0.0.1:19090/runtimepulse
+RUNTIMEPULSE_HTTP_PLUGIN_0_TIMEOUT_MS=1000
+RUNTIMEPULSE_HTTP_PLUGIN_1_NAME=sandbox-profiler
+RUNTIMEPULSE_HTTP_PLUGIN_1_URL=http://127.0.0.1:19091/runtimepulse
+```
+
+`RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` sets the default adapter timeout when a
+plugin-specific timeout is not provided.
+
+## Image Cache and Snapshotter Reports
+
+Use `image-cache` when a real snapshotter/cache tool can export precise image
+stage timing or lazy-loading block cache counters. RuntimePulse does not infer
+these values from Docker metadata and does not run `docker pull` just to create
+measurements.
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs,image-cache
+RUNTIMEPULSE_IMAGE_CACHE_REPORT_PATH=/var/lib/runtimepulse/image-cache-report.json
+runtimepulse-collector host-agent
+```
+
+The file can be a JSON object, a JSON array, or JSONL. Each row describes one
+image observation:
+
+```json
+{
+  "imageId": "docker-image-registry-local-ml-heavy-v8",
+  "imageRef": "registry.local/ml-heavy:v8",
+  "imageDigest": "sha256:mlheavy8",
+  "loadingMode": "lazy",
+  "timestamp": "2026-05-21T00:00:00.000Z",
+  "snapshotter": "nydus",
+  "cache": {
+    "requestedBlocks": 12000,
+    "hitBlocks": 9800,
+    "localReadBytes": 1284505600,
+    "remoteReadBytes": 288358400,
+    "blockSizeBytes": 131072
+  },
+  "downloadTimeline": [
+    {
+      "name": "Prefetch bootstrap",
+      "phase": "pull",
+      "durationMs": 1270,
+      "bytes": 104857600,
+      "timestamp": "2026-05-21T00:00:00.084Z"
+    }
+  ]
+}
+```
+
+See `rust-collector/examples/image-cache-report.json` for a complete example.
 
 ## Container Cgroup Collection
 

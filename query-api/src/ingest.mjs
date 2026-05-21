@@ -215,6 +215,7 @@ function rememberRecentPayload(status, payload, batch) {
       eventType: row.eventType,
       eventName: row.eventName,
       sandboxId: row.sandboxId,
+      imageId: row.imageId,
       nodeId: row.nodeId,
       runtimeType: row.runtimeType,
       message: row.message,
@@ -229,6 +230,7 @@ function rememberRecentPayload(status, payload, batch) {
       spanId: row.spanId,
       parentSpanId: row.parentSpanId,
       sandboxId: row.sandboxId,
+      imageId: row.imageId,
       spanName: row.spanName,
       startTime: row.startTime,
       endTime: row.endTime,
@@ -329,6 +331,7 @@ function validateEventRecord(row, index, errors) {
   requireString(row, 'source', errors, prefix);
   requireObject(row, 'attributes', errors, prefix);
   optionalString(row, 'sandboxId', errors, prefix);
+  optionalString(row, 'imageId', errors, prefix);
   optionalString(row, 'nodeId', errors, prefix);
   optionalString(row, 'runtimeType', errors, prefix);
 }
@@ -349,6 +352,7 @@ function validateTraceSpan(row, index, errors) {
   requireString(row, 'status', errors, prefix);
   requireObject(row, 'attributes', errors, prefix);
   optionalString(row, 'sandboxId', errors, prefix);
+  optionalString(row, 'imageId', errors, prefix);
   optionalString(row, 'parentSpanId', errors, prefix);
 }
 

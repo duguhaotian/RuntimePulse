@@ -67,6 +67,8 @@ pub struct EventRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_type: Option<String>,
@@ -87,6 +89,8 @@ pub struct TraceSpan {
     pub attributes: Map<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sandbox_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_span_id: Option<String>,
 }

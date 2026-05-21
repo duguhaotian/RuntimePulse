@@ -20,9 +20,15 @@ export interface RuntimePulseApi {
   listNodes(): Promise<Node[]>;
   listImages(): Promise<Image[]>;
   listSandboxes(query?: SandboxQuery): Promise<Sandbox[]>;
+  listSandboxHistory(query?: SandboxQuery): Promise<Sandbox[]>;
   getSandbox(id: string): Promise<Sandbox | undefined>;
   getNode(id: string): Promise<Node | undefined>;
   getImage(id: string): Promise<Image | undefined>;
+  getNodeMetrics(id: string, range?: TimeRange): Promise<MetricSeries[]>;
+  getNodeEvents(id: string, range?: TimeRange): Promise<EventRecord[]>;
+  getImageMetrics(id: string, range?: TimeRange): Promise<MetricSeries[]>;
+  getImageEvents(id: string, range?: TimeRange): Promise<EventRecord[]>;
+  getImageTrace(id: string, range?: TimeRange): Promise<TraceSpan[]>;
   getSandboxMetrics(id: string, range?: TimeRange): Promise<MetricSeries[]>;
   getSandboxEvents(id: string, range?: TimeRange): Promise<EventRecord[]>;
   getSandboxTrace(id: string): Promise<TraceSpan[]>;

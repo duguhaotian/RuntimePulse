@@ -43,6 +43,38 @@ paths:
                 $ref: '#/components/schemas/NodeResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+  /nodes/{id}/metrics:
+    get:
+      summary: Get node metric series
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Node metric series list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricSeriesListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /nodes/{id}/events:
+    get:
+      summary: Get node events
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Node event list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /images:
     get:
       summary: List images
@@ -67,6 +99,55 @@ paths:
                 $ref: '#/components/schemas/ImageResponse'
         '404':
           $ref: '#/components/responses/NotFound'
+  /images/{id}/metrics:
+    get:
+      summary: Get image metric series
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Image metric series list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricSeriesListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /images/{id}/events:
+    get:
+      summary: Get image events
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Image event list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /images/{id}/trace:
+    get:
+      summary: Get image stage trace spans
+      description: Returns image-scoped observed stage spans, such as Docker image event observations or lower-level snapshotter/content stages when available.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+      responses:
+        '200':
+          description: Image trace span list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceSpanListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /sandboxes:
     get:
       summary: List sandboxes
@@ -86,6 +167,30 @@ paths:
       responses:
         '200':
           description: Sandbox list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SandboxListResponse'
+  /sandboxes/history:
+    get:
+      summary: List recently observed sandboxes
+      description: Returns current and recent historical sandbox rows so node-level lifecycle analysis can include short-lived sandboxes.
+      parameters:
+        - name: runtimeType
+          in: query
+          schema:
+            $ref: '#/components/schemas/RuntimeType'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/SandboxStatus'
+        - name: text
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Historical sandbox list
           content:
             application/json:
               schema:
@@ -287,7 +392,7 @@ components:
       enum: [info, warning, error]
     RuntimeGroup:
       type: string
-      enum: [cpu, memory, io, network, runtime, startup, pressure]
+      enum: [cpu, memory, io, network, runtime, startup, pressure, lifecycle, collector]
     NodeStatus:
       type: string
       enum: [ready, degraded, unknown]
@@ -370,6 +475,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ImageDownloadStep'
+        attributes:
+          $ref: '#/components/schemas/JsonObject'
     Sandbox:
       type: object
       required: [id, clusterId, nodeId, namespace, workloadId, workloadName, imageId, imageRef, runtimeType, runtimeVersion, status, createdAt, startupDurationMs, cpuAvg, memoryPeakBytes, eventCount, labels, attributes]
@@ -417,9 +524,13 @@ components:
         group:
           $ref: '#/components/schemas/RuntimeGroup'
         sandboxId: { type: string }
+        imageId: { type: string }
         nodeId: { type: string }
         runtimeType:
           $ref: '#/components/schemas/RuntimeType'
+        attributes:
+          type: object
+          additionalProperties: true
         points:
           type: array
           items:
@@ -435,6 +546,7 @@ components:
         eventType: { type: string }
         eventName: { type: string }
         sandboxId: { type: string }
+        imageId: { type: string }
         nodeId: { type: string }
         runtimeType:
           $ref: '#/components/schemas/RuntimeType'
@@ -445,12 +557,13 @@ components:
           $ref: '#/components/schemas/JsonObject'
     TraceSpan:
       type: object
-      required: [traceId, spanId, sandboxId, spanName, startTime, endTime, durationMs, status, attributes]
+      required: [traceId, spanId, spanName, startTime, endTime, durationMs, status, attributes]
       properties:
         traceId: { type: string }
         spanId: { type: string }
         parentSpanId: { type: string }
         sandboxId: { type: string }
+        imageId: { type: string }
         spanName: { type: string }
         startTime: { type: string, format: date-time }
         endTime: { type: string, format: date-time }
@@ -754,6 +867,7 @@ components:
         eventType: { type: string }
         eventName: { type: string }
         sandboxId: { type: string }
+        imageId: { type: string }
         nodeId: { type: string }
         runtimeType:
           $ref: '#/components/schemas/RuntimeType'
@@ -768,6 +882,7 @@ components:
         spanId: { type: string }
         parentSpanId: { type: string }
         sandboxId: { type: string }
+        imageId: { type: string }
         spanName: { type: string }
         startTime: { type: string, format: date-time }
         endTime: { type: string, format: date-time }

@@ -10,9 +10,14 @@ use collectors::host_agent::run_host_agent;
 use collectors::outlet::batcher::collect_once;
 use collectors::outlet::http_ingress::start_local_report_server;
 use collectors::outlet::sender::send_local_report;
+use collectors::sources::image::cache::ImageCachePlugin;
 use collectors::sources::image::download::output_from_event as image_output_from_event;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
+use collectors::sources::runtime::containerd::{
+    collect_containerd_inventory, output_from_runtime_event as containerd_output_from_event,
+    stream_containerd_events,
+};
 use collectors::sources::runtime::docker::events::{
     collect_recent_docker_events, empty_output, merge_output, stream_docker_events, DockerEvent,
 };
@@ -40,6 +45,10 @@ fn main() {
         run_host_cgroupfs()
     } else if env::args().any(|arg| arg == "host-docker") {
         run_host_docker()
+    } else if env::args().any(|arg| arg == "host-containerd") {
+        run_host_containerd()
+    } else if env::args().any(|arg| arg == "host-containerd-events") {
+        run_host_containerd_events()
     } else if env::args().any(|arg| arg == "host-docker-events") {
         run_host_docker_events()
     } else if env::args().any(|arg| arg == "host-docker-cgroupfs") {
@@ -278,6 +287,60 @@ fn run_host_docker() -> Result<()> {
     Ok(())
 }
 
+fn run_host_containerd() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let client = Client::new();
+
+    loop {
+        let started = Instant::now();
+        let now = Utc::now();
+        match collect_containerd_inventory(now, &config) {
+            Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
+                Ok(()) => println!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "message": "host_containerd_report_accepted",
+                        "url": config.local_report_url,
+                        "sandboxes": output.metadata.sandboxes.len(),
+                        "images": output.metadata.images.len(),
+                        "events": output.events.len(),
+                    })
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "host_containerd_report_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            },
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "message": "host_containerd_collect_failed",
+                    "error": error.to_string(),
+                })
+            ),
+        }
+
+        if config.once {
+            break;
+        }
+
+        let elapsed = started.elapsed();
+        if config.interval > elapsed {
+            thread::sleep(config.interval - elapsed);
+        }
+    }
+
+    Ok(())
+}
+
 fn run_host_docker_events() -> Result<()> {
     let mut config = CollectorConfig::from_env()?;
     config.collection_scope = "host".to_string();
@@ -330,6 +393,31 @@ fn run_host_docker_events() -> Result<()> {
             json!({
                 "level": "info",
                 "message": "host_docker_event_report_accepted",
+                "url": config.local_report_url,
+                "sandboxes": output.metadata.sandboxes.len(),
+                "images": output.metadata.images.len(),
+                "events": output.events.len(),
+            })
+        );
+        Ok(())
+    })
+}
+
+fn run_host_containerd_events() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let client = Client::new();
+    stream_containerd_events(&config, |event| {
+        let Some(output) = containerd_output_from_event(event, &config)? else {
+            return Ok(());
+        };
+        send_local_report(&client, &config.local_report_url, &output)?;
+        println!(
+            "{}",
+            json!({
+                "level": "info",
+                "message": "host_containerd_event_report_accepted",
                 "url": config.local_report_url,
                 "sandboxes": output.metadata.sandboxes.len(),
                 "images": output.metadata.images.len(),
@@ -409,28 +497,37 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
     for name in &config.plugins {
         match name.as_str() {
             "procfs" => plugins.push(Box::new(ProcfsPlugin::new())),
+            "image-cache" | "snapshotter-cache" => plugins.push(Box::new(ImageCachePlugin::new(
+                config.image_cache_report_path.clone(),
+            ))),
             "command" => {
-                let command = config.command_plugin.clone().ok_or_else(|| {
-                    CollectorError::Config(
-                        "command plugin requires RUNTIMEPULSE_COMMAND_PLUGIN_CMD".to_string(),
-                    )
-                })?;
-                plugins.push(Box::new(CommandPlugin {
-                    name: command.name,
-                    command: command.command,
-                }));
+                if config.command_plugins.is_empty() {
+                    return Err(CollectorError::Config(
+                        "command plugin requires RUNTIMEPULSE_COMMAND_PLUGIN_CMD or indexed RUNTIMEPULSE_COMMAND_PLUGIN_<N>_CMD".to_string(),
+                    ));
+                }
+                for command in &config.command_plugins {
+                    plugins.push(Box::new(CommandPlugin {
+                        name: command.name.clone(),
+                        command: command.command.clone(),
+                        timeout: command.timeout,
+                    }));
+                }
             }
             "http" => {
-                let http = config.http_plugin.clone().ok_or_else(|| {
-                    CollectorError::Config(
-                        "http plugin requires RUNTIMEPULSE_HTTP_PLUGIN_URL".to_string(),
-                    )
-                })?;
-                plugins.push(Box::new(HttpPlugin {
-                    name: http.name,
-                    url: http.url,
-                    client: Client::new(),
-                }));
+                if config.http_plugins.is_empty() {
+                    return Err(CollectorError::Config(
+                        "http plugin requires RUNTIMEPULSE_HTTP_PLUGIN_URL or indexed RUNTIMEPULSE_HTTP_PLUGIN_<N>_URL".to_string(),
+                    ));
+                }
+                for http in &config.http_plugins {
+                    plugins.push(Box::new(HttpPlugin {
+                        name: http.name.clone(),
+                        url: http.url.clone(),
+                        client: Client::new(),
+                        timeout: http.timeout,
+                    }));
+                }
             }
             other => {
                 return Err(CollectorError::Config(format!(

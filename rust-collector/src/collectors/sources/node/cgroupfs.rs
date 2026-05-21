@@ -144,6 +144,7 @@ impl CollectorPlugin for CgroupfsPlugin {
             source: format!("runtimepulse-rust-collector/{}/cgroupfs", config.node_id),
             attributes,
             sandbox_id: None,
+            image_id: None,
             node_id: Some(config.node_id.clone()),
             runtime_type: None,
             reason: None,

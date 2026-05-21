@@ -9,6 +9,8 @@ type MetricChartProps = {
   height?: number;
   markerTime?: string;
   markerLabel?: string;
+  subtitle?: string;
+  title?: string;
   pinned?: boolean;
   onTogglePin?: () => void;
   selectable?: boolean;
@@ -28,6 +30,8 @@ export function MetricChart({
   selectedRange,
   series,
   stacked = false,
+  subtitle,
+  title,
 }: MetricChartProps) {
   const chartRef = useRef<HTMLDivElement>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
@@ -121,8 +125,8 @@ export function MetricChart({
     >
       <div className="chart-header">
         <div>
-          <h3>{firstSeries?.group.toUpperCase() ?? 'Metrics'}</h3>
-          <p>{series.map((item) => item.label).join(' · ')}</p>
+          <h3>{title ?? firstSeries?.group.toUpperCase() ?? 'Metrics'}</h3>
+          <p>{subtitle ?? series.map((item) => item.label).join(' · ')}</p>
         </div>
         <div className="chart-header-actions">
           {onTogglePin && <button className={pinned ? 'active' : ''} onClick={onTogglePin}>{pinned ? 'Pinned' : 'Pin'}</button>}

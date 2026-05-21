@@ -111,23 +111,29 @@ export function SandboxExplorer({ api, onSelectNode }: ClusterExplorerProps) {
                 <div className="table-titlebar">
                   <div>
                     <strong>Nodes</strong>
-                    <span>点击节点查看节点详情</span>
+                    <span>点击节点查看节点详情；运行状态列为动态数据，内核和容量列为静态数据。</span>
                   </div>
-                  <div className="column-pills">
-                    <span>dynamic</span>
-                    <span>static</span>
+                  <div className="node-data-legend" aria-label="Node data groups">
+                    <span className="identity">Identity</span>
+                    <span className="dynamic">Dynamic runtime</span>
+                    <span className="static">Static host</span>
                   </div>
                 </div>
-                <table>
+                <table className="node-classified-table">
                   <thead>
+                    <tr className="node-column-groups">
+                      <th className="node-group-identity" colSpan={1}>Node</th>
+                      <th className="node-group-dynamic" colSpan={4}>Dynamic runtime data</th>
+                      <th className="node-group-static" colSpan={2}>Static host data</th>
+                    </tr>
                     <tr>
-                      <th>Node</th>
-                      <th>Status</th>
-                      <th>Sandboxes</th>
-                      <th>CPU Avg</th>
-                      <th>Avg Startup</th>
-                      <th>Kernel</th>
-                      <th>Capacity</th>
+                      <th className="node-col-identity">Node</th>
+                      <th className="node-col-dynamic node-col-start">Status</th>
+                      <th className="node-col-dynamic">Sandboxes</th>
+                      <th className="node-col-dynamic">CPU Avg</th>
+                      <th className="node-col-dynamic">Avg Startup</th>
+                      <th className="node-col-static node-col-start">Kernel</th>
+                      <th className="node-col-static">Capacity</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -135,13 +141,13 @@ export function SandboxExplorer({ api, onSelectNode }: ClusterExplorerProps) {
                       const nodeSandboxes = clusterSandboxes.filter((sandbox) => sandbox.nodeId === node.id);
                       return (
                         <tr className="clickable-row" key={node.id} onClick={() => onSelectNode(node.id)}>
-                          <td><strong>{node.name}</strong><small>{node.id}</small></td>
-                          <td><NodeStatus status={node.status} /></td>
-                          <td>{nodeSandboxes.length}</td>
-                          <td>{formatRatio(average(nodeSandboxes.map((sandbox) => sandbox.cpuAvg)))}</td>
-                          <td>{formatDuration(average(nodeSandboxes.map((sandbox) => sandbox.startupDurationMs)))}</td>
-                          <td>{node.kernelVersion}</td>
-                          <td>{node.cpuCores} cores / {formatBytes(node.memoryBytes)}</td>
+                          <td className="node-col-identity"><strong>{node.name}</strong><small>{node.id}</small></td>
+                          <td className="node-col-dynamic node-col-start"><NodeStatus status={node.status} /></td>
+                          <td className="node-col-dynamic">{nodeSandboxes.length}</td>
+                          <td className="node-col-dynamic">{formatRatio(average(nodeSandboxes.map((sandbox) => sandbox.cpuAvg)))}</td>
+                          <td className="node-col-dynamic">{formatDuration(average(nodeSandboxes.map((sandbox) => sandbox.startupDurationMs)))}</td>
+                          <td className="node-col-static node-col-start">{node.kernelVersion}</td>
+                          <td className="node-col-static">{node.cpuCores} cores / {formatBytes(node.memoryBytes)}</td>
                         </tr>
                       );
                     })}

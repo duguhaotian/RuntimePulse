@@ -100,6 +100,29 @@ pub fn node_metric(
     }
 }
 
+pub fn image_metric(
+    timestamp: &str,
+    name: &str,
+    value: f64,
+    unit: &str,
+    group: &str,
+    node_id: &str,
+    image_id: &str,
+) -> MetricSample {
+    MetricSample {
+        timestamp: timestamp.to_string(),
+        name: name.to_string(),
+        value,
+        unit: Some(unit.to_string()),
+        group: Some(group.to_string()),
+        sandbox_id: None,
+        node_id: Some(node_id.to_string()),
+        image_id: Some(image_id.to_string()),
+        runtime_type: None,
+        attributes: None,
+    }
+}
+
 fn timestamp(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
 }

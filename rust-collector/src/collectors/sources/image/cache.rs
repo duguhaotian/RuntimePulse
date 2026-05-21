@@ -1,3 +1,374 @@
-//! Image cache source placeholder.
+//! Snapshotter image cache source.
 //!
-//! Tracks image cache behavior such as lazy-loading block cache hits.
+//! This source does not infer cache behavior from Docker metadata. It reads
+//! RuntimePulse-shaped reports emitted by real snapshotter/cache tools, such as
+//! nydus, stargz, overlaybd, or a local cache exporter.
+
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
+
+use crate::collectors::core::config::CollectorConfig;
+use crate::collectors::core::error::Result;
+use crate::collectors::core::model::{EventRecord, MetricSample, PluginOutput, TraceSpan};
+use crate::collectors::core::plugin::CollectorPlugin;
+use crate::collectors::core::report::image_metric;
+use crate::collectors::sources::image::layer::docker_image_id_from_ref_or_digest;
+
+#[derive(Default)]
+pub struct ImageCachePlugin {
+    path: Option<PathBuf>,
+    seen_event_ids: HashSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapshotterReport {
+    image_id: Option<String>,
+    image_ref: Option<String>,
+    image_digest: Option<String>,
+    loading_mode: Option<String>,
+    size_bytes: Option<u64>,
+    layer_count: Option<u64>,
+    timestamp: Option<String>,
+    snapshotter: Option<String>,
+    cache: Option<CacheReport>,
+    download_timeline: Option<Vec<DownloadStepReport>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheReport {
+    requested_blocks: Option<u64>,
+    hit_blocks: Option<u64>,
+    local_read_bytes: Option<u64>,
+    remote_read_bytes: Option<u64>,
+    block_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadStepReport {
+    id: Option<String>,
+    name: String,
+    phase: String,
+    duration_ms: f64,
+    bytes: Option<u64>,
+    timestamp: Option<String>,
+    detail: Option<String>,
+}
+
+impl ImageCachePlugin {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self {
+            path,
+            seen_event_ids: HashSet::new(),
+        }
+    }
+}
+
+impl CollectorPlugin for ImageCachePlugin {
+    fn name(&self) -> &str {
+        "image-cache"
+    }
+
+    fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
+        let Some(path) = self.path.clone() else {
+            return Ok(PluginOutput::default());
+        };
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(PluginOutput::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let reports = parse_reports(&content)?;
+        let mut output = PluginOutput::default();
+        let fallback_timestamp = timestamp(now);
+
+        for report in reports {
+            let timestamp = report.timestamp.as_deref().unwrap_or(&fallback_timestamp);
+            let image_ref = report
+                .image_ref
+                .clone()
+                .unwrap_or_else(|| "snapshotter/unknown:latest".to_string());
+            let image_digest = report
+                .image_digest
+                .clone()
+                .unwrap_or_else(|| format!("collector:{}", sanitize_id(&image_ref)));
+            let image_id = report
+                .image_id
+                .clone()
+                .unwrap_or_else(|| docker_image_id_from_ref_or_digest(&image_ref, &image_digest));
+            let snapshotter = report.snapshotter.as_deref().unwrap_or("snapshotter");
+            let timeline = report
+                .download_timeline
+                .as_deref()
+                .map(|steps| timeline_rows(&image_id, steps))
+                .unwrap_or_default();
+
+            output.metadata.images.push(json!({
+                "id": image_id,
+                "ref": image_ref,
+                "digest": image_digest,
+                "loadingMode": report.loading_mode.unwrap_or_else(|| "lazy".to_string()),
+                "sizeBytes": report.size_bytes.unwrap_or(0),
+                "layerCount": report.layer_count.unwrap_or(0),
+                "downloadTimeline": timeline,
+                "attributes": {
+                    "collector.plugin": "image-cache",
+                    "snapshotter": snapshotter,
+                    "snapshotter.reportPath": path.display().to_string(),
+                }
+            }));
+
+            if let Some(cache) = &report.cache {
+                output.metrics.extend(cache_metrics(
+                    timestamp,
+                    &config.node_id,
+                    &image_id,
+                    snapshotter,
+                    cache,
+                ));
+            }
+
+            if let Some(steps) = &report.download_timeline {
+                for span in timeline_spans(timestamp, &image_id, &image_ref, snapshotter, steps) {
+                    let event_id = format!("{}-event", span.span_id);
+                    if self.seen_event_ids.insert(event_id.clone()) {
+                        output.events.push(timeline_event(
+                            &event_id,
+                            timestamp,
+                            &config.node_id,
+                            &image_id,
+                            &image_ref,
+                            snapshotter,
+                            &span,
+                        ));
+                    }
+                    output.traces.push(span);
+                }
+            }
+        }
+
+        if !output.metadata.images.is_empty() {
+            output.metadata.clusters.push(json!({
+                "id": config.cluster_id,
+                "name": config.cluster_id,
+                "environment": "collector"
+            }));
+            output.metadata.nodes.push(json!({
+                "id": config.node_id,
+                "clusterId": config.cluster_id,
+                "name": config.node_id,
+                "status": "ready",
+                "labels": {
+                    "collector": "runtimepulse-rust-collector",
+                    "plugin": "image-cache",
+                    "scope": config.collection_scope,
+                }
+            }));
+        }
+
+        Ok(output)
+    }
+}
+
+fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.starts_with('[') {
+        return Ok(serde_json::from_str(trimmed)?);
+    }
+    if trimmed.starts_with('{') {
+        return Ok(vec![serde_json::from_str(trimmed)?]);
+    }
+
+    let mut reports = Vec::new();
+    for line in trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        reports.push(serde_json::from_str(line)?);
+    }
+    Ok(reports)
+}
+
+fn cache_metrics(
+    timestamp: &str,
+    node_id: &str,
+    image_id: &str,
+    snapshotter: &str,
+    cache: &CacheReport,
+) -> Vec<MetricSample> {
+    let requested = cache.requested_blocks.unwrap_or(0);
+    let hit = cache.hit_blocks.unwrap_or(0);
+    let hit_ratio = if requested == 0 {
+        0.0
+    } else {
+        hit as f64 / requested as f64
+    };
+
+    [
+        ("image.lazy.cache_hit_ratio", hit_ratio, "ratio"),
+        (
+            "image.lazy.remote_read_bytes",
+            cache.remote_read_bytes.unwrap_or(0) as f64,
+            "bytes",
+        ),
+        (
+            "image.lazy.local_read_bytes",
+            cache.local_read_bytes.unwrap_or(0) as f64,
+            "bytes",
+        ),
+        ("image.lazy.requested_blocks", requested as f64, "blocks"),
+        ("image.lazy.hit_blocks", hit as f64, "blocks"),
+        (
+            "image.lazy.block_size_bytes",
+            cache.block_size_bytes.unwrap_or(0) as f64,
+            "bytes",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value, unit)| {
+        let mut metric = image_metric(timestamp, name, value, unit, "io", node_id, image_id);
+        metric.attributes = Some(Map::from_iter([
+            ("collector.source".to_string(), json!("image-cache")),
+            ("snapshotter".to_string(), json!(snapshotter)),
+        ]));
+        metric
+    })
+    .collect()
+}
+
+fn timeline_rows(image_id: &str, steps: &[DownloadStepReport]) -> Vec<Value> {
+    steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            json!({
+                "id": step.id.clone().unwrap_or_else(|| format!("{}-{}-{}", image_id, sanitize_id(&step.phase), index)),
+                "name": step.name,
+                "phase": step.phase,
+                "durationMs": step.duration_ms,
+                "bytes": step.bytes,
+                "timestamp": step.timestamp,
+                "detail": step.detail.clone().unwrap_or_else(|| format!("{} reported by snapshotter exporter", step.name)),
+            })
+        })
+        .collect()
+}
+
+fn timeline_spans(
+    fallback_timestamp: &str,
+    image_id: &str,
+    image_ref: &str,
+    snapshotter: &str,
+    steps: &[DownloadStepReport],
+) -> Vec<TraceSpan> {
+    steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let start_time = step.timestamp.as_deref().unwrap_or(fallback_timestamp);
+            let end_time =
+                end_time(start_time, step.duration_ms).unwrap_or_else(|| start_time.to_string());
+            let phase = sanitize_id(&step.phase);
+            let span_id = step
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("image-cache-{image_id}-{phase}-{index}"));
+            let mut attributes = Map::new();
+            attributes.insert("plugin".to_string(), json!("image-cache"));
+            attributes.insert("image.id".to_string(), json!(image_id));
+            attributes.insert("image.ref".to_string(), json!(image_ref));
+            attributes.insert("image.phase".to_string(), json!(step.phase));
+            attributes.insert("snapshotter".to_string(), json!(snapshotter));
+            if let Some(bytes) = step.bytes {
+                attributes.insert("image.bytes".to_string(), json!(bytes));
+            }
+
+            TraceSpan {
+                trace_id: format!("image-cache-{image_id}"),
+                span_id,
+                span_name: format!("image.{}", step.phase),
+                start_time: start_time.to_string(),
+                end_time,
+                duration_ms: step.duration_ms,
+                status: "ok".to_string(),
+                attributes,
+                sandbox_id: None,
+                image_id: Some(image_id.to_string()),
+                parent_span_id: None,
+            }
+        })
+        .collect()
+}
+
+fn timeline_event(
+    id: &str,
+    timestamp: &str,
+    node_id: &str,
+    image_id: &str,
+    image_ref: &str,
+    snapshotter: &str,
+    span: &TraceSpan,
+) -> EventRecord {
+    let mut attributes = span.attributes.clone();
+    attributes.insert("snapshotter".to_string(), json!(snapshotter));
+
+    EventRecord {
+        id: id.to_string(),
+        timestamp: timestamp.to_string(),
+        severity: "info".to_string(),
+        event_type: "image".to_string(),
+        event_name: span.span_name.clone(),
+        message: format!(
+            "{} reported {} for {}.",
+            snapshotter, span.span_name, image_ref
+        ),
+        source: format!("runtimepulse-rust-collector/{node_id}/image-cache"),
+        attributes,
+        sandbox_id: None,
+        image_id: Some(image_id.to_string()),
+        node_id: Some(node_id.to_string()),
+        runtime_type: None,
+        reason: None,
+    }
+}
+
+fn end_time(start_time: &str, duration_ms: f64) -> Option<String> {
+    let start = DateTime::parse_from_rfc3339(start_time)
+        .ok()?
+        .with_timezone(&Utc);
+    Some(timestamp(
+        start + chrono::Duration::milliseconds(duration_ms.max(0.0).round() as i64),
+    ))
+}
+
+fn sanitize_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() {
+                char.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn timestamp(time: DateTime<Utc>) -> String {
+    time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
