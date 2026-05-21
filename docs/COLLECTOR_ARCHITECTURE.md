@@ -82,12 +82,18 @@ sampling reads only cgroups resolved from that active set.
 
 `containerd-inventory` and `containerd-events` are optional host-agent sources.
 They use containerd's Rust client over the host Unix socket and are intended for
-root/systemd deployment. The event source owns one containerd event
-subscription, then dispatches container/task lifecycle updates into RuntimePulse
-sandbox metadata and event records, and derives `container.startup` trace spans
-from create/task-start pairs. It also turns content and snapshot events into
-first-pass image timeline observations, without pretending that generic
-containerd events contain full registry pull sub-stage timings.
+root/systemd deployment. Kubernetes collection should use the containerd
+`k8s.io` namespace as its primary runtime path; CRI/Kubelet event ingestion is
+an enrichment stream for lifecycle context, not the main inventory source. The
+event source owns one containerd event subscription, then dispatches
+container/task lifecycle updates into RuntimePulse sandbox metadata and event
+records, and derives `container.startup` trace spans from create/task-start
+pairs. It also turns content and snapshot events into first-pass image timeline
+observations, without pretending that generic containerd events contain full
+registry pull sub-stage timings.
+
+Docker sources are retained for single-node and local validation scenarios.
+They are not the preferred Kubernetes path.
 
 `command` and `http` adapters can also run inside host-agent for host-visible
 third-party tools. They must emit RuntimePulse partial output and are enqueued
@@ -277,7 +283,7 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 
 | Current command/plugin | Target source ownership |
 | --- | --- |
-| `host-agent` | systemd-friendly host process that runs configurable host collectors, Docker event dispatch, image-cache report ingestion, active-set sandbox sampling, and queue-backed sender |
+| `host-agent` | systemd-friendly host process that runs configurable host collectors, containerd/CRI dispatch for Kubernetes, Docker dispatch for single-node use, image-cache report ingestion, active-set sandbox sampling, and queue-backed sender |
 | `host-procfs` | `sources/node/procfs.rs` plus PSI support |
 | `host-cgroupfs` | `sources/node/cgroupfs.rs` |
 | `host-docker` | `sources/runtime/docker/inventory.rs` |
@@ -301,8 +307,10 @@ starting each source manually.
 
 ## Next Steps
 
-1. Add kubelet/CRI event sources. First CRI JSONL command ingestion is in place; next step is a native CRI client once runtime socket targets are finalized.
-2. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place.
-3. Add gVisor, Kata, and Firecracker sandbox sources.
-4. Add eBPF/perf profiling sources and profile artifact ingestion.
-6. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
+1. Complete the Kubernetes path on containerd: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
+2. Add containerd/Kubernetes sandbox metric resolution, so cgroup sampling is driven by containerd task metadata instead of Docker PID inventory.
+3. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place.
+4. Add Kata and Firecracker sandbox sources after the containerd/Kubernetes path is stable.
+5. Add eBPF/perf profiling sources and profile artifact ingestion.
+6. Add gVisor-specific sources last, after the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
+7. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.

@@ -154,6 +154,7 @@ Implemented:
 - containerd inventory enriches existing image rows from the content store when available, deriving layer-like content entries, byte totals, and layer counts without reading blob payloads.
 - Rust host-side containerd event streaming is available as optional `containerd-events`/`host-containerd-events`, using one runtime-owned subscription and converting container/task lifecycle events into RuntimePulse sandbox updates, `container.startup` trace spans, plus first-pass content/snapshot image timeline observations.
 - Rust host-side CRI/Kubelet event streaming is available as optional `kubelet-events`/`host-kubelet-events`, using a configurable JSONL command such as `crictl events --output json` and converting Kubernetes container lifecycle events into RuntimePulse sandbox updates.
+- P1 runtime priority is Kubernetes on containerd first. Docker remains the single-node/local validation path, while CRI/Kubelet event ingestion enriches Kubernetes lifecycle context around containerd inventory and events.
 - The host-agent default source set is `procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs`; Docker sandbox cgroupfs sampling is driven by startup inventory plus lifecycle-maintained active container ids, not broad cgroup scanning.
 - Host-agent self-observability reports node-level metrics for queue depth, enqueued/dropped reports, collector errors, sender success/failure counters, and runtime event stream health.
 - Host-agent sender persists failed batches as local JSON spool files and replays them before later in-memory batches after the outlet recovers.
@@ -167,13 +168,14 @@ Collector candidates:
 - Cgroup metrics collector.
 - Host-agent queue-backed scheduler/sender that runs host plugins in one process and keeps collector threads off the synchronous HTTP path. First implementation, self-observability, and local spool replay are in place.
 - Third-party collector adapters. `command` and `http` adapters work in the outlet path and can also be enabled as host-agent sources for host-visible tools.
-- Docker/containerd event collector. Docker container lifecycle, Docker image event dispatch, and Docker/containerd startup trace spans are implemented; containerd inventory plus first-pass container/task/content/snapshot event streaming are available as optional host-agent sources.
-- Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, lifecycle event streaming, and stopped-container cleanup are integrated into `host-agent`.
+- Kubernetes/containerd event collector. Containerd inventory and container/task/content/snapshot event streaming are the P1 path for Kubernetes, especially the `k8s.io` namespace. CRI/Kubelet events are used as lifecycle enrichment.
+- Docker event collector. Docker container lifecycle, Docker image event dispatch, and Docker startup trace spans are implemented and kept as the single-node/local validation path.
+- Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, lifecycle event streaming, and stopped-container cleanup are integrated into `host-agent`; the next P1 work is containerd/Kubernetes task-driven sampling.
 - image metadata and cache collector. Docker image metadata/layer breakdown and containerd content-store image enrichment are implemented; Docker image pull/tag/delete and containerd content/snapshot timeline observations come from runtime event dispatch; precise pull sub-stage durations and lazy block-cache hit curves are ingested from real snapshotter/exporter JSON reports through `image-cache`.
-- gVisor collector.
 - Kata collector.
 - Firecracker collector.
 - eBPF/profile collector.
+- gVisor collector. Defer until the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
 
 Collector output should map to the same domain concepts already used by the frontend:
 
