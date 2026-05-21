@@ -39,6 +39,9 @@ use crate::collectors::sources::runtime::docker::events::{
 };
 use crate::collectors::sources::runtime::docker::inventory::collect_docker_inventory;
 use crate::collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
+use crate::collectors::sources::runtime::kubelet::{
+    output_from_cri_event, stream_cri_events, CriEvent,
+};
 use crate::collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
 use crate::collectors::sources::sandbox::manager::{
     active_docker_ids_snapshot, apply_lifecycle_output, docker_active_ids_from_inventory,
@@ -69,6 +72,7 @@ struct HostAgentSources {
     containerd_inventory: bool,
     docker_events: bool,
     containerd_events: bool,
+    kubelet_events: bool,
     docker_sandbox_cgroupfs: bool,
     image_cache: bool,
     command: bool,
@@ -172,6 +176,17 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         None
     };
 
+    let kubelet_event_thread = if !config.once && sources.kubelet_events {
+        let event_tx = tx.clone();
+        let event_config = config.clone();
+        let event_stats = Arc::clone(&stats);
+        Some(thread::spawn(move || {
+            run_kubelet_event_worker(event_config, event_tx, event_stats)
+        }))
+    } else {
+        None
+    };
+
     let mut procfs = ProcfsPlugin::new();
     let mut psi = PsiPlugin::new();
     let mut cgroupfs = CgroupfsPlugin::new(config.cgroup_root.clone(), config.cgroup_max_entries);
@@ -214,6 +229,14 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
                     Err(CollectorError::Plugin {
                         plugin: "host-agent".to_string(),
                         message: "host-agent containerd event thread panicked".to_string(),
+                    })
+                })?;
+            }
+            if let Some(event_thread) = kubelet_event_thread {
+                event_thread.join().unwrap_or_else(|_| {
+                    Err(CollectorError::Plugin {
+                        plugin: "host-agent".to_string(),
+                        message: "host-agent kubelet event thread panicked".to_string(),
                     })
                 })?;
             }
@@ -377,6 +400,26 @@ fn run_containerd_event_worker(
     mark_event_stream_running(&stats, "containerd-events", false);
     if result.is_err() {
         mark_event_stream_error(&stats, "containerd-events");
+    }
+    result
+}
+
+fn run_kubelet_event_worker(
+    config: CollectorConfig,
+    tx: SyncSender<PluginOutput>,
+    stats: Arc<HostAgentStats>,
+) -> Result<()> {
+    mark_event_stream_running(&stats, "kubelet-events", true);
+    let result = stream_cri_events(&config, |event| {
+        mark_event_stream_event(&stats, "kubelet-events", cri_event_timestamp(&event));
+        if let Some(output) = output_from_cri_event(event, &config) {
+            enqueue_report("kubelet-events", &tx, output, &stats);
+        }
+        Ok(())
+    });
+    mark_event_stream_running(&stats, "kubelet-events", false);
+    if result.is_err() {
+        mark_event_stream_error(&stats, "kubelet-events");
     }
     result
 }
@@ -734,6 +777,15 @@ fn initialize_event_stream_stats(stats: &HostAgentStats, sources: &HostAgentSour
     rows.push(HostAgentEventStreamStat {
         stream: "containerd-events".to_string(),
         enabled: sources.containerd_events,
+        running: false,
+        events_total: 0,
+        errors_total: 0,
+        restarts_total: 0,
+        last_event_at: None,
+    });
+    rows.push(HostAgentEventStreamStat {
+        stream: "kubelet-events".to_string(),
+        enabled: sources.kubelet_events,
         running: false,
         events_total: 0,
         errors_total: 0,
@@ -1388,6 +1440,22 @@ fn containerd_event_timestamp(event: &ContainerdRuntimeEvent) -> DateTime<Utc> {
     }
 }
 
+fn cri_event_timestamp(event: &CriEvent) -> DateTime<Utc> {
+    if event.created_at > 1_000_000_000_000_000_000 {
+        let secs = event.created_at / 1_000_000_000;
+        let nanos = (event.created_at % 1_000_000_000) as u32;
+        if let Some(time) = DateTime::from_timestamp(secs, nanos) {
+            return time;
+        }
+    }
+    if event.created_at > 1_000_000_000 {
+        if let Some(time) = DateTime::from_timestamp(event.created_at, 0) {
+            return time;
+        }
+    }
+    Utc::now()
+}
+
 fn short_container_id(id: &str) -> String {
     id.chars().take(12).collect()
 }
@@ -1530,6 +1598,7 @@ impl HostAgentSources {
             containerd_inventory: false,
             docker_events: false,
             containerd_events: false,
+            kubelet_events: false,
             docker_sandbox_cgroupfs: false,
             image_cache: false,
             command: false,
@@ -1547,6 +1616,9 @@ impl HostAgentSources {
                 }
                 "docker-events" | "host-docker-events" => sources.docker_events = true,
                 "containerd-events" | "host-containerd-events" => sources.containerd_events = true,
+                "kubelet-events" | "host-kubelet-events" | "cri-events" | "host-cri-events" => {
+                    sources.kubelet_events = true;
+                }
                 "docker-sandbox-cgroupfs" | "host-docker-cgroupfs" | "sandbox-cgroupfs" => {
                     sources.docker_sandbox_cgroupfs = true;
                 }
@@ -1592,6 +1664,9 @@ impl HostAgentSources {
         }
         if self.containerd_events {
             names.push("containerd-events");
+        }
+        if self.kubelet_events {
+            names.push("kubelet-events");
         }
         if self.docker_sandbox_cgroupfs {
             names.push("docker-sandbox-cgroupfs");

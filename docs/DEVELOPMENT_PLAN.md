@@ -153,6 +153,7 @@ Implemented:
 - Rust host-side containerd inventory source is available as optional `containerd-inventory`/`host-containerd`, using containerd's gRPC API over the host Unix socket.
 - containerd inventory enriches existing image rows from the content store when available, deriving layer-like content entries, byte totals, and layer counts without reading blob payloads.
 - Rust host-side containerd event streaming is available as optional `containerd-events`/`host-containerd-events`, using one runtime-owned subscription and converting container/task lifecycle events into RuntimePulse sandbox updates, `container.startup` trace spans, plus first-pass content/snapshot image timeline observations.
+- Rust host-side CRI/Kubelet event streaming is available as optional `kubelet-events`/`host-kubelet-events`, using a configurable JSONL command such as `crictl events --output json` and converting Kubernetes container lifecycle events into RuntimePulse sandbox updates.
 - The host-agent default source set is `procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs`; Docker sandbox cgroupfs sampling is driven by startup inventory plus lifecycle-maintained active container ids, not broad cgroup scanning.
 - Host-agent self-observability reports node-level metrics for queue depth, enqueued/dropped reports, collector errors, sender success/failure counters, and runtime event stream health.
 - Host-agent sender persists failed batches as local JSON spool files and replays them before later in-memory batches after the outlet recovers.

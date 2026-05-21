@@ -301,7 +301,7 @@ starting each source manually.
 
 ## Next Steps
 
-1. Add kubelet/CRI event sources.
+1. Add kubelet/CRI event sources. First CRI JSONL command ingestion is in place; next step is a native CRI client once runtime socket targets are finalized.
 2. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place.
 3. Add gVisor, Kata, and Firecracker sandbox sources.
 4. Add eBPF/perf profiling sources and profile artifact ingestion.

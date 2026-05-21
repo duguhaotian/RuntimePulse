@@ -31,6 +31,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-cgroupfs`: runs on the host, reads only host/root cgroup v2 CPU, memory, IO, and process counts from `/sys/fs/cgroup`, and reports node-level metrics.
 - `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP.
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet.
+- `host-kubelet-events`: runs on the host, follows CRI/Kubelet lifecycle events from a configurable JSONL command such as `crictl events --output json`, and pushes Kubernetes sandbox lifecycle records to the outlet.
 - `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, network, and process metrics without scanning the whole cgroup tree.
 - `host-image-cache`: runs on the host, reads a RuntimePulse JSON/JSONL report emitted by a real snapshotter or image-cache exporter, and reports lazy block-cache metrics plus precise image stage spans.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
@@ -41,6 +42,22 @@ cd rust-collector
 RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
 RUNTIMEPULSE_LOCAL_REPORT_URL=http://localhost:9091/api/local/ingest \
 cargo run -- host-procfs
+```
+
+CRI/Kubelet event collection can be enabled through the unified host-agent:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=kubelet-events \
+RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
+runtimepulse-collector host-agent
+```
+
+For local validation without a Kubernetes node, stream the example JSONL file:
+
+```bash
+RUNTIMEPULSE_COLLECTOR_ONCE=true \
+RUNTIMEPULSE_CRI_EVENTS_CMD='cat rust-collector/examples/cri-events.jsonl' \
+cargo run --manifest-path rust-collector/Cargo.toml -- host-kubelet-events
 ```
 
 ```bash

@@ -23,6 +23,7 @@ use collectors::sources::runtime::docker::events::{
 };
 use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
 use collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
+use collectors::sources::runtime::kubelet::{output_from_cri_event, stream_cri_events};
 use collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
 use collectors::sources::sandbox::manager::run_docker_sandbox_agent;
 use reqwest::blocking::Client;
@@ -49,6 +50,8 @@ fn main() {
         run_host_containerd()
     } else if env::args().any(|arg| arg == "host-containerd-events") {
         run_host_containerd_events()
+    } else if env::args().any(|arg| arg == "host-kubelet-events") {
+        run_host_kubelet_events()
     } else if env::args().any(|arg| arg == "host-docker-events") {
         run_host_docker_events()
     } else if env::args().any(|arg| arg == "host-docker-cgroupfs") {
@@ -418,6 +421,31 @@ fn run_host_containerd_events() -> Result<()> {
             json!({
                 "level": "info",
                 "message": "host_containerd_event_report_accepted",
+                "url": config.local_report_url,
+                "sandboxes": output.metadata.sandboxes.len(),
+                "images": output.metadata.images.len(),
+                "events": output.events.len(),
+            })
+        );
+        Ok(())
+    })
+}
+
+fn run_host_kubelet_events() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let client = Client::new();
+    stream_cri_events(&config, |event| {
+        let Some(output) = output_from_cri_event(event, &config) else {
+            return Ok(());
+        };
+        send_local_report(&client, &config.local_report_url, &output)?;
+        println!(
+            "{}",
+            json!({
+                "level": "info",
+                "message": "host_kubelet_event_report_accepted",
                 "url": config.local_report_url,
                 "sandboxes": output.metadata.sandboxes.len(),
                 "images": output.metadata.images.len(),
