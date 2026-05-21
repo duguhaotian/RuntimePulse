@@ -25,6 +25,8 @@ pub struct DockerSandboxCgroupfsPlugin {
     last_cpu_usage_by_sandbox: HashMap<String, u64>,
     last_io_read_by_sandbox: HashMap<String, u64>,
     last_io_write_by_sandbox: HashMap<String, u64>,
+    last_network_rx_by_sandbox: HashMap<String, u64>,
+    last_network_tx_by_sandbox: HashMap<String, u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,6 +72,7 @@ struct SandboxCgroupTarget {
     image_ref: String,
     runtime_type: String,
     runtime_version: String,
+    pid: u64,
     cgroup_path: PathBuf,
     cgroup_relative_path: String,
 }
@@ -79,6 +82,8 @@ struct SandboxCgroupSample {
     memory_current: Option<u64>,
     io_read_bytes: Option<u64>,
     io_write_bytes: Option<u64>,
+    network_rx_bytes: Option<u64>,
+    network_tx_bytes: Option<u64>,
     process_count: Option<u64>,
 }
 
@@ -90,6 +95,8 @@ impl DockerSandboxCgroupfsPlugin {
             last_cpu_usage_by_sandbox: HashMap::new(),
             last_io_read_by_sandbox: HashMap::new(),
             last_io_write_by_sandbox: HashMap::new(),
+            last_network_rx_by_sandbox: HashMap::new(),
+            last_network_tx_by_sandbox: HashMap::new(),
         }
     }
 
@@ -136,7 +143,7 @@ fn collect_cgroup_targets(
     let mut metrics = Vec::new();
 
     for target in targets {
-        let Some(sample) = read_sandbox_cgroup_sample(&target.cgroup_path) else {
+        let Some(sample) = read_sandbox_cgroup_sample(&target.cgroup_path, target.pid) else {
             continue;
         };
         sampled_sandbox_ids.push(target.sandbox_id.clone());
@@ -247,6 +254,58 @@ fn collect_cgroup_targets(
             ));
         }
 
+        if let Some(rx_bytes) = sample.network_rx_bytes {
+            let previous = plugin
+                .last_network_rx_by_sandbox
+                .insert(target.sandbox_id.clone(), rx_bytes);
+            metrics.push(metric(
+                &ts,
+                "sandbox.network.rx_bytes",
+                rate(previous, rx_bytes, sample_interval),
+                "bytes/s",
+                "network",
+                &config.node_id,
+                &target.sandbox_id,
+                &target.runtime_type,
+            ));
+            metrics.push(metric(
+                &ts,
+                "sandbox.network.rx_total_bytes",
+                rx_bytes as f64,
+                "bytes",
+                "network",
+                &config.node_id,
+                &target.sandbox_id,
+                &target.runtime_type,
+            ));
+        }
+
+        if let Some(tx_bytes) = sample.network_tx_bytes {
+            let previous = plugin
+                .last_network_tx_by_sandbox
+                .insert(target.sandbox_id.clone(), tx_bytes);
+            metrics.push(metric(
+                &ts,
+                "sandbox.network.tx_bytes",
+                rate(previous, tx_bytes, sample_interval),
+                "bytes/s",
+                "network",
+                &config.node_id,
+                &target.sandbox_id,
+                &target.runtime_type,
+            ));
+            metrics.push(metric(
+                &ts,
+                "sandbox.network.tx_total_bytes",
+                tx_bytes as f64,
+                "bytes",
+                "network",
+                &config.node_id,
+                &target.sandbox_id,
+                &target.runtime_type,
+            ));
+        }
+
         if let Some(process_count) = sample.process_count {
             metrics.push(metric(
                 &ts,
@@ -265,6 +324,8 @@ fn collect_cgroup_targets(
     retain_seen(&mut plugin.last_cpu_usage_by_sandbox, &sandboxes);
     retain_seen(&mut plugin.last_io_read_by_sandbox, &sandboxes);
     retain_seen(&mut plugin.last_io_write_by_sandbox, &sandboxes);
+    retain_seen(&mut plugin.last_network_rx_by_sandbox, &sandboxes);
+    retain_seen(&mut plugin.last_network_tx_by_sandbox, &sandboxes);
 
     let mut attributes = Map::new();
     attributes.insert("plugin".to_string(), json!("docker-sandbox-cgroupfs"));
@@ -363,6 +424,7 @@ fn docker_cgroup_targets_for_ids(root: &Path, ids: &[String]) -> Result<Vec<Sand
             image_ref,
             runtime_type,
             runtime_version: container.host_config.runtime,
+            pid: container.state.pid,
             cgroup_path,
             cgroup_relative_path,
         });
@@ -441,13 +503,16 @@ fn resolve_pid_cgroup_path(root: &Path, pid: u64) -> Option<(PathBuf, String)> {
     }
 }
 
-fn read_sandbox_cgroup_sample(path: &Path) -> Option<SandboxCgroupSample> {
+fn read_sandbox_cgroup_sample(path: &Path, pid: u64) -> Option<SandboxCgroupSample> {
     let (io_read_bytes, io_write_bytes) = read_io_stat(path);
+    let (network_rx_bytes, network_tx_bytes) = read_pid_network_stat(pid);
     Some(SandboxCgroupSample {
         cpu_usage_usec: read_cpu_usage_usec(path),
         memory_current: read_u64_file(path.join("memory.current")),
         io_read_bytes,
         io_write_bytes,
+        network_rx_bytes,
+        network_tx_bytes,
         process_count: read_cgroup_process_count(path),
     })
 }
@@ -488,6 +553,41 @@ fn read_io_stat(path: &Path) -> (Option<u64>, Option<u64>) {
 
     if seen {
         (Some(read_bytes), Some(write_bytes))
+    } else {
+        (None, None)
+    }
+}
+
+fn read_pid_network_stat(pid: u64) -> (Option<u64>, Option<u64>) {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/net/dev")) {
+        Ok(stat) => stat,
+        Err(_) => return (None, None),
+    };
+    let mut rx_bytes = 0_u64;
+    let mut tx_bytes = 0_u64;
+    let mut seen = false;
+
+    for line in stat.lines().skip(2) {
+        let Some((interface, counters)) = line.split_once(':') else {
+            continue;
+        };
+        let interface = interface.trim();
+        if interface.is_empty() || interface == "lo" {
+            continue;
+        }
+
+        let values: Vec<&str> = counters.split_whitespace().collect();
+        if values.len() < 16 {
+            continue;
+        }
+
+        rx_bytes = rx_bytes.saturating_add(values[0].parse::<u64>().unwrap_or(0));
+        tx_bytes = tx_bytes.saturating_add(values[8].parse::<u64>().unwrap_or(0));
+        seen = true;
+    }
+
+    if seen {
+        (Some(rx_bytes), Some(tx_bytes))
     } else {
         (None, None)
     }

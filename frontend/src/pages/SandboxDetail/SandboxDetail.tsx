@@ -113,8 +113,11 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 
   const pressureSeries = useMemo(() => {
     const io = metrics.find((item) => item.name === 'sandbox.io.read_bytes');
-    const network = metrics.find((item) => item.name === 'sandbox.network.rx_bytes');
-    return { io, network };
+    const networkRx = metrics.find((item) => item.name === 'sandbox.network.rx_bytes');
+    const networkTx = metrics.find((item) => item.name === 'sandbox.network.tx_bytes');
+    const networkRxTotal = metrics.find((item) => item.name === 'sandbox.network.rx_total_bytes');
+    const networkTxTotal = metrics.find((item) => item.name === 'sandbox.network.tx_total_bytes');
+    return { io, networkRx, networkTx, networkRxTotal, networkTxTotal };
   }, [metrics]);
 
   function toggleMetricPin(group: string) {
@@ -192,7 +195,19 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {tab === 'overview' && (
         <div className="overview-stack">
           {analysis && <AnalysisPanel analysis={analysis} spans={spans} onSelectSpan={setSelectedSpan} />}
-          {image && <ContainerImageAccessPanel sandbox={sandbox} image={image} imageEvents={imageEvents} imageMetrics={imageMetrics} ioSeries={pressureSeries.io} networkSeries={pressureSeries.network} />}
+          {image && (
+            <ContainerImageAccessPanel
+              sandbox={sandbox}
+              image={image}
+              imageEvents={imageEvents}
+              imageMetrics={imageMetrics}
+              ioSeries={pressureSeries.io}
+              networkRxSeries={pressureSeries.networkRx}
+              networkRxTotalSeries={pressureSeries.networkRxTotal}
+              networkTxSeries={pressureSeries.networkTx}
+              networkTxTotalSeries={pressureSeries.networkTxTotal}
+            />
+          )}
           <div className="overview-timeline-stack">
             <div className="panel-card">
               <h3>Lifecycle Timeline</h3>
@@ -496,20 +511,29 @@ function ContainerImageAccessPanel({
   imageEvents,
   imageMetrics,
   ioSeries,
-  networkSeries,
+  networkRxSeries,
+  networkRxTotalSeries,
+  networkTxSeries,
+  networkTxTotalSeries,
 }: {
   sandbox: Sandbox;
   image: Image;
   imageEvents: EventRecord[];
   imageMetrics: MetricSeries[];
   ioSeries?: MetricSeries;
-  networkSeries?: MetricSeries;
+  networkRxSeries?: MetricSeries;
+  networkRxTotalSeries?: MetricSeries;
+  networkTxSeries?: MetricSeries;
+  networkTxTotalSeries?: MetricSeries;
 }) {
   const startupBounds = sandboxStartupBounds(sandbox);
   const layers = image.layers ?? [];
   const avgIo = averageMetricValue(ioSeries);
   const peakIo = Math.max(...(ioSeries?.points.map((point) => point.value) ?? [0]), 0);
-  const avgNetwork = averageMetricValue(networkSeries);
+  const avgNetworkRx = averageMetricValue(networkRxSeries);
+  const avgNetworkTx = averageMetricValue(networkTxSeries);
+  const latestNetworkRxTotal = latestMetricValue(networkRxTotalSeries);
+  const latestNetworkTxTotal = latestMetricValue(networkTxTotalSeries);
   const requestedBlocks = imageRequestedBlocks(image);
   const blockHitRatio = latestMetricValue(imageMetrics.find((series) => series.name === 'image.lazy.cache_hit_ratio')) ?? imageBlockHitRatio(image);
   const remoteReadBytes = latestMetricValue(imageMetrics.find((series) => series.name === 'image.lazy.remote_read_bytes')) ?? imageRemoteReadBytes(image);
@@ -547,7 +571,9 @@ function ContainerImageAccessPanel({
         <div className="container-io-summary">
           <Info label="Avg IO Read" value={formatBytes(avgIo)} hot={avgIo > 32 * 1024 ** 2} />
           <Info label="Peak IO Read" value={formatBytes(peakIo)} hot={peakIo > 64 * 1024 ** 2} />
-          <Info label="Avg Network RX" value={formatBytes(avgNetwork)} />
+          <Info label="Avg Network RX" value={formatBytes(avgNetworkRx)} />
+          <Info label="Avg Network TX" value={formatBytes(avgNetworkTx)} />
+          <Info label="Network Total" value={`${formatBytes(latestNetworkRxTotal)} / ${formatBytes(latestNetworkTxTotal)}`} />
         </div>
       </div>
       {image.loadingMode === 'lazy' ? (
@@ -637,7 +663,7 @@ function averageMetricValue(series?: MetricSeries) {
 }
 
 function latestMetricValue(series?: MetricSeries) {
-  return series?.points.at(-1)?.value;
+  return series?.points.at(-1)?.value ?? 0;
 }
 
 function imageRequestedBlocks(image: Image) {

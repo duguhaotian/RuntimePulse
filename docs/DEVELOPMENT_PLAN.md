@@ -147,7 +147,7 @@ Implemented:
 - Rust host-side Docker lifecycle tool reports Docker container create/start/stop/die/kill/oom/destroy events as sandbox lifecycle events through the local outlet.
 - Query API live store applies Docker lifecycle mutations: stop/die update sandbox status and destroy removes the sandbox from the current live container set while preserving event records.
 - Query API derives sandbox startup summaries from runtime startup trace spans and gives Docker/containerd event-derived startup traces priority over periodic inventory snapshots.
-- Rust host-side Docker sandbox cgroupfs tool resolves cgroup paths from Docker running-container inventory and samples per-sandbox CPU, memory, IO, and process metrics without broad host cgroup scanning.
+- Rust host-side Docker sandbox cgroupfs tool resolves cgroup paths from Docker running-container inventory and samples per-sandbox CPU, memory, IO, network, and process metrics without broad host cgroup scanning.
 - Rust host-side Docker sandbox agent combines startup/running-container reconciliation with Docker lifecycle event streaming, maintains the active Docker container set, and samples only those active cgroups.
 - Host collection is converging on a single `host-agent` binary for systemd: configurable host sources and event watchers enqueue reports into a bounded in-process queue, while a dedicated sender batches HTTP reports to the collector outlet.
 - Rust host-side containerd inventory source is available as optional `containerd-inventory`/`host-containerd`, using containerd's gRPC API over the host Unix socket.

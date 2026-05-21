@@ -792,7 +792,10 @@ function ContainerDetail({
   const ioSeries = metrics.find((series) => series.name === 'sandbox.io.read_bytes');
   const cpuSeries = metrics.find((series) => series.name === 'sandbox.cpu.usage_ratio');
   const memorySeries = metrics.find((series) => series.name === 'sandbox.memory.working_set_bytes');
-  const networkSeries = metrics.find((series) => series.name === 'sandbox.network.rx_bytes');
+  const networkRxSeries = metrics.find((series) => series.name === 'sandbox.network.rx_bytes');
+  const networkTxSeries = metrics.find((series) => series.name === 'sandbox.network.tx_bytes');
+  const networkRxTotalSeries = metrics.find((series) => series.name === 'sandbox.network.rx_total_bytes');
+  const networkTxTotalSeries = metrics.find((series) => series.name === 'sandbox.network.tx_total_bytes');
   const peakIo = Math.max(...(ioSeries?.points.map((point) => point.value) ?? [0]), 0);
 
   return (
@@ -806,11 +809,20 @@ function ContainerDetail({
       <div className="modal-metric-grid">
         {cpuSeries && <MetricChart height={160} series={[cpuSeries]} subtitle="Container CPU utilization over time" title="Container CPU" />}
         {ioSeries && <MetricChart height={160} series={[ioSeries]} subtitle="Container read bytes over time" title="Container IO reads" />}
+        {(networkRxSeries || networkTxSeries) && (
+          <MetricChart
+            height={160}
+            series={[networkRxSeries, networkTxSeries].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Container network throughput reported by the sandbox sampler"
+            title="Container network"
+          />
+        )}
         {memorySeries && <MetricChart height={160} series={[memorySeries]} subtitle="Container working set over time" title="Container memory" />}
       </div>
       <div className="container-detail-grid">
         <SummaryCard label="Peak IO Read" value={formatBytes(peakIo)} caption="sandbox.io.read_bytes" tone={peakIo > 64 * 1024 ** 2 ? 'warning' : undefined} />
-        <SummaryCard label="Avg Network RX" value={formatBytes(averageMetricValue(networkSeries))} caption="sandbox.network.rx_bytes" />
+        <SummaryCard label="Avg Network RX" value={formatBytes(averageMetricValue(networkRxSeries))} caption="sandbox.network.rx_bytes" />
+        <SummaryCard label="Network Total" value={`${formatBytes(latestMetricValue(networkRxTotalSeries))} / ${formatBytes(latestMetricValue(networkTxTotalSeries))}`} caption="rx / tx total bytes" />
         <SummaryCard label="Memory Peak" value={formatBytes(sandbox.memoryPeakBytes)} caption="container working set" />
         <SummaryCard label="Created" value={formatDateTime(sandbox.createdAt)} caption="container metadata" />
       </div>
