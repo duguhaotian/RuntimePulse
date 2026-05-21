@@ -102,6 +102,10 @@ RuntimePulse sandbox metrics. RuntimePulse host-side collectors should focus on
 runtime/image/startup/profile gaps that the standard metrics platform does not
 cover.
 
+For Kubernetes identity, containerd inventory/events and Prometheus metrics
+should converge on `k8s-{namespace}-{pod}-{container}` sandbox ids. The raw
+containerd container id remains available in attributes for runtime debugging.
+
 `command` and `http` adapters can also run inside host-agent for host-visible
 third-party tools. They must emit RuntimePulse partial output and are enqueued
 through the same bounded queue, batching sender, and spool path as native host

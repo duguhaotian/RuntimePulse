@@ -156,6 +156,7 @@ Implemented:
 - Rust host-side CRI/Kubelet event streaming is available as optional `kubelet-events`/`host-kubelet-events`, using a configurable JSONL command such as `crictl events --output json` and converting Kubernetes container lifecycle events into RuntimePulse sandbox updates.
 - P1 runtime priority is Kubernetes on containerd first. Docker remains the single-node/local validation path, while CRI/Kubelet event ingestion enriches Kubernetes lifecycle context around containerd inventory and events.
 - Kubernetes regular resource metrics are imported from the existing metrics platform through the optional `kubernetes-metrics` Prometheus adapter instead of re-sampling the same cgroups from RuntimePulse.
+- Containerd inventory/events in the `k8s.io` namespace now derive the same `k8s-{namespace}-{pod}-{container}` sandbox id used by the Prometheus adapter, while preserving the raw containerd id in attributes.
 - The host-agent default source set is `procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs`; Docker sandbox cgroupfs sampling is driven by startup inventory plus lifecycle-maintained active container ids, not broad cgroup scanning.
 - Host-agent self-observability reports node-level metrics for queue depth, enqueued/dropped reports, collector errors, sender success/failure counters, and runtime event stream health.
 - Host-agent sender persists failed batches as local JSON spool files and replays them before later in-memory batches after the outlet recovers.

@@ -34,6 +34,7 @@ pub struct ContainerdEvent {
     pub container_id: String,
     pub image: Option<String>,
     pub runtime_name: Option<String>,
+    pub labels: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub exit_status: Option<u32>,
     pub pid: Option<u32>,
@@ -59,6 +60,18 @@ pub struct ContainerdImageEvent {
 pub enum ContainerdRuntimeEvent {
     Container(ContainerdEvent),
     Image(ContainerdImageEvent),
+}
+
+struct ContainerdSandboxIdentity {
+    sandbox_id: String,
+    namespace: String,
+    workload_id: String,
+    workload_name: String,
+    runtime_sandbox_id: String,
+    kubernetes_namespace: String,
+    pod_name: String,
+    container_name: String,
+    pod_uid: String,
 }
 
 pub fn collect_containerd_inventory(
@@ -104,8 +117,10 @@ pub fn output_from_event(
     config: &CollectorConfig,
 ) -> Result<Option<PluginOutput>> {
     let timestamp = timestamp(event.timestamp);
-    let sandbox_id = containerd_sandbox_id(&event.namespace, &event.container_id);
-    let workload_name = short_container_id(&event.container_id);
+    let identity =
+        containerd_identity_from_labels(&event.namespace, &event.container_id, &event.labels);
+    let sandbox_id = identity.sandbox_id.clone();
+    let workload_name = identity.workload_name.clone();
     let image_ref = event
         .image
         .clone()
@@ -126,8 +141,8 @@ pub fn output_from_event(
         "id": sandbox_id,
         "clusterId": config.cluster_id,
         "nodeId": config.node_id,
-        "namespace": event.namespace,
-        "workloadId": workload_name,
+        "namespace": identity.namespace,
+        "workloadId": identity.workload_id,
         "workloadName": workload_name,
         "imageId": image_id,
         "imageRef": image_ref,
@@ -148,8 +163,13 @@ pub fn output_from_event(
             "runtime.source": "containerd",
             "containerd.namespace": event.namespace,
             "containerd.id": event.container_id,
+            "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
             "containerd.topic": event.topic,
             "containerd.action": event.action,
+            "k8s.namespace": identity.kubernetes_namespace,
+            "k8s.pod": identity.pod_name,
+            "k8s.container": identity.container_name,
+            "k8s.pod_uid": identity.pod_uid,
             "lifecycle.action": if removed { "destroy" } else { event.action.as_str() },
             "lifecycle.current": current,
             "lifecycle.removed": removed,
@@ -170,8 +190,19 @@ pub fn output_from_event(
     attributes.insert("scope".to_string(), json!(config.collection_scope));
     attributes.insert("containerd.namespace".to_string(), json!(event.namespace));
     attributes.insert("containerd.id".to_string(), json!(event.container_id));
+    attributes.insert(
+        "containerd.runtime_sandbox_id".to_string(),
+        json!(identity.runtime_sandbox_id),
+    );
     attributes.insert("containerd.topic".to_string(), json!(event.topic));
     attributes.insert("containerd.action".to_string(), json!(event.action));
+    attributes.insert(
+        "k8s.namespace".to_string(),
+        json!(identity.kubernetes_namespace),
+    );
+    attributes.insert("k8s.pod".to_string(), json!(identity.pod_name));
+    attributes.insert("k8s.container".to_string(), json!(identity.container_name));
+    attributes.insert("k8s.pod_uid".to_string(), json!(identity.pod_uid));
     if let Some(pid) = event.pid {
         attributes.insert("containerd.pid".to_string(), json!(pid));
     }
@@ -229,7 +260,7 @@ pub fn output_from_event(
                 config.node_id
             ),
             attributes,
-            sandbox_id: Some(sandbox_id),
+            sandbox_id: Some(identity.sandbox_id),
             image_id: None,
             node_id: Some(config.node_id.clone()),
             runtime_type: Some(runtime_type),
@@ -394,12 +425,12 @@ async fn collect_containerd_inventory_async(
                 container.image.clone()
             };
             let image_id = containerd_image_id(&namespace, &image_ref);
-            let sandbox_id = containerd_sandbox_id(&namespace, &container.id);
+            let identity =
+                containerd_identity_from_labels(&namespace, &container.id, &container.labels);
             let runtime_type = runtime_type_from_containerd(&container);
             let runtime_version = runtime_name_from_containerd(&container)
                 .unwrap_or_else(|| "containerd".to_string());
-            let workload_name =
-                container_name_from_labels(&container).unwrap_or_else(|| container.id.clone());
+            let workload_name = identity.workload_name.clone();
             let created_at = container
                 .created_at
                 .as_ref()
@@ -418,11 +449,11 @@ async fn collect_containerd_inventory_async(
             });
 
             sandboxes.push(json!({
-                "id": sandbox_id,
+                "id": identity.sandbox_id,
                 "clusterId": config.cluster_id,
                 "nodeId": config.node_id,
-                "namespace": namespace,
-                "workloadId": workload_name,
+                "namespace": identity.namespace,
+                "workloadId": identity.workload_id,
                 "workloadName": workload_name,
                 "imageId": image_id,
                 "imageRef": image_ref,
@@ -443,9 +474,14 @@ async fn collect_containerd_inventory_async(
                     "runtime.source": "containerd",
                     "containerd.namespace": namespace,
                     "containerd.id": container.id,
+                    "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
                     "containerd.snapshotter": container.snapshotter,
                     "containerd.snapshotKey": container.snapshot_key,
                     "containerd.sandbox": container.sandbox,
+                    "k8s.namespace": identity.kubernetes_namespace,
+                    "k8s.pod": identity.pod_name,
+                    "k8s.container": identity.container_name,
+                    "k8s.pod_uid": identity.pod_uid,
                 }
             }));
 
@@ -455,9 +491,20 @@ async fn collect_containerd_inventory_async(
             attributes.insert("containerd.namespace".to_string(), json!(namespace));
             attributes.insert("containerd.id".to_string(), json!(container.id));
             attributes.insert(
+                "containerd.runtime_sandbox_id".to_string(),
+                json!(identity.runtime_sandbox_id),
+            );
+            attributes.insert(
                 "containerd.snapshotter".to_string(),
                 json!(container.snapshotter),
             );
+            attributes.insert(
+                "k8s.namespace".to_string(),
+                json!(identity.kubernetes_namespace),
+            );
+            attributes.insert("k8s.pod".to_string(), json!(identity.pod_name));
+            attributes.insert("k8s.container".to_string(), json!(identity.container_name));
+            attributes.insert("k8s.pod_uid".to_string(), json!(identity.pod_uid));
 
             events.push(EventRecord {
                 id: format!(
@@ -475,7 +522,7 @@ async fn collect_containerd_inventory_async(
                 ),
                 source: format!("runtimepulse-rust-collector/{}/containerd", config.node_id),
                 attributes,
-                sandbox_id: Some(sandbox_id),
+                sandbox_id: Some(identity.sandbox_id),
                 image_id: None,
                 node_id: Some(config.node_id.clone()),
                 runtime_type: Some(runtime_type),
@@ -586,6 +633,7 @@ async fn event_from_envelope(
                 container_id: payload.id,
                 image: Some(payload.image),
                 runtime_name: payload.runtime.map(|runtime| runtime.name),
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: None,
@@ -600,6 +648,7 @@ async fn event_from_envelope(
                 container_id: payload.id,
                 image: Some(payload.image),
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: None,
@@ -614,6 +663,7 @@ async fn event_from_envelope(
                 container_id: payload.id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: None,
@@ -628,6 +678,7 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: Some(payload.pid),
@@ -642,6 +693,7 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: Some(payload.pid),
@@ -656,6 +708,7 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: Some(payload.exit_status),
                 pid: Some(payload.pid),
@@ -670,6 +723,7 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: Some(payload.exit_status),
                 pid: Some(payload.pid),
@@ -684,6 +738,7 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: None,
@@ -698,6 +753,7 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: None,
@@ -712,6 +768,7 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
                 pid: None,
@@ -809,7 +866,9 @@ async fn event_from_envelope(
     };
 
     if let Some(ContainerdRuntimeEvent::Container(event)) = event.as_mut() {
-        if (event.image.is_none() || event.runtime_name.is_none()) && event.action != "delete" {
+        if (event.image.is_none() || event.runtime_name.is_none() || event.labels.is_empty())
+            && event.action != "delete"
+        {
             if let Some(container) =
                 async_get_container(client, &event.namespace, &event.container_id).await?
             {
@@ -818,6 +877,9 @@ async fn event_from_envelope(
                 }
                 if event.runtime_name.is_none() {
                     event.runtime_name = runtime_name_from_containerd(&container);
+                }
+                if event.labels.is_empty() {
+                    event.labels = container.labels;
                 }
             }
         }
@@ -1230,12 +1292,72 @@ where
     })
 }
 
-fn container_name_from_labels(container: &Container) -> Option<String> {
-    container
-        .labels
+fn containerd_identity_from_labels(
+    namespace: &str,
+    container_id: &str,
+    labels: &HashMap<String, String>,
+) -> ContainerdSandboxIdentity {
+    let k8s_namespace = labels
+        .get("io.kubernetes.pod.namespace")
+        .cloned()
+        .unwrap_or_default();
+    let pod_name = labels
+        .get("io.kubernetes.pod.name")
+        .cloned()
+        .unwrap_or_default();
+    let container_name = labels
         .get("io.kubernetes.container.name")
         .cloned()
-        .or_else(|| container.labels.get("com.docker.compose.service").cloned())
+        .or_else(|| labels.get("com.docker.compose.service").cloned())
+        .unwrap_or_else(|| short_container_id(container_id));
+    let pod_uid = labels
+        .get("io.kubernetes.pod.uid")
+        .cloned()
+        .unwrap_or_default();
+
+    if namespace == "k8s.io" && !k8s_namespace.is_empty() && !pod_name.is_empty() {
+        let sandbox_id = kubernetes_sandbox_id(&k8s_namespace, &pod_name, &container_name);
+        let workload_name = if container_name == "POD" || container_name == "pod" {
+            pod_name.clone()
+        } else {
+            format!("{pod_name}/{container_name}")
+        };
+        return ContainerdSandboxIdentity {
+            sandbox_id,
+            namespace: k8s_namespace.clone(),
+            workload_id: pod_name.clone(),
+            workload_name,
+            runtime_sandbox_id: containerd_sandbox_id(namespace, container_id),
+            kubernetes_namespace: k8s_namespace,
+            pod_name,
+            container_name,
+            pod_uid,
+        };
+    }
+
+    ContainerdSandboxIdentity {
+        sandbox_id: containerd_sandbox_id(namespace, container_id),
+        namespace: namespace.to_string(),
+        workload_id: container_name.clone(),
+        workload_name: container_name,
+        runtime_sandbox_id: containerd_sandbox_id(namespace, container_id),
+        kubernetes_namespace: k8s_namespace,
+        pod_name,
+        container_name: labels
+            .get("io.kubernetes.container.name")
+            .cloned()
+            .unwrap_or_default(),
+        pod_uid,
+    }
+}
+
+fn kubernetes_sandbox_id(namespace: &str, pod: &str, container: &str) -> String {
+    format!(
+        "k8s-{}-{}-{}",
+        sanitize_id(namespace),
+        sanitize_id(pod),
+        sanitize_id(container)
+    )
 }
 
 fn namespace_filter() -> Option<Vec<String>> {
