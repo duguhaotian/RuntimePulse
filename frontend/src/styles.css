@@ -3340,6 +3340,11 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   border-color: rgba(52, 211, 153, 0.18);
 }
 
+.data-section.sources {
+  grid-column: 1 / -1;
+  border-color: rgba(168, 85, 247, 0.2);
+}
+
 .data-section-header {
   display: flex;
   justify-content: space-between;
@@ -3357,6 +3362,7 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
 
 .data-section.dynamic .data-section-header span { color: #b8dcff; }
 .data-section.static .data-section-header span { color: #a7f3d0; }
+.data-section.sources .data-section-header span { color: #d8b4fe; }
 
 .data-section-header strong {
   color: #f8fafc;
@@ -3384,6 +3390,24 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   gap: 10px;
 }
 
+.source-facts-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.source-fact {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 10px;
+  background: rgba(10, 14, 20, 0.42);
+}
+
+.source-fact.runtime { border-color: rgba(96, 165, 250, 0.2); }
+.source-fact.metrics { border-color: rgba(52, 211, 153, 0.2); }
+.source-fact.image { border-color: rgba(251, 191, 36, 0.2); }
+
 .static-fact {
   min-width: 0;
   padding: 10px 11px;
@@ -3392,6 +3416,7 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   background: rgba(10, 14, 20, 0.42);
 }
 
+.source-fact span,
 .static-fact span {
   display: block;
   color: var(--muted-2);
@@ -3401,6 +3426,7 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   text-transform: uppercase;
 }
 
+.source-fact strong,
 .static-fact strong {
   display: block;
   min-width: 0;
@@ -3408,6 +3434,18 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   overflow: hidden;
   color: #dbe4ee;
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-fact em {
+  display: block;
+  min-width: 0;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

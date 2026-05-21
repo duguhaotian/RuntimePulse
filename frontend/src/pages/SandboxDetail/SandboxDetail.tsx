@@ -350,9 +350,22 @@ function DetailDataSections({
 }) {
   const latestMetricAt = metrics.flatMap((series) => series.points).sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0]?.timestamp;
   const warningEvents = events.filter((event) => event.severity !== 'info').length;
+  const sourceSummary = sandboxSourceSummary(sandbox, metrics, events);
 
   return (
     <div className="detail-data-sections">
+      <section className="data-section sources">
+        <div className="data-section-header">
+          <span>Sources</span>
+          <strong>数据来源</strong>
+        </div>
+        <div className="source-facts-grid">
+          {sourceSummary.map((item) => (
+            <SourceFact item={item} key={item.label} />
+          ))}
+        </div>
+      </section>
+
       <section className="data-section dynamic">
         <div className="data-section-header">
           <span>Dynamic</span>
@@ -388,6 +401,23 @@ function DetailDataSections({
   );
 }
 
+type SourceSummaryItem = {
+  label: string;
+  primary: string;
+  secondary: string;
+  tone?: 'runtime' | 'metrics' | 'image';
+};
+
+function SourceFact({ item }: { item: SourceSummaryItem }) {
+  return (
+    <div className={`source-fact ${item.tone ?? ''}`}>
+      <span>{item.label}</span>
+      <strong>{item.primary}</strong>
+      <em>{item.secondary}</em>
+    </div>
+  );
+}
+
 function Fact({ label, value }: { label: string; value: string }) {
   return (
     <div className="static-fact">
@@ -395,6 +425,64 @@ function Fact({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function sandboxSourceSummary(sandbox: Sandbox, metrics: MetricSeries[], events: EventRecord[]): SourceSummaryItem[] {
+  const runtimeSource = stringAttribute(sandbox.attributes, 'runtime.source') ?? sourceFromPlugin(sandbox.labels.plugin) ?? 'collector';
+  const runtimePlugin = stringAttribute(sandbox.attributes, 'plugin') ?? sandbox.labels.plugin ?? runtimeSource;
+  const runtimeId = stringAttribute(sandbox.attributes, 'containerd.id')
+    ?? stringAttribute(sandbox.attributes, 'docker.id')
+    ?? stringAttribute(sandbox.attributes, 'cri.container_id')
+    ?? sandbox.id;
+  const metricsSources = uniqueStrings(metrics.map((series) => stringAttribute(series.attributes, 'metrics.source') ?? stringAttribute(series.attributes, 'plugin')).filter(Boolean));
+  const prometheusMetrics = metrics.filter((series) => stringAttribute(series.attributes, 'metrics.source') === 'prometheus');
+  const latestPrometheusMetric = prometheusMetrics.flatMap((series) => series.points).sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0]?.timestamp;
+  const runtimeEvents = events.filter((event) => stringAttribute(event.attributes, 'runtime.source') || stringAttribute(event.attributes, 'containerd.id') || stringAttribute(event.attributes, 'docker.id') || stringAttribute(event.attributes, 'cri.container_id'));
+  const latestRuntimeEvent = runtimeEvents.sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0]?.timestamp;
+
+  return [
+    {
+      label: 'Runtime',
+      primary: runtimeSource,
+      secondary: `${runtimePlugin} · ${runtimeId}`,
+      tone: 'runtime',
+    },
+    {
+      label: 'Metrics',
+      primary: metricsSources.length > 0 ? metricsSources.join(', ') : 'none',
+      secondary: latestPrometheusMetric ? `latest ${formatDateTime(latestPrometheusMetric)}` : `${metrics.length} series`,
+      tone: 'metrics',
+    },
+    {
+      label: 'Lifecycle',
+      primary: runtimeEvents.length > 0 ? `${runtimeEvents.length} runtime events` : `${events.length} events`,
+      secondary: latestRuntimeEvent ? `latest ${formatDateTime(latestRuntimeEvent)}` : 'no runtime event yet',
+      tone: 'runtime',
+    },
+    {
+      label: 'Image',
+      primary: stringAttribute(sandbox.attributes, 'containerd.snapshotter') ?? stringAttribute(sandbox.attributes, 'image.snapshotter') ?? 'image metadata',
+      secondary: sandbox.imageRef,
+      tone: 'image',
+    },
+  ];
+}
+
+function sourceFromPlugin(plugin?: string) {
+  if (!plugin) return undefined;
+  if (plugin.includes('containerd')) return 'containerd';
+  if (plugin.includes('docker')) return 'docker';
+  if (plugin.includes('kubelet') || plugin.includes('cri')) return 'cri';
+  return plugin;
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value))));
+}
+
+function stringAttribute(attributes: Record<string, unknown> | undefined, name: string) {
+  const value = attributes?.[name];
+  return typeof value === 'string' && value.trim() ? value : undefined;
 }
 
 function MetricPanelToolbar({ size, onSizeChange }: { size: MetricPanelSize; onSizeChange: (size: MetricPanelSize) => void }) {
