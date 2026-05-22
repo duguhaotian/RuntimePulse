@@ -20,6 +20,7 @@ export function createLiveStore() {
     sourceByNode: new Map(),
     sourceByImage: new Map(),
     sourceBySandbox: new Map(),
+    sourceByMetricSeries: new Map(),
     snapshotScopeBySandbox: new Map(),
     lastUpdatedAt: undefined,
   };
@@ -29,7 +30,7 @@ export function recordLiveBatch(store, payload) {
   rememberMetadata(store, payload.metadata, payload.source);
   reconcileSnapshotEvents(store, payload.events);
 
-  for (const metric of array(payload.metrics)) rememberMetric(store, metric);
+  for (const metric of array(payload.metrics)) rememberMetric(store, metric, payload.source);
   for (const event of array(payload.events)) rememberEvent(store, event);
   for (const span of array(payload.traces)) rememberTraceSpan(store, span);
   for (const profile of array(payload.profiles)) rememberRow(store.profilesBySandbox, profile.sandboxId, profile, rowLimit('profiles'));
@@ -215,12 +216,12 @@ function liveSourceSnapshots(store) {
     const series = store.metricsBySandbox.get(sandboxId);
 
     current.sandboxes += store.sandboxes.has(sandboxId) ? 1 : 0;
-    current.metricSeries += series?.size ?? 0;
-    current.metricPoints += series ? Array.from(series.values()).reduce((sum, item) => sum + item.points.length, 0) : 0;
     current.traces += store.tracesBySandbox.get(sandboxId)?.length ?? 0;
     current.profiles += store.profilesBySandbox.get(sandboxId)?.length ?? 0;
     bySource.set(source, current);
   }
+
+  addMetricCountsBySource(bySource, store);
 
   for (const [nodeId, source] of store.sourceByNode.entries()) {
     const current = bySource.get(source) ?? {
@@ -232,9 +233,6 @@ function liveSourceSnapshots(store) {
       traces: 0,
       profiles: 0,
     };
-    const series = store.metricsByNode.get(nodeId);
-    current.metricSeries += series?.size ?? 0;
-    current.metricPoints += series ? Array.from(series.values()).reduce((sum, item) => sum + item.points.length, 0) : 0;
     bySource.set(source, current);
   }
 
@@ -248,9 +246,6 @@ function liveSourceSnapshots(store) {
       traces: 0,
       profiles: 0,
     };
-    const series = store.metricsByImage.get(imageId);
-    current.metricSeries += series?.size ?? 0;
-    current.metricPoints += series ? Array.from(series.values()).reduce((sum, item) => sum + item.points.length, 0) : 0;
     current.traces += store.tracesByImage.get(imageId)?.length ?? 0;
     bySource.set(source, current);
   }
@@ -280,6 +275,32 @@ function addEventCountsBySource(bySource, eventsByKey, sourceByKey) {
     current.eventIds ??= new Set();
     for (const row of rows) current.eventIds.add(rowKey(row));
     current.events = current.eventIds.size;
+    bySource.set(source, current);
+  }
+}
+
+function addMetricCountsBySource(bySource, store) {
+  for (const [seriesKey, source] of store.sourceByMetricSeries.entries()) {
+    const [scope, scopeId, seriesId] = seriesKey.split('\u0000');
+    const collection = scope === 'sandbox'
+      ? store.metricsBySandbox
+      : scope === 'image'
+        ? store.metricsByImage
+        : store.metricsByNode;
+    const series = collection.get(scopeId)?.get(seriesId);
+    if (!series) continue;
+
+    const current = bySource.get(source) ?? {
+      source,
+      sandboxes: 0,
+      metricSeries: 0,
+      metricPoints: 0,
+      events: 0,
+      traces: 0,
+      profiles: 0,
+    };
+    current.metricSeries += 1;
+    current.metricPoints += series.points.length;
     bySource.set(source, current);
   }
 }
@@ -543,7 +564,7 @@ function imageRemovalEvent(event) {
   return event.eventType === 'image' && ['delete', 'untag', 'remove', 'content_delete', 'snapshot_remove'].includes(action);
 }
 
-function rememberMetric(store, metric) {
+function rememberMetric(store, metric, source) {
   const sandboxId = metric.sandboxId;
   const nodeId = metric.nodeId;
   const imageId = metric.imageId;
@@ -559,6 +580,7 @@ function rememberMetric(store, metric) {
       : store.metricsByNode;
   const seriesMap = ensureSeriesMap(collection, scopeId);
   const id = metricSeriesId(scope, scopeId, metric);
+  if (source) store.sourceByMetricSeries.set(metricSeriesSourceKey(scope, scopeId, id), source);
   const existing = seriesMap.get(id);
   const point = {
     timestamp: metric.timestamp,
@@ -598,6 +620,10 @@ function rememberMetric(store, metric) {
     points,
   });
   refreshSandboxFromMetric(store, metric);
+}
+
+function metricSeriesSourceKey(scope, scopeId, seriesId) {
+  return [scope, scopeId, seriesId].join('\u0000');
 }
 
 function metricScope(metric) {

@@ -129,6 +129,7 @@ Implemented:
 - Runtime comparison aggregates now refresh from live Query API sandbox data instead of staying fixed to static mock rows.
 - Collectors page shows live query store occupancy for in-memory entities, metric series, points, events, traces, and profiles.
 - Live query store status breaks down in-memory occupancy by collector source for multi-node validation.
+- Live query store source accounting tracks metric series by their ingest batch source, so metric-only reports such as Kubernetes pod-scoped network series are visible in collector status.
 - Rust collector skeleton with a containerized outlet plus pluginized data sources: host-side `procfs`, host-side `cgroupfs`, external command output conversion, and HTTP API output conversion.
 - Rust collector tree now centralizes collector ownership under `rust-collector/src/collectors/` with `core`, `outlet`, `adapters`, and semantic `sources` groups for node, runtime, image, sandbox, and profiling data.
 - Docker Compose default path runs the Rust collector as the node-local outlet; node-wide `/proc`, host/root cgroupfs, and PSI data is collected by host-side tools and pushed to the outlet.
