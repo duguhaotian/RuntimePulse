@@ -1418,6 +1418,7 @@ struct ContainerdStartupTraceTracker {
 #[derive(Clone)]
 struct ContainerdCreateEvent {
     image_ref: String,
+    labels: HashMap<String, String>,
     namespace: String,
     runtime_name: String,
     timestamp: DateTime<Utc>,
@@ -1449,6 +1450,13 @@ impl ContainerdStartupTraceTracker {
                             .filter(|value| !value.is_empty())
                             .or_else(|| existing.map(|pending| pending.image_ref.clone()))
                             .unwrap_or_else(|| "containerd/unknown:latest".to_string()),
+                        labels: if event.labels.is_empty() {
+                            existing
+                                .map(|pending| pending.labels.clone())
+                                .unwrap_or_default()
+                        } else {
+                            event.labels.clone()
+                        },
                         namespace: event.namespace.clone(),
                         runtime_name: event
                             .runtime_name
@@ -1488,7 +1496,19 @@ fn containerd_startup_trace_output(
 ) -> PluginOutput {
     let short_id = short_container_id(container_id);
     let namespace_id = sanitize_id(&create.namespace);
-    let sandbox_id = format!("containerd-{namespace_id}-{}", sanitize_id(container_id));
+    let identity = sandbox_identity_from_containerd_event(&ContainerdEvent {
+        namespace: create.namespace.clone(),
+        action: "start".to_string(),
+        container_id: container_id.to_string(),
+        image: Some(create.image_ref.clone()),
+        runtime_name: Some(create.runtime_name.clone()),
+        labels: create.labels.clone(),
+        timestamp: started_at,
+        exit_status: None,
+        pid: None,
+        topic: "startup-trace".to_string(),
+    });
+    let sandbox_id = identity.sandbox_id;
     let start_time = create.timestamp;
     let end_time = if started_at > start_time {
         started_at
@@ -1504,6 +1524,13 @@ fn containerd_startup_trace_output(
     attributes.insert("containerd.namespace".to_string(), json!(create.namespace));
     attributes.insert("containerd.runtime".to_string(), json!(create.runtime_name));
     attributes.insert("image.ref".to_string(), json!(create.image_ref));
+    attributes.insert(
+        "k8s.namespace".to_string(),
+        json!(identity.kubernetes_namespace),
+    );
+    attributes.insert("k8s.pod".to_string(), json!(identity.pod_name));
+    attributes.insert("k8s.container".to_string(), json!(identity.container_name));
+    attributes.insert("k8s.pod_uid".to_string(), json!(identity.pod_uid));
     attributes.insert("scope".to_string(), json!(config.collection_scope));
 
     PluginOutput {
@@ -1879,4 +1906,71 @@ fn log_host_agent_sources(sources: &HostAgentSources) {
             },
         })
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containerd_startup_trace_uses_kubernetes_sandbox_identity() {
+        let config = CollectorConfig {
+            ingest_url: "http://query-api/api/ingest/batch".to_string(),
+            node_id: "node-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            interval: Duration::from_secs(1),
+            local_report_addr: "127.0.0.1:9091".to_string(),
+            local_report_url: "http://127.0.0.1:9091/api/local/ingest".to_string(),
+            collection_scope: "host".to_string(),
+            once: true,
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            cgroup_max_entries: 200,
+            image_cache_report_path: None,
+            plugins: Vec::new(),
+            command_plugins: Vec::new(),
+            http_plugins: Vec::new(),
+        };
+
+        let mut labels = HashMap::new();
+        labels.insert(
+            "io.kubernetes.pod.namespace".to_string(),
+            "default".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.pod.name".to_string(),
+            "runtimepulse-demo".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.container.name".to_string(),
+            "app".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.pod.uid".to_string(),
+            "runtimepulse-demo-uid".to_string(),
+        );
+
+        let create = ContainerdCreateEvent {
+            image_ref: "docker.io/library/nginx:latest".to_string(),
+            labels,
+            namespace: "k8s.io".to_string(),
+            runtime_name: "io.containerd.runc.v2".to_string(),
+            timestamp: Utc::now(),
+        };
+
+        let output =
+            containerd_startup_trace_output(&config, "runtimepulse-ctrd-demo", &create, Utc::now());
+
+        assert_eq!(output.traces.len(), 1);
+        let span = &output.traces[0];
+        assert_eq!(
+            span.sandbox_id.as_deref(),
+            Some("k8s-default-runtimepulse-demo-app")
+        );
+        assert_eq!(
+            span.attributes
+                .get("k8s.pod")
+                .and_then(|value| value.as_str()),
+            Some("runtimepulse-demo")
+        );
+    }
 }
