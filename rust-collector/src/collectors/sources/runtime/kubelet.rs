@@ -98,11 +98,11 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
     }
 
     let container_id = event.container_id.clone();
-    let short_id = short_id(&first_non_empty(&[
+    let runtime_id = runtime_object_id(&first_non_empty(&[
         container_id.as_str(),
         runtime_sandbox_id.as_str(),
     ]));
-    let sandbox_id = format!("k8s-{short_id}");
+    let short_id = short_id(&runtime_id);
     let namespace = first_non_empty(&[
         label(&event, "io.kubernetes.pod.namespace"),
         label(&event, "KubernetesPodNamespace"),
@@ -119,6 +119,8 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
         label(&event, "KubernetesContainerName"),
         pod_name.as_str(),
     ]);
+    let sandbox_id = kubernetes_sandbox_id(&namespace, &pod_name, &container_name)
+        .unwrap_or_else(|| format!("k8s-{short_id}"));
     let workload_name = if container_name == pod_name {
         pod_name.clone()
     } else {
@@ -173,6 +175,10 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
             "runtime.source": "cri",
             "cri.container_id": container_id,
             "cri.sandbox_id": event.sandbox_id,
+            "cri.short_id": short_id,
+            "k8s.namespace": namespace,
+            "k8s.pod": pod_name,
+            "k8s.container": container_name,
             "lifecycle.action": action,
             "lifecycle.current": current,
             "lifecycle.removed": removed,
@@ -389,6 +395,30 @@ fn short_id(value: &str) -> String {
     value.chars().take(12).collect::<String>()
 }
 
+fn runtime_object_id(value: &str) -> String {
+    let trimmed = value.trim();
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, suffix)| suffix)
+        .unwrap_or(trimmed);
+    without_scheme
+        .rsplit('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .to_string()
+}
+
+fn kubernetes_sandbox_id(namespace: &str, pod: &str, container: &str) -> Option<String> {
+    let namespace = sanitize_id(namespace);
+    let pod = sanitize_id(pod);
+    let container = sanitize_id(container);
+    if namespace.is_empty() || pod.is_empty() || container.is_empty() {
+        None
+    } else {
+        Some(format!("k8s-{namespace}-{pod}-{container}"))
+    }
+}
+
 fn image_id_from_ref(reference: &str) -> String {
     let normalized = reference
         .chars()
@@ -418,4 +448,79 @@ fn sanitize_id(value: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[test]
+    fn cri_event_uses_kubernetes_sandbox_identity_when_labels_exist() {
+        let config = test_config();
+        let event = CriEvent {
+            container_id: "containerd://runtimepulse-demo-container".to_string(),
+            sandbox_id: "runtimepulse-demo-pod-uid".to_string(),
+            event_type: "CONTAINER_STARTED".to_string(),
+            reason: String::new(),
+            created_at: 1_779_415_900_000_000_000,
+            image_ref: "docker.io/library/nginx:latest".to_string(),
+            labels: HashMap::from([
+                (
+                    "io.kubernetes.pod.namespace".to_string(),
+                    "default".to_string(),
+                ),
+                (
+                    "io.kubernetes.pod.name".to_string(),
+                    "runtimepulse-demo".to_string(),
+                ),
+                (
+                    "io.kubernetes.container.name".to_string(),
+                    "app".to_string(),
+                ),
+            ]),
+            metadata: HashMap::new(),
+            annotations: HashMap::new(),
+        };
+
+        let output = output_from_cri_event(event, &config).expect("lifecycle output");
+        assert_eq!(output.metadata.sandboxes.len(), 1);
+        assert_eq!(
+            output.metadata.sandboxes[0]
+                .get("id")
+                .and_then(serde_json::Value::as_str),
+            Some("k8s-default-runtimepulse-demo-app")
+        );
+        assert_eq!(
+            output.events[0].sandbox_id.as_deref(),
+            Some("k8s-default-runtimepulse-demo-app")
+        );
+        assert_eq!(
+            output.metadata.sandboxes[0]
+                .get("attributes")
+                .and_then(|attributes| attributes.get("cri.short_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("runtimepulse")
+        );
+    }
+
+    fn test_config() -> CollectorConfig {
+        CollectorConfig {
+            ingest_url: "http://query-api/api/ingest/batch".to_string(),
+            node_id: "node-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            interval: Duration::from_secs(1),
+            local_report_addr: "127.0.0.1:9091".to_string(),
+            local_report_url: "http://127.0.0.1:9091/api/local/ingest".to_string(),
+            collection_scope: "host".to_string(),
+            once: true,
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            cgroup_max_entries: 200,
+            image_cache_report_path: None,
+            plugins: Vec::new(),
+            command_plugins: Vec::new(),
+            http_plugins: Vec::new(),
+        }
+    }
 }

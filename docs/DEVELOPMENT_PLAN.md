@@ -158,6 +158,7 @@ Implemented:
 - Kubernetes regular resource metrics are imported from the existing metrics platform through the optional `kubernetes-metrics` Prometheus adapter instead of re-sampling the same cgroups from RuntimePulse.
 - Containerd inventory/events in the `k8s.io` namespace now derive the same `k8s-{namespace}-{pod}-{container}` sandbox id used by the Prometheus adapter, while preserving the raw containerd id in attributes.
 - Containerd startup trace spans now use the same Kubernetes sandbox id as inventory, events, and Prometheus metrics, so K8s sandbox detail pages can correlate lifecycle trace timing with runtime metadata and resource curves.
+- CRI/Kubelet enrichment events now use the same Kubernetes sandbox id when pod/container labels are present, so lifecycle enrichment does not split from containerd inventory or Prometheus metric series.
 - The host-agent default source set is `procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs`; Docker sandbox cgroupfs sampling is driven by startup inventory plus lifecycle-maintained active container ids, not broad cgroup scanning.
 - Host-agent self-observability reports node-level metrics for queue depth, enqueued/dropped reports, collector errors, sender success/failure counters, and runtime event stream health.
 - Host-agent sender persists failed batches as local JSON spool files and replays them before later in-memory batches after the outlet recovers.

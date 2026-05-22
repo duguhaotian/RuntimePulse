@@ -115,6 +115,8 @@ containerd container id remains available in attributes for runtime debugging.
 Containerd startup trace spans follow the same identity rule, so `container.startup`
 timing appears on the same sandbox detail page as K8s resource metrics and
 containerd lifecycle events.
+CRI/Kubelet enrichment events follow this identity rule when pod/container
+labels are present; only label-poor events fall back to runtime object ids.
 
 `command` and `http` adapters can also run inside host-agent for host-visible
 third-party tools. They must emit RuntimePulse partial output and are enqueued
