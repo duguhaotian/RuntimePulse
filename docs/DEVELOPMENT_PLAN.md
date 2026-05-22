@@ -160,6 +160,7 @@ Implemented:
 - Kubernetes Prometheus network metrics are treated as pod-scoped series and attached to matching container sandbox detail queries by `k8s.namespace`/`k8s.pod`, avoiding fake per-container network sandbox identities.
 - Containerd inventory/events in the `k8s.io` namespace now derive the same `k8s-{namespace}-{pod}-{container}` sandbox id used by the Prometheus adapter, while preserving the raw containerd id in attributes.
 - Containerd startup trace spans now use the same Kubernetes sandbox id as inventory, events, and Prometheus metrics, so K8s sandbox detail pages can correlate lifecycle trace timing with runtime metadata and resource curves.
+- Containerd inventory no longer fabricates `startedAt` from the periodic collection time; startup completion time must come from task start events or startup trace spans.
 - CRI/Kubelet enrichment events now use the same Kubernetes sandbox id when pod/container labels are present, so lifecycle enrichment does not split from containerd inventory or Prometheus metric series.
 - The host-agent default source set is `procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs`; Docker sandbox cgroupfs sampling is driven by startup inventory plus lifecycle-maintained active container ids, not broad cgroup scanning.
 - Host-agent self-observability reports node-level metrics for queue depth, enqueued/dropped reports, collector errors, sender success/failure counters, and runtime event stream health.

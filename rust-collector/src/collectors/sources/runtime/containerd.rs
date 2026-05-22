@@ -488,6 +488,10 @@ async fn collect_containerd_inventory_async(
                 .map(|task| containerd_task_status_to_sandbox_status(task.status))
                 .unwrap_or("stopped");
             let task_pid = task.map(|task| task.pid).unwrap_or(0);
+            let exited_at = task
+                .and_then(|task| task.exited_at.as_ref())
+                .and_then(timestamp_from_prost);
+            let started_at = containerd_inventory_started_at(sandbox_status);
 
             images.entry(image_id.clone()).or_insert_with(|| {
                 image_row(
@@ -513,7 +517,8 @@ async fn collect_containerd_inventory_async(
                 "runtimeVersion": runtime_version,
                 "status": sandbox_status,
                 "createdAt": created_at,
-                "startedAt": if sandbox_status == "running" { Some(ts.clone()) } else { None },
+                "startedAt": started_at,
+                "stoppedAt": if sandbox_status == "stopped" { exited_at.clone() } else { None },
                 "startupDurationMs": 0,
                 "cpuAvg": 0,
                 "memoryPeakBytes": 0,
@@ -529,12 +534,14 @@ async fn collect_containerd_inventory_async(
                     "containerd.id": container.id,
                     "containerd.taskStatus": task_status,
                     "containerd.pid": task_pid,
+                    "containerd.exitedAt": exited_at,
                     "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
                     "containerd.snapshotter": container.snapshotter,
                     "containerd.snapshotKey": container.snapshot_key,
                     "containerd.sandbox": container.sandbox,
                     "lifecycle.action": "inventory",
                     "lifecycle.current": sandbox_status == "running",
+                    "startup.duration.source": "event-required",
                     "k8s.namespace": identity.kubernetes_namespace,
                     "k8s.pod": identity.pod_name,
                     "k8s.container": identity.container_name,
@@ -549,6 +556,7 @@ async fn collect_containerd_inventory_async(
             attributes.insert("containerd.id".to_string(), json!(container.id));
             attributes.insert("containerd.taskStatus".to_string(), json!(task_status));
             attributes.insert("containerd.pid".to_string(), json!(task_pid));
+            attributes.insert("containerd.exitedAt".to_string(), json!(exited_at));
             attributes.insert("lifecycle.action".to_string(), json!("inventory"));
             attributes.insert(
                 "lifecycle.current".to_string(),
@@ -1570,6 +1578,10 @@ fn timestamp_from_prost(value: &prost_types::Timestamp) -> Option<String> {
     DateTime::from_timestamp(value.seconds, value.nanos as u32).map(timestamp)
 }
 
+fn containerd_inventory_started_at(_sandbox_status: &str) -> Option<String> {
+    None
+}
+
 fn containerd_sandbox_id(namespace: &str, container_id: &str) -> String {
     format!(
         "containerd-{}-{}",
@@ -1622,4 +1634,15 @@ fn sanitize_id(value: &str) -> String {
 
 fn timestamp(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn containerd_inventory_does_not_fabricate_started_at() {
+        assert_eq!(containerd_inventory_started_at("running"), None);
+        assert_eq!(containerd_inventory_started_at("stopped"), None);
+    }
 }
