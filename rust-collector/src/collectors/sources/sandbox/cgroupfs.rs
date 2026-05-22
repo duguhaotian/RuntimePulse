@@ -172,6 +172,8 @@ fn collect_cgroup_targets(
     let mut sandboxes = Vec::new();
     let mut sampled_sandbox_ids = Vec::new();
     let mut metrics = Vec::new();
+    let target_count = targets.len();
+    let sample_plugin = sample_plugin_name(&targets);
 
     for target in targets {
         let Some(sample) = read_sandbox_cgroup_sample(&target.cgroup_path, target.pid) else {
@@ -369,8 +371,9 @@ fn collect_cgroup_targets(
     retain_seen(&mut plugin.last_network_tx_by_sandbox, &sandboxes);
 
     let mut attributes = Map::new();
-    attributes.insert("plugin".to_string(), json!("docker-sandbox-cgroupfs"));
+    attributes.insert("plugin".to_string(), json!(sample_plugin));
     attributes.insert("scope".to_string(), json!(config.collection_scope));
+    attributes.insert("targetCount".to_string(), json!(target_count));
     attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
     attributes.insert("resolver".to_string(), json!("runtime-pid-cgroup"));
     attributes.insert("snapshot.nodeId".to_string(), json!(config.node_id));
@@ -387,8 +390,8 @@ fn collect_cgroup_targets(
         event_name: "sandbox.cgroupfs.sample.observed".to_string(),
         message: "Sandbox cgroupfs collector sampled runtime-resolved cgroups".to_string(),
         source: format!(
-            "runtimepulse-rust-collector/{}/docker-sandbox-cgroupfs",
-            config.node_id
+            "runtimepulse-rust-collector/{}/{}",
+            config.node_id, sample_plugin
         ),
         attributes,
         sandbox_id: None,
@@ -424,6 +427,17 @@ fn collect_cgroup_targets(
         traces: Vec::new(),
         profiles: Vec::new(),
     })
+}
+
+fn sample_plugin_name(targets: &[SandboxCgroupTarget]) -> &'static str {
+    if targets
+        .iter()
+        .any(|target| target.runtime_source == "containerd")
+    {
+        "containerd-sandbox-cgroupfs"
+    } else {
+        "docker-sandbox-cgroupfs"
+    }
 }
 
 fn image_metadata_rows(candidates: Vec<DockerImageCandidate>) -> Vec<serde_json::Value> {

@@ -15,8 +15,8 @@ use collectors::sources::image::download::output_from_event as image_output_from
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
 use collectors::sources::runtime::containerd::{
-    collect_containerd_inventory, output_from_runtime_event as containerd_output_from_event,
-    stream_containerd_events,
+    collect_containerd_inventory, collect_containerd_task_targets,
+    output_from_runtime_event as containerd_output_from_event, stream_containerd_events,
 };
 use collectors::sources::runtime::docker::events::{
     collect_recent_docker_events, empty_output, merge_output, stream_docker_events, DockerEvent,
@@ -48,6 +48,8 @@ fn main() {
         run_host_docker()
     } else if env::args().any(|arg| arg == "host-containerd") {
         run_host_containerd()
+    } else if env::args().any(|arg| arg == "host-containerd-tasks") {
+        run_host_containerd_tasks()
     } else if env::args().any(|arg| arg == "host-containerd-events") {
         run_host_containerd_events()
     } else if env::args().any(|arg| arg == "host-kubelet-events") {
@@ -287,6 +289,23 @@ fn run_host_docker() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_host_containerd_tasks() -> Result<()> {
+    for target in collect_containerd_task_targets()? {
+        println!(
+            "{}",
+            json!({
+                "containerId": target.container_id,
+                "namespace": target.namespace,
+                "imageRef": target.image_ref,
+                "runtimeName": target.runtime_name,
+                "pid": target.pid,
+                "labels": target.labels,
+            })
+        );
+    }
     Ok(())
 }
 

@@ -619,11 +619,16 @@ async fn collect_containerd_task_targets_async(
             if task.pid == 0 {
                 continue;
             }
-            let Some(container) = containers_by_id.get(&task.container_id) else {
+            let container_id = if task.container_id.is_empty() {
+                task.id.clone()
+            } else {
+                task.container_id.clone()
+            };
+            let Some(container) = containers_by_id.get(&container_id) else {
                 continue;
             };
             targets.push(ContainerdTaskTarget {
-                container_id: task.container_id,
+                container_id,
                 namespace: namespace.clone(),
                 image_ref: if container.image.is_empty() {
                     "containerd/unknown:latest".to_string()

@@ -94,6 +94,32 @@ RUNTIMEPULSE_CRI_EVENTS_CMD='cat rust-collector/examples/cri-events.jsonl' \
 cargo run --manifest-path rust-collector/Cargo.toml -- host-kubelet-events
 ```
 
+Local containerd validation can use an isolated containerd instance instead of
+the system socket:
+
+```bash
+mkdir -p /tmp/runtimepulse-containerd-test/{root,state,logs}
+containerd config default > /tmp/runtimepulse-containerd-test/config.toml
+# Edit root/state/grpc.address to point at /tmp/runtimepulse-containerd-test.
+sudo containerd --config /tmp/runtimepulse-containerd-test/config.toml \
+  > /tmp/runtimepulse-containerd-test/logs/containerd.log 2>&1 &
+docker save ubuntu:24.04 -o /tmp/runtimepulse-containerd-test/ubuntu.tar
+sudo ctr --address /tmp/runtimepulse-containerd-test/containerd.sock \
+  --namespace k8s.io images import /tmp/runtimepulse-containerd-test/ubuntu.tar
+sudo ctr --address /tmp/runtimepulse-containerd-test/containerd.sock \
+  --namespace k8s.io run --detach \
+  --label io.kubernetes.pod.namespace=default \
+  --label io.kubernetes.pod.name=runtimepulse-ctrd-demo \
+  --label io.kubernetes.container.name=app \
+  --label io.kubernetes.pod.uid=runtimepulse-ctrd-demo-uid \
+  docker.io/library/ubuntu:24.04 runtimepulse-ctrd-demo sleep 600
+RUNTIMEPULSE_COLLECTOR_ONCE=true \
+RUNTIMEPULSE_HOST_AGENT_SOURCES=containerd-inventory,containerd-sandbox-cgroupfs \
+RUNTIMEPULSE_CONTAINERD_SOCKET=/tmp/runtimepulse-containerd-test/containerd.sock \
+RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
+runtimepulse-collector host-agent
+```
+
 ```bash
 cd rust-collector
 RUNTIMEPULSE_COLLECTOR_NODE_ID="$(hostname)" \
