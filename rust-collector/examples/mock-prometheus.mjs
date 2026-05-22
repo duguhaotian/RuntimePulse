@@ -29,11 +29,11 @@ createServer((request, response) => {
       resultType: 'vector',
       result: [{
         metric: {
-          namespace: 'default',
-          pod: 'runtimepulse-demo',
-          container: metricName?.includes('network') ? 'pod' : 'app',
-          node: 'kind-worker',
-          image: 'registry.local/runtimepulse/demo:v1',
+          pod_namespace: 'default',
+          pod_name: 'runtimepulse-demo',
+          container_name: metricName?.includes('network') ? 'pod' : 'app',
+          kubernetes_io_hostname: 'kind-worker',
+          image_name: 'registry.local/runtimepulse/demo:v1',
         },
         value: [1779340100, value],
       }],

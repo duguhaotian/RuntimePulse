@@ -124,16 +124,21 @@ impl CollectorPlugin for KubernetesMetricsPlugin {
 
                 let value = sample.value.1.parse::<f64>().unwrap_or(0.0);
                 let sandbox_id = kubernetes_sandbox_id(&namespace, &pod, &container);
+                let node_id =
+                    metric_node_id(&sample.metric).unwrap_or_else(|| config.node_id.clone());
+                let image_ref = metric_image_ref(&sample.metric)
+                    .unwrap_or_else(|| "kubernetes/unknown:latest".to_string());
+
                 if query.scope == KubernetesMetricScope::Container {
                     output.metadata.sandboxes.push(json!({
                         "id": sandbox_id,
                         "clusterId": config.cluster_id,
-                        "nodeId": label_value(&sample.metric, "node").unwrap_or_else(|| config.node_id.clone()),
+                        "nodeId": node_id,
                         "namespace": namespace,
                         "workloadId": pod,
                         "workloadName": format!("{pod}/{container}"),
                         "imageId": "kubernetes-image-unknown",
-                        "imageRef": label_value(&sample.metric, "image").unwrap_or_else(|| "kubernetes/unknown:latest".to_string()),
+                        "imageRef": image_ref,
                         "runtimeType": "kubernetes",
                         "runtimeVersion": "prometheus-metrics",
                         "status": "running",
@@ -162,8 +167,9 @@ impl CollectorPlugin for KubernetesMetricsPlugin {
                     unit: Some(query.unit.to_string()),
                     group: Some(query.group.to_string()),
                     sandbox_id: Some(sandbox_id),
-                    node_id: label_value(&sample.metric, "node")
-                        .or_else(|| Some(config.node_id.clone())),
+                    node_id: Some(
+                        metric_node_id(&sample.metric).unwrap_or_else(|| config.node_id.clone()),
+                    ),
                     image_id: None,
                     runtime_type: Some("kubernetes".to_string()),
                     attributes: Some(metric_attributes(&sample.metric, query)),
@@ -271,16 +277,12 @@ fn sample_identity(
     metric: &Map<String, serde_json::Value>,
     scope: KubernetesMetricScope,
 ) -> Option<(String, String, String)> {
-    let namespace = label_value(metric, "namespace")?;
-    let pod = label_value(metric, "pod")
-        .or_else(|| label_value(metric, "pod_name"))
-        .unwrap_or_default();
+    let namespace = metric_namespace(metric)?;
+    let pod = metric_pod(metric).unwrap_or_default();
     let container = if scope == KubernetesMetricScope::Pod {
         "pod".to_string()
     } else {
-        label_value(metric, "container")
-            .or_else(|| label_value(metric, "container_name"))
-            .unwrap_or_default()
+        metric_container(metric).unwrap_or_default()
     };
     Some((namespace, pod, container))
 }
@@ -303,10 +305,20 @@ fn metric_attributes(
     attributes.insert("metrics.source".to_string(), json!("prometheus"));
     attributes.insert("metrics.scope".to_string(), json!(query.scope.as_str()));
     attributes.insert("prometheus.metric".to_string(), json!(query.label));
-    for key in ["namespace", "pod", "container", "node", "image"] {
-        if let Some(value) = label_value(metric, key) {
-            attributes.insert(format!("k8s.{key}"), json!(value));
-        }
+    if let Some(value) = metric_namespace(metric) {
+        attributes.insert("k8s.namespace".to_string(), json!(value));
+    }
+    if let Some(value) = metric_pod(metric) {
+        attributes.insert("k8s.pod".to_string(), json!(value));
+    }
+    if let Some(value) = metric_container(metric) {
+        attributes.insert("k8s.container".to_string(), json!(value));
+    }
+    if let Some(value) = metric_node_id(metric) {
+        attributes.insert("k8s.node".to_string(), json!(value));
+    }
+    if let Some(value) = metric_image_ref(metric) {
+        attributes.insert("k8s.image".to_string(), json!(value));
     }
     if query.scope == KubernetesMetricScope::Pod {
         attributes.insert("k8s.container".to_string(), json!("pod"));
@@ -314,8 +326,69 @@ fn metric_attributes(
     attributes
 }
 
+fn metric_namespace(metric: &Map<String, serde_json::Value>) -> Option<String> {
+    first_label_value(
+        metric,
+        &[
+            "namespace",
+            "pod_namespace",
+            "kubernetes_namespace",
+            "k8s_namespace",
+        ],
+    )
+}
+
+fn metric_pod(metric: &Map<String, serde_json::Value>) -> Option<String> {
+    first_label_value(
+        metric,
+        &["pod", "pod_name", "kubernetes_pod_name", "k8s_pod"],
+    )
+}
+
+fn metric_container(metric: &Map<String, serde_json::Value>) -> Option<String> {
+    first_label_value(
+        metric,
+        &[
+            "container",
+            "container_name",
+            "kubernetes_container_name",
+            "k8s_container",
+        ],
+    )
+}
+
+fn metric_node_id(metric: &Map<String, serde_json::Value>) -> Option<String> {
+    first_label_value(
+        metric,
+        &[
+            "node",
+            "node_name",
+            "kubernetes_io_hostname",
+            "kubernetes_node",
+            "nodename",
+            "exported_node",
+        ],
+    )
+}
+
+fn metric_image_ref(metric: &Map<String, serde_json::Value>) -> Option<String> {
+    first_label_value(
+        metric,
+        &["image", "image_name", "container_image", "k8s_image"],
+    )
+}
+
+fn first_label_value(metric: &Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| label_value(metric, key))
+}
+
 fn label_value(metric: &Map<String, serde_json::Value>, key: &str) -> Option<String> {
-    metric.get(key)?.as_str().map(ToOwned::to_owned)
+    metric
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn dedupe_metadata_by_id(rows: &mut Vec<serde_json::Value>) {
@@ -393,6 +466,66 @@ mod tests {
                 .get("k8s.container")
                 .and_then(|value| value.as_str()),
             Some("pod")
+        );
+    }
+
+    #[test]
+    fn cadvisor_label_aliases_map_to_kubernetes_identity() {
+        let query = KubernetesMetricQuery {
+            name: "sandbox.cpu.usage_ratio",
+            label: "container_cpu_usage_seconds_total",
+            unit: "ratio",
+            group: "cpu",
+            scope: KubernetesMetricScope::Container,
+            query: String::new(),
+        };
+        let metric = Map::from_iter([
+            ("pod_namespace".to_string(), json!("default")),
+            ("pod_name".to_string(), json!("runtimepulse-demo")),
+            ("container_name".to_string(), json!("app")),
+            ("kubernetes_io_hostname".to_string(), json!("kind-worker")),
+            (
+                "image_name".to_string(),
+                json!("registry.local/runtimepulse/demo:v1"),
+            ),
+        ]);
+
+        let (namespace, pod, container) =
+            sample_identity(&metric, query.scope).expect("container identity");
+        assert_eq!(
+            kubernetes_sandbox_id(&namespace, &pod, &container),
+            "k8s-default-runtimepulse-demo-app"
+        );
+        assert_eq!(metric_node_id(&metric).as_deref(), Some("kind-worker"));
+        assert_eq!(
+            metric_image_ref(&metric).as_deref(),
+            Some("registry.local/runtimepulse/demo:v1")
+        );
+
+        let attributes = metric_attributes(&metric, &query);
+        assert_eq!(
+            attributes
+                .get("k8s.namespace")
+                .and_then(|value| value.as_str()),
+            Some("default")
+        );
+        assert_eq!(
+            attributes.get("k8s.pod").and_then(|value| value.as_str()),
+            Some("runtimepulse-demo")
+        );
+        assert_eq!(
+            attributes
+                .get("k8s.container")
+                .and_then(|value| value.as_str()),
+            Some("app")
+        );
+        assert_eq!(
+            attributes.get("k8s.node").and_then(|value| value.as_str()),
+            Some("kind-worker")
+        );
+        assert_eq!(
+            attributes.get("k8s.image").and_then(|value| value.as_str()),
+            Some("registry.local/runtimepulse/demo:v1")
         );
     }
 }

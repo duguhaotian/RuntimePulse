@@ -158,6 +158,7 @@ Implemented:
 - P1 runtime priority is Kubernetes on containerd first. Docker remains the single-node/local validation path, while CRI/Kubelet event ingestion enriches Kubernetes lifecycle context around containerd inventory and events.
 - Kubernetes regular resource metrics are imported from the existing metrics platform through the optional `kubernetes-metrics` Prometheus adapter instead of re-sampling the same cgroups from RuntimePulse.
 - Kubernetes Prometheus network metrics are treated as pod-scoped series and attached to matching container sandbox detail queries by `k8s.namespace`/`k8s.pod`, avoiding fake per-container network sandbox identities.
+- Kubernetes Prometheus label ingestion accepts common cAdvisor/Kubernetes aliases such as `pod_name`, `container_name`, `pod_namespace`, `kubernetes_io_hostname`, and `image_name`, then normalizes them into RuntimePulse `k8s.*` attributes.
 - Containerd inventory/events in the `k8s.io` namespace now derive the same `k8s-{namespace}-{pod}-{container}` sandbox id used by the Prometheus adapter, while preserving the raw containerd id in attributes.
 - Containerd startup trace spans now use the same Kubernetes sandbox id as inventory, events, and Prometheus metrics, so K8s sandbox detail pages can correlate lifecycle trace timing with runtime metadata and resource curves.
 - Containerd inventory no longer fabricates `startedAt` from the periodic collection time; startup completion time must come from task start events or startup trace spans.
