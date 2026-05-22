@@ -302,6 +302,7 @@ fn run_host_containerd_tasks() -> Result<()> {
                 "imageRef": target.image_ref,
                 "runtimeName": target.runtime_name,
                 "pid": target.pid,
+                "status": target.status,
                 "labels": target.labels,
             })
         );

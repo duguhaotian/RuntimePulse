@@ -137,11 +137,12 @@ impl DockerSandboxCgroupfsPlugin {
         config: &CollectorConfig,
         targets: &[ContainerdSandboxCgroupTarget],
     ) -> Result<PluginOutput> {
-        collect_cgroup_targets(
+        collect_cgroup_targets_with_source(
             self,
             now,
             config,
             containerd_cgroup_targets_for_targets(&self.root, targets),
+            Some("containerd"),
         )
     }
 }
@@ -163,6 +164,16 @@ fn collect_cgroup_targets(
     config: &CollectorConfig,
     targets: Vec<SandboxCgroupTarget>,
 ) -> Result<PluginOutput> {
+    collect_cgroup_targets_with_source(plugin, now, config, targets, None)
+}
+
+fn collect_cgroup_targets_with_source(
+    plugin: &mut DockerSandboxCgroupfsPlugin,
+    now: DateTime<Utc>,
+    config: &CollectorConfig,
+    targets: Vec<SandboxCgroupTarget>,
+    runtime_source_hint: Option<&str>,
+) -> Result<PluginOutput> {
     let ts = timestamp(now);
     let sample_interval = plugin
         .last_seen
@@ -173,7 +184,7 @@ fn collect_cgroup_targets(
     let mut sampled_sandbox_ids = Vec::new();
     let mut metrics = Vec::new();
     let target_count = targets.len();
-    let sample_plugin = sample_plugin_name(&targets);
+    let sample_plugin = sample_plugin_name(&targets, runtime_source_hint);
 
     for target in targets {
         let Some(sample) = read_sandbox_cgroup_sample(&target.cgroup_path, target.pid) else {
@@ -429,10 +440,14 @@ fn collect_cgroup_targets(
     })
 }
 
-fn sample_plugin_name(targets: &[SandboxCgroupTarget]) -> &'static str {
-    if targets
-        .iter()
-        .any(|target| target.runtime_source == "containerd")
+fn sample_plugin_name(
+    targets: &[SandboxCgroupTarget],
+    runtime_source_hint: Option<&str>,
+) -> &'static str {
+    if runtime_source_hint == Some("containerd")
+        || targets
+            .iter()
+            .any(|target| target.runtime_source == "containerd")
     {
         "containerd-sandbox-cgroupfs"
     } else {

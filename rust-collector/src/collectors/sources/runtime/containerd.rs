@@ -15,6 +15,7 @@ use containerd_client::services::v1::{
     ListImagesRequest, ListNamespacesRequest, ListTasksRequest, SubscribeRequest,
 };
 use containerd_client::tonic::{Code, Request};
+use containerd_client::types::v1::Status as ContainerdTaskStatus;
 use containerd_client::{with_namespace, Client};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -83,6 +84,7 @@ pub struct ContainerdTaskTarget {
     pub runtime_name: String,
     pub labels: HashMap<String, String>,
     pub pid: u32,
+    pub status: String,
 }
 
 pub fn collect_containerd_inventory(
@@ -451,6 +453,13 @@ async fn collect_containerd_inventory_async(
             }
         }
 
+        let tasks_by_container_id = async_list_tasks(&client, &namespace)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|task| (containerd_task_container_id(&task), task))
+            .collect::<HashMap<_, _>>();
+
         for container in async_list_containers(&client, &namespace).await? {
             let image_ref = if container.image.is_empty() {
                 "containerd/unknown:latest".to_string()
@@ -469,6 +478,14 @@ async fn collect_containerd_inventory_async(
                 .as_ref()
                 .and_then(timestamp_from_prost)
                 .unwrap_or_else(|| ts.clone());
+            let task = tasks_by_container_id.get(&container.id);
+            let task_status = task
+                .map(|task| containerd_task_status_name(task.status))
+                .unwrap_or("MISSING");
+            let sandbox_status = task
+                .map(|task| containerd_task_status_to_sandbox_status(task.status))
+                .unwrap_or("stopped");
+            let task_pid = task.map(|task| task.pid).unwrap_or(0);
 
             images.entry(image_id.clone()).or_insert_with(|| {
                 image_row(
@@ -492,8 +509,9 @@ async fn collect_containerd_inventory_async(
                 "imageRef": image_ref,
                 "runtimeType": runtime_type,
                 "runtimeVersion": runtime_version,
-                "status": "running",
+                "status": sandbox_status,
                 "createdAt": created_at,
+                "startedAt": if sandbox_status == "running" { Some(ts.clone()) } else { None },
                 "startupDurationMs": 0,
                 "cpuAvg": 0,
                 "memoryPeakBytes": 0,
@@ -507,10 +525,14 @@ async fn collect_containerd_inventory_async(
                     "runtime.source": "containerd",
                     "containerd.namespace": namespace,
                     "containerd.id": container.id,
+                    "containerd.taskStatus": task_status,
+                    "containerd.pid": task_pid,
                     "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
                     "containerd.snapshotter": container.snapshotter,
                     "containerd.snapshotKey": container.snapshot_key,
                     "containerd.sandbox": container.sandbox,
+                    "lifecycle.action": "inventory",
+                    "lifecycle.current": sandbox_status == "running",
                     "k8s.namespace": identity.kubernetes_namespace,
                     "k8s.pod": identity.pod_name,
                     "k8s.container": identity.container_name,
@@ -523,6 +545,13 @@ async fn collect_containerd_inventory_async(
             attributes.insert("scope".to_string(), json!(config.collection_scope));
             attributes.insert("containerd.namespace".to_string(), json!(namespace));
             attributes.insert("containerd.id".to_string(), json!(container.id));
+            attributes.insert("containerd.taskStatus".to_string(), json!(task_status));
+            attributes.insert("containerd.pid".to_string(), json!(task_pid));
+            attributes.insert("lifecycle.action".to_string(), json!("inventory"));
+            attributes.insert(
+                "lifecycle.current".to_string(),
+                json!(sandbox_status == "running"),
+            );
             attributes.insert(
                 "containerd.runtime_sandbox_id".to_string(),
                 json!(identity.runtime_sandbox_id),
@@ -551,7 +580,7 @@ async fn collect_containerd_inventory_async(
                 event_type: "container".to_string(),
                 event_name: "containerd.container.observed".to_string(),
                 message: format!(
-                    "containerd container {workload_name} is visible in namespace {namespace}."
+                    "containerd container {workload_name} is {sandbox_status} in namespace {namespace}."
                 ),
                 source: format!("runtimepulse-rust-collector/{}/containerd", config.node_id),
                 attributes,
@@ -619,11 +648,10 @@ async fn collect_containerd_task_targets_async(
             if task.pid == 0 {
                 continue;
             }
-            let container_id = if task.container_id.is_empty() {
-                task.id.clone()
-            } else {
-                task.container_id.clone()
-            };
+            if !is_active_containerd_task_status(task.status) {
+                continue;
+            }
+            let container_id = containerd_task_container_id(&task);
             let Some(container) = containers_by_id.get(&container_id) else {
                 continue;
             };
@@ -639,6 +667,7 @@ async fn collect_containerd_task_targets_async(
                     .unwrap_or_else(|| "containerd".to_string()),
                 labels: container.labels.clone(),
                 pid: task.pid,
+                status: containerd_task_status_name(task.status).to_string(),
             });
         }
     }
@@ -1288,6 +1317,40 @@ fn runtime_type_from_name(runtime: &str) -> String {
         "firecracker".to_string()
     } else {
         "runc".to_string()
+    }
+}
+
+fn containerd_task_container_id(task: &containerd_client::types::v1::Process) -> String {
+    if task.container_id.is_empty() {
+        task.id.clone()
+    } else {
+        task.container_id.clone()
+    }
+}
+
+fn containerd_task_status_name(status: i32) -> &'static str {
+    ContainerdTaskStatus::try_from(status)
+        .unwrap_or(ContainerdTaskStatus::Unknown)
+        .as_str_name()
+}
+
+fn is_active_containerd_task_status(status: i32) -> bool {
+    matches!(
+        ContainerdTaskStatus::try_from(status).unwrap_or(ContainerdTaskStatus::Unknown),
+        ContainerdTaskStatus::Created
+            | ContainerdTaskStatus::Running
+            | ContainerdTaskStatus::Paused
+            | ContainerdTaskStatus::Pausing
+    )
+}
+
+fn containerd_task_status_to_sandbox_status(status: i32) -> &'static str {
+    match ContainerdTaskStatus::try_from(status).unwrap_or(ContainerdTaskStatus::Unknown) {
+        ContainerdTaskStatus::Created
+        | ContainerdTaskStatus::Running
+        | ContainerdTaskStatus::Paused
+        | ContainerdTaskStatus::Pausing => "running",
+        ContainerdTaskStatus::Stopped | ContainerdTaskStatus::Unknown => "stopped",
     }
 }
 
