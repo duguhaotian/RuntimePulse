@@ -127,6 +127,11 @@ such as `RUNTIMEPULSE_COMMAND_PLUGIN_0_CMD` and
 plugin-specific timeout variables to keep slow third-party tools from blocking
 the host-agent collection loop.
 
+Each host-agent source keeps its own local report source label through the
+outlet. The outlet submits separate central ingest batches for labels such as
+`host-procfs`, `host-docker`, `host-image-cache`, and `host-profile-report`, so
+Collector Status can identify which collector produced the rows.
+
 The host-agent is expected to run as root in the systemd deployment because it
 needs host-wide `/proc`, `/proc/pressure/*`, cgroupfs, Docker, containerd, and
 future eBPF/profile visibility. `containerd-inventory` can be added to the source list when

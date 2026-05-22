@@ -6,7 +6,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use reqwest::blocking::Client;
 use serde_json::{json, Map};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -493,117 +493,150 @@ fn run_sender(
     spool: HostAgentSpool,
 ) -> Result<()> {
     let client = Client::new();
-    let mut pending = PluginOutput::default();
-    let mut pending_count = 0_usize;
+    let mut pending = PendingSourceReports::default();
 
     loop {
         match rx.recv_timeout(flush_interval) {
             Ok(output) => {
                 decrement_queue_depth(&stats);
-                merge_plugin_output(&mut pending, output);
-                pending_count += 1;
-                while pending_count < MAX_REPORTS_PER_BATCH {
+                pending.push(output);
+                while pending.total_reports < MAX_REPORTS_PER_BATCH {
                     match rx.try_recv() {
                         Ok(output) => {
                             decrement_queue_depth(&stats);
-                            merge_plugin_output(&mut pending, output);
-                            pending_count += 1;
+                            pending.push(output);
                         }
                         Err(_) => break,
                     }
                 }
-                if pending_count >= MAX_REPORTS_PER_BATCH {
-                    flush_pending(
-                        &client,
-                        &config,
-                        &mut pending,
-                        &mut pending_count,
-                        &stats,
-                        &spool,
-                    )?;
+                if pending.total_reports >= MAX_REPORTS_PER_BATCH {
+                    flush_pending(&client, &config, &mut pending, &stats, &spool)?;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                flush_pending(
-                    &client,
-                    &config,
-                    &mut pending,
-                    &mut pending_count,
-                    &stats,
-                    &spool,
-                )?;
+                flush_pending(&client, &config, &mut pending, &stats, &spool)?;
             }
             Err(RecvTimeoutError::Disconnected) => {
-                flush_pending(
-                    &client,
-                    &config,
-                    &mut pending,
-                    &mut pending_count,
-                    &stats,
-                    &spool,
-                )?;
+                flush_pending(&client, &config, &mut pending, &stats, &spool)?;
                 return Ok(());
             }
         }
     }
 }
 
+#[derive(Default)]
+struct PendingSourceReports {
+    by_source: HashMap<String, PendingSourceReport>,
+    order: VecDeque<String>,
+    total_reports: usize,
+}
+
+#[derive(Default)]
+struct PendingSourceReport {
+    output: PluginOutput,
+    report_count: usize,
+}
+
+impl PendingSourceReports {
+    fn push(&mut self, output: PluginOutput) {
+        let source = output
+            .source
+            .clone()
+            .unwrap_or_else(|| "host-agent".to_string());
+        if !self.by_source.contains_key(&source) {
+            self.order.push_back(source.clone());
+        }
+        let pending = self.by_source.entry(source).or_default();
+        merge_plugin_output(&mut pending.output, output);
+        pending.report_count += 1;
+        self.total_reports += 1;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total_reports == 0
+    }
+
+    fn drain_ordered(&mut self) -> Vec<(String, PendingSourceReport)> {
+        let mut reports = Vec::new();
+        while let Some(source) = self.order.pop_front() {
+            if let Some(report) = self.by_source.remove(&source) {
+                reports.push((source, report));
+            }
+        }
+        self.total_reports = 0;
+        reports
+    }
+}
+
 fn flush_pending(
     client: &Client,
     config: &CollectorConfig,
-    pending: &mut PluginOutput,
-    pending_count: &mut usize,
+    pending: &mut PendingSourceReports,
     stats: &HostAgentStats,
     spool: &HostAgentSpool,
 ) -> Result<()> {
     replay_spooled_reports(client, config, stats, spool);
 
-    if *pending_count == 0 || !has_plugin_output_payload(pending) {
-        *pending = PluginOutput::default();
-        *pending_count = 0;
+    if pending.is_empty() {
         return Ok(());
     }
 
-    match send_local_report(client, &config.local_report_url, pending) {
+    for (source, mut report) in pending.drain_ordered() {
+        if !has_plugin_output_payload(&report.output) {
+            continue;
+        }
+        report.output.source = Some(source.clone());
+        flush_source_report(client, config, stats, spool, &source, report)?;
+    }
+
+    Ok(())
+}
+
+fn flush_source_report(
+    client: &Client,
+    config: &CollectorConfig,
+    stats: &HostAgentStats,
+    spool: &HostAgentSpool,
+    source: &str,
+    report: PendingSourceReport,
+) -> Result<()> {
+    match send_local_report(client, &config.local_report_url, &report.output) {
         Ok(()) => {
-            let report_count = *pending_count;
             stats.sent_batches.fetch_add(1, Ordering::Relaxed);
             stats
                 .sent_reports
-                .fetch_add(report_count as u64, Ordering::Relaxed);
+                .fetch_add(report.report_count as u64, Ordering::Relaxed);
             println!(
                 "{}",
                 json!({
                     "level": "info",
                     "message": "host_agent_batch_report_accepted",
                     "url": config.local_report_url,
-                    "reports": report_count,
-                    "sandboxes": pending.metadata.sandboxes.len(),
-                    "images": pending.metadata.images.len(),
-                    "metrics": pending.metrics.len(),
-                    "events": pending.events.len(),
+                    "source": source,
+                    "reports": report.report_count,
+                    "sandboxes": report.output.metadata.sandboxes.len(),
+                    "images": report.output.metadata.images.len(),
+                    "metrics": report.output.metrics.len(),
+                    "events": report.output.events.len(),
+                    "profiles": report.output.profiles.len(),
                 })
             );
-            *pending = PluginOutput::default();
-            *pending_count = 0;
             Ok(())
         }
         Err(error) => {
-            let report_count = *pending_count;
             stats.failed_batches.fetch_add(1, Ordering::Relaxed);
-            match spool.write(pending, report_count) {
+            match spool.write(&report.output, report.report_count) {
                 Ok(Some(path)) => {
                     stats.spooled_batches.fetch_add(1, Ordering::Relaxed);
                     stats
                         .spool_files
                         .store(spool.file_count().unwrap_or(0) as u64, Ordering::Relaxed);
-                    *pending = PluginOutput::default();
-                    *pending_count = 0;
                     eprintln!(
                         "{}",
                         json!({
                             "level": "warning",
                             "message": "host_agent_batch_spooled",
+                            "source": source,
                             "path": path.display().to_string(),
                         })
                     );
@@ -614,6 +647,7 @@ fn flush_pending(
                     json!({
                         "level": "error",
                         "message": "host_agent_batch_spool_failed",
+                        "source": source,
                         "error": spool_error.to_string(),
                     })
                 ),
@@ -623,8 +657,9 @@ fn flush_pending(
                 json!({
                     "level": "error",
                     "message": "host_agent_batch_report_failed",
+                    "source": source,
                     "error": error.to_string(),
-                    "queuedReports": report_count,
+                    "queuedReports": report.report_count,
                 })
             );
             Ok(())
@@ -749,11 +784,14 @@ fn enqueue_collected(
 fn enqueue_report(
     source: &str,
     tx: &SyncSender<PluginOutput>,
-    output: PluginOutput,
+    mut output: PluginOutput,
     stats: &Arc<HostAgentStats>,
 ) {
     if !has_plugin_output_payload(&output) {
         return;
+    }
+    if output.source.is_none() {
+        output.source = Some(source.to_string());
     }
 
     match tx.try_send(output) {
@@ -1083,6 +1121,7 @@ fn host_agent_stats_output(
     }
 
     PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,
@@ -1400,6 +1439,7 @@ fn docker_startup_trace_output(
     attributes.insert("scope".to_string(), json!(config.collection_scope));
 
     PluginOutput {
+        source: None,
         metadata: Metadata::default(),
         metrics: Vec::new(),
         events: Vec::new(),
@@ -1544,6 +1584,7 @@ fn containerd_startup_trace_output(
     attributes.insert("scope".to_string(), json!(config.collection_scope));
 
     PluginOutput {
+        source: None,
         metadata: Metadata::default(),
         metrics: Vec::new(),
         events: Vec::new(),

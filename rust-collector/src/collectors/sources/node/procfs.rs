@@ -194,6 +194,7 @@ impl CollectorPlugin for ProcfsPlugin {
         }];
 
         Ok(PluginOutput {
+            source: None,
             metadata,
             metrics,
             events,

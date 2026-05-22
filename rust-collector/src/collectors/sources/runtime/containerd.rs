@@ -232,6 +232,7 @@ pub fn output_from_event(
     }
 
     Ok(Some(PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,
@@ -369,6 +370,7 @@ fn output_from_image_event(
     }
 
     Ok(Some(PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,
@@ -594,6 +596,7 @@ async fn collect_containerd_inventory_async(
     }
 
     Ok(PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,

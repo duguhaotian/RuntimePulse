@@ -195,6 +195,7 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
     }
 
     Some(PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,

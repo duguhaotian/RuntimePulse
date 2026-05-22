@@ -240,6 +240,7 @@ pub fn collect_docker_inventory(
     events.push(snapshot_event);
 
     Ok(PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,

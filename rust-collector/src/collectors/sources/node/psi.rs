@@ -72,6 +72,7 @@ impl CollectorPlugin for PsiPlugin {
         }];
 
         Ok(PluginOutput {
+            source: None,
             metadata: Metadata {
                 clusters: vec![json!({
                     "id": config.cluster_id,

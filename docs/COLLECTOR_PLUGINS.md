@@ -14,7 +14,7 @@ Each plugin returns partial ingest data:
 - `traces`: startup or runtime spans
 - `profiles`: profile artifact indexes
 
-The collector merges plugin outputs into one batch, adds the collector source, and posts it to the Query API ingest endpoint.
+The collector merges plugin outputs into one batch, adds the collector source, and posts it to the Query API ingest endpoint. Local reports sent by host-agent or host-visible tools may include an optional top-level `source`; the outlet preserves that label as the central ingest source so Collector Status can identify the exact local collector.
 
 For node deployments, plugin output should flow through the local outlet path even when the plugin runs in a separate container or process. This keeps node identity, batching, retry, and central ingest configuration in one place.
 

@@ -6,6 +6,8 @@ use serde_json::{Map, Value};
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default)]
     pub metadata: Metadata,
     #[serde(default)]

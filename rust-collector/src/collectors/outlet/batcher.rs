@@ -29,15 +29,27 @@ pub fn collect_once(
     local_reports: &Receiver<PluginOutput>,
     now: DateTime<Utc>,
 ) -> Result<BatchSummary> {
+    let collector_source = format!("runtimepulse-rust-collector/{}", config.node_id);
+    let observed_at = timestamp(now);
     let mut batch = IngestBatch {
-        source: format!("runtimepulse-rust-collector/{}", config.node_id),
-        observed_at: timestamp(now),
+        source: collector_source.clone(),
+        observed_at: observed_at.clone(),
         metadata: Metadata::default(),
         metrics: Vec::new(),
         events: Vec::new(),
         traces: Vec::new(),
         profiles: Vec::new(),
     };
+    let mut summary = BatchSummary {
+        source: collector_source.clone(),
+        submitted: false,
+        local_reports: 0,
+        metrics: 0,
+        events: 0,
+        traces: 0,
+        profiles: 0,
+    };
+    let mut submitted_sources = Vec::new();
 
     for plugin in plugins {
         let plugin_name = plugin.name().to_string();
@@ -50,35 +62,53 @@ pub fn collect_once(
         merge_output(&mut batch, output, now, config);
     }
 
-    let mut local_report_count = 0;
-    while let Ok(output) = local_reports.try_recv() {
-        local_report_count += 1;
-        merge_output(&mut batch, output, now, config);
+    if has_batch_payload(&batch) {
+        send_batch(client, config, &batch)?;
+        summary.submitted = true;
+        summary.metrics += batch.metrics.len();
+        summary.events += batch.events.len();
+        summary.traces += batch.traces.len();
+        summary.profiles += batch.profiles.len();
+        submitted_sources.push(batch.source.clone());
     }
 
-    if !has_batch_payload(&batch) {
-        return Ok(BatchSummary {
-            source: batch.source,
-            submitted: false,
-            local_reports: local_report_count,
-            metrics: 0,
-            events: 0,
-            traces: 0,
-            profiles: 0,
-        });
+    while let Ok(mut output) = local_reports.try_recv() {
+        summary.local_reports += 1;
+        let source = output
+            .source
+            .take()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| collector_source.clone());
+        let mut local_batch = IngestBatch {
+            source,
+            observed_at: observed_at.clone(),
+            metadata: Metadata::default(),
+            metrics: Vec::new(),
+            events: Vec::new(),
+            traces: Vec::new(),
+            profiles: Vec::new(),
+        };
+        merge_output(&mut local_batch, output, now, config);
+        if !has_batch_payload(&local_batch) {
+            continue;
+        }
+
+        send_batch(client, config, &local_batch)?;
+        summary.submitted = true;
+        summary.metrics += local_batch.metrics.len();
+        summary.events += local_batch.events.len();
+        summary.traces += local_batch.traces.len();
+        summary.profiles += local_batch.profiles.len();
+        submitted_sources.push(local_batch.source);
     }
 
-    send_batch(client, config, &batch)?;
+    summary.source = match submitted_sources.as_slice() {
+        [] => collector_source,
+        [source] => source.clone(),
+        _ => "multiple".to_string(),
+    };
 
-    Ok(BatchSummary {
-        source: batch.source,
-        submitted: true,
-        local_reports: local_report_count,
-        metrics: batch.metrics.len(),
-        events: batch.events.len(),
-        traces: batch.traces.len(),
-        profiles: batch.profiles.len(),
-    })
+    Ok(summary)
 }
 
 fn timestamp(time: DateTime<Utc>) -> String {

@@ -167,6 +167,7 @@ Implemented:
 - Host-agent can run optional `command` and `http` adapter sources, so third-party host tools that emit RuntimePulse partial output join the same queue, batching, spool, and outlet path.
 - Host-agent can run `image-cache`/`host-image-cache` to ingest real snapshotter/exporter JSON or JSONL reports for precise image stage spans and lazy block-cache hit curves.
 - Host-agent can run `profile-report`/`host-profile-report` to ingest real perf/eBPF/third-party JSON or JSONL profile artifact indexes through the same queue, batching, spool, and outlet path.
+- Host-agent and local report ingestion preserve per-source attribution, so collector status can distinguish `host-procfs`, `host-docker`, `host-profile-report`, and other local sources instead of collapsing everything into one outlet source.
 - Node detail page consumes node-level metric series directly, so host-agent health and node pressure are visible without relying on sandbox-level series.
 
 Collector candidates:

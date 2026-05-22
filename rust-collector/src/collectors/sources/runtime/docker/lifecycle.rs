@@ -111,6 +111,7 @@ pub fn output_from_event(
     }
 
     Ok(Some(PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,

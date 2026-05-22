@@ -413,6 +413,7 @@ fn collect_cgroup_targets_with_source(
     }];
 
     Ok(PluginOutput {
+        source: None,
         metadata: Metadata {
             clusters: vec![json!({
                 "id": config.cluster_id,

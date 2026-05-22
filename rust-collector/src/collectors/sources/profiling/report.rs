@@ -184,10 +184,11 @@ fn output_from_lightweight_report(report: ProfileReport, fallback_timestamp: &st
             let profile_type = profile.profile_type;
             let id = profile.id.unwrap_or_else(|| {
                 format!(
-                    "{}-{}-{}-{}",
+                    "{}-{}-{}-{}-{}",
                     sanitize_id(&source),
                     sanitize_id(&sandbox_id),
                     sanitize_id(&profile_type),
+                    sanitize_id(&profile_timestamp),
                     index
                 )
             });
@@ -209,6 +210,7 @@ fn output_from_lightweight_report(report: ProfileReport, fallback_timestamp: &st
         .collect();
 
     PluginOutput {
+        source: None,
         metadata: Metadata::default(),
         metrics: Vec::new(),
         events: Vec::new(),
@@ -305,7 +307,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(output.profiles.len(), 2);
-        assert_eq!(output.profiles[0].id, "perf-sandbox-a-cpu-0");
+        assert_eq!(
+            output.profiles[0].id,
+            "perf-sandbox-a-cpu-2026-05-22t00-00-00-000z-0"
+        );
         assert_eq!(output.profiles[0].sample_count, 42);
         assert_eq!(output.profiles[1].sandbox_id, "sandbox-b");
         assert_eq!(output.profiles[1].process_role, "unknown");

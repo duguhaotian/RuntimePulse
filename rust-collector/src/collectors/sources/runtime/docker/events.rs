@@ -107,6 +107,7 @@ where
 
 pub fn empty_output(_config: &CollectorConfig) -> PluginOutput {
     PluginOutput {
+        source: None,
         metadata: Metadata::default(),
         metrics: Vec::new(),
         events: Vec::new(),
@@ -116,6 +117,7 @@ pub fn empty_output(_config: &CollectorConfig) -> PluginOutput {
 }
 
 pub fn merge_output(target: &mut PluginOutput, output: PluginOutput) {
+    merge_source(&mut target.source, output.source);
     extend_unique_by_id(&mut target.metadata.clusters, output.metadata.clusters);
     extend_unique_by_id(&mut target.metadata.nodes, output.metadata.nodes);
     extend_unique_by_id(&mut target.metadata.images, output.metadata.images);
@@ -124,6 +126,17 @@ pub fn merge_output(target: &mut PluginOutput, output: PluginOutput) {
     target.events.extend(output.events);
     target.traces.extend(output.traces);
     target.profiles.extend(output.profiles);
+}
+
+fn merge_source(target: &mut Option<String>, source: Option<String>) {
+    let Some(source) = source else {
+        return;
+    };
+    match target {
+        None => *target = Some(source),
+        Some(existing) if existing == &source => {}
+        Some(_) => *target = None,
+    }
 }
 
 fn docker_events_command() -> Command {

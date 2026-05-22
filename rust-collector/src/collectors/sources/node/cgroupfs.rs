@@ -151,6 +151,7 @@ impl CollectorPlugin for CgroupfsPlugin {
         }];
 
         Ok(PluginOutput {
+            source: None,
             metadata: Metadata {
                 clusters: vec![json!({
                     "id": config.cluster_id,

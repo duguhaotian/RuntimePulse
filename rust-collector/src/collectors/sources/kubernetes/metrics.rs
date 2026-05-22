@@ -83,6 +83,7 @@ impl CollectorPlugin for KubernetesMetricsPlugin {
     fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
         let timestamp = now.to_rfc3339_opts(SecondsFormat::Millis, true);
         let mut output = PluginOutput {
+            source: None,
             metadata: Metadata {
                 clusters: vec![json!({
                     "id": config.cluster_id,
