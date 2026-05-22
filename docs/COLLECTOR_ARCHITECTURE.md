@@ -108,6 +108,9 @@ existing metrics platform, typically Prometheus scraping kubelet/cAdvisor. The
 RuntimePulse sandbox metrics. RuntimePulse host-side collectors should focus on
 runtime/image/startup/profile gaps that the standard metrics platform does not
 cover.
+Prometheus network counters are normally pod-scoped rather than container-scoped;
+RuntimePulse keeps them as pod-scoped metric series and attaches them to matching
+container sandbox detail queries by `k8s.namespace` and `k8s.pod`.
 
 For Kubernetes identity, containerd inventory/events and Prometheus metrics
 should converge on `k8s-{namespace}-{pod}-{container}` sandbox ids. The raw

@@ -60,7 +60,25 @@ export function liveSandboxHistory(store) {
 }
 
 export function liveMetricsForSandbox(store, sandboxId) {
-  return Array.from(store.metricsBySandbox.get(sandboxId)?.values() ?? []);
+  const ownSeries = Array.from(store.metricsBySandbox.get(sandboxId)?.values() ?? []);
+  const sandbox = store.sandboxes.get(sandboxId) ?? store.sandboxHistory.get(sandboxId);
+  const podNetworkSeries = podNetworkMetricsForSandbox(store, sandbox, sandboxId);
+  if (podNetworkSeries.length === 0) return ownSeries;
+
+  const byId = new Map(ownSeries.map((series) => [series.id, series]));
+  for (const series of podNetworkSeries) {
+    byId.set(`${series.id}-attached-to-${sanitizeMetricIdPart(sandboxId)}`, {
+      ...series,
+      id: `${series.id}-attached-to-${sanitizeMetricIdPart(sandboxId)}`,
+      sandboxId,
+      attributes: {
+        ...(series.attributes ?? {}),
+        'metrics.attachedFromSandboxId': series.sandboxId,
+        'metrics.attachedReason': 'same-k8s-pod-network',
+      },
+    });
+  }
+  return Array.from(byId.values());
 }
 
 export function liveMetricsForNode(store, nodeId) {
@@ -600,6 +618,31 @@ function metricSeriesId(scope, scopeId, metric) {
   const eventStream = stringValue(metric.attributes?.['collector.event_stream']);
   if (eventStream) parts.push('event-stream', sanitizeMetricIdPart(eventStream));
   return parts.join('-');
+}
+
+function podNetworkMetricsForSandbox(store, sandbox, sandboxId) {
+  if (!sandbox || !kubernetesSandboxId(sandboxId)) return [];
+  const attributes = isObject(sandbox.attributes) ? sandbox.attributes : {};
+  const namespace = stringValue(attributes['k8s.namespace']) ?? stringValue(sandbox.namespace);
+  const pod = stringValue(attributes['k8s.pod']) ?? stringValue(sandbox.workloadId);
+  const container = stringValue(attributes['k8s.container']);
+  if (!namespace || !pod || container === 'pod') return [];
+
+  const podSandboxId = `k8s-${sanitizeKubernetesIdPart(namespace)}-${sanitizeKubernetesIdPart(pod)}-pod`;
+  return Array.from(store.metricsBySandbox.get(podSandboxId)?.values() ?? [])
+    .filter((series) => series.group === 'network' && stringValue(series.attributes?.['metrics.scope']) === 'pod');
+}
+
+function kubernetesSandboxId(value) {
+  return String(value ?? '').startsWith('k8s-');
+}
+
+function sanitizeKubernetesIdPart(value) {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'unknown';
 }
 
 function sanitizeMetricIdPart(value) {

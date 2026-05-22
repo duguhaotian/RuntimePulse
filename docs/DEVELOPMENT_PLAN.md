@@ -156,6 +156,7 @@ Implemented:
 - Rust host-side CRI/Kubelet event streaming is available as optional `kubelet-events`/`host-kubelet-events`, using a configurable JSONL command such as `crictl events --output json` and converting Kubernetes container lifecycle events into RuntimePulse sandbox updates.
 - P1 runtime priority is Kubernetes on containerd first. Docker remains the single-node/local validation path, while CRI/Kubelet event ingestion enriches Kubernetes lifecycle context around containerd inventory and events.
 - Kubernetes regular resource metrics are imported from the existing metrics platform through the optional `kubernetes-metrics` Prometheus adapter instead of re-sampling the same cgroups from RuntimePulse.
+- Kubernetes Prometheus network metrics are treated as pod-scoped series and attached to matching container sandbox detail queries by `k8s.namespace`/`k8s.pod`, avoiding fake per-container network sandbox identities.
 - Containerd inventory/events in the `k8s.io` namespace now derive the same `k8s-{namespace}-{pod}-{container}` sandbox id used by the Prometheus adapter, while preserving the raw containerd id in attributes.
 - Containerd startup trace spans now use the same Kubernetes sandbox id as inventory, events, and Prometheus metrics, so K8s sandbox detail pages can correlate lifecycle trace timing with runtime metadata and resource curves.
 - CRI/Kubelet enrichment events now use the same Kubernetes sandbox id when pod/container labels are present, so lifecycle enrichment does not split from containerd inventory or Prometheus metric series.
