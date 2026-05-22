@@ -442,6 +442,7 @@ async fn collect_containerd_inventory_async(
     };
     let mut images = BTreeMap::new();
     let mut sandboxes = Vec::new();
+    let mut running_sandbox_ids = Vec::new();
     for namespace in namespaces {
         let content = async_list_content(&client, &namespace)
             .await
@@ -490,6 +491,15 @@ async fn collect_containerd_inventory_async(
                 .and_then(|task| task.exited_at.as_ref())
                 .and_then(timestamp_from_prost);
             let started_at = containerd_inventory_started_at(sandbox_status);
+            let current = sandbox_status == "running";
+            if current {
+                running_sandbox_ids.push(identity.sandbox_id.clone());
+            }
+            let snapshot_scope = if current {
+                Some("containerd-running")
+            } else {
+                None
+            };
 
             images.entry(image_id.clone()).or_insert_with(|| {
                 image_row(
@@ -538,7 +548,8 @@ async fn collect_containerd_inventory_async(
                     "containerd.snapshotKey": container.snapshot_key,
                     "containerd.sandbox": container.sandbox,
                     "lifecycle.action": "inventory",
-                    "lifecycle.current": sandbox_status == "running",
+                    "lifecycle.current": current,
+                    "snapshot.scope": snapshot_scope,
                     "startup.duration.source": "event-required",
                     "k8s.namespace": identity.kubernetes_namespace,
                     "k8s.pod": identity.pod_name,
@@ -566,7 +577,8 @@ async fn collect_containerd_inventory_async(
                     "collector": "runtimepulse-rust-collector",
                     "plugin": "containerd",
                     "scope": config.collection_scope,
-                }
+                },
+                "attributes": containerd_inventory_snapshot_attributes(config, &running_sandbox_ids)
             })],
             images: images.into_values().collect(),
             sandboxes,
@@ -1416,6 +1428,19 @@ where
     })
 }
 
+fn containerd_inventory_snapshot_attributes(
+    config: &CollectorConfig,
+    running_sandbox_ids: &[String],
+) -> Value {
+    json!({
+        "plugin": "containerd",
+        "scope": config.collection_scope,
+        "snapshot.scope": "containerd-running",
+        "snapshot.nodeId": config.node_id,
+        "snapshot.sandboxIds": running_sandbox_ids,
+    })
+}
+
 fn containerd_identity_from_labels(
     namespace: &str,
     container_id: &str,
@@ -1585,10 +1610,58 @@ fn timestamp(time: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn containerd_inventory_does_not_fabricate_started_at() {
         assert_eq!(containerd_inventory_started_at("running"), None);
         assert_eq!(containerd_inventory_started_at("stopped"), None);
+    }
+
+    #[test]
+    fn containerd_inventory_snapshot_attributes_track_running_sandboxes() {
+        let config = CollectorConfig {
+            ingest_url: "http://query-api/api/ingest/batch".to_string(),
+            node_id: "node-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            interval: Duration::from_secs(1),
+            local_report_addr: "127.0.0.1:9091".to_string(),
+            local_report_url: "http://127.0.0.1:9091/api/local/ingest".to_string(),
+            collection_scope: "host".to_string(),
+            once: true,
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            cgroup_max_entries: 200,
+            image_cache_report_path: None,
+            profile_report_path: None,
+            plugins: Vec::new(),
+            command_plugins: Vec::new(),
+            http_plugins: Vec::new(),
+        };
+        let attributes = containerd_inventory_snapshot_attributes(
+            &config,
+            &["k8s-default-runtimepulse-demo-app".to_string()],
+        );
+
+        assert_eq!(
+            attributes
+                .get("snapshot.scope")
+                .and_then(serde_json::Value::as_str),
+            Some("containerd-running")
+        );
+        assert_eq!(
+            attributes
+                .get("snapshot.nodeId")
+                .and_then(serde_json::Value::as_str),
+            Some("node-a")
+        );
+        assert_eq!(
+            attributes
+                .get("snapshot.sandboxIds")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(serde_json::Value::as_str),
+            Some("k8s-default-runtimepulse-demo-app")
+        );
     }
 }

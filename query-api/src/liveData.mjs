@@ -523,9 +523,16 @@ function reconcileSandboxSnapshot(store, scope, nodeId, sandboxIds) {
 
 function sandboxMatchesSnapshotScope(sandbox, scope) {
   if (stringValue(sandbox.attributes?.['snapshot.scope']) === scope) return true;
-  if (scope !== 'docker-running') return false;
+  if (scope === 'docker-running') {
+    return sandbox.id.startsWith('docker-') || Boolean(stringValue(sandbox.attributes?.['docker.id']));
+  }
+  if (scope === 'containerd-running') {
+    return sandbox.id.startsWith('containerd-')
+      || sandbox.id.startsWith('k8s-')
+      || Boolean(stringValue(sandbox.attributes?.['containerd.id']));
+  }
 
-  return sandbox.id.startsWith('docker-') || Boolean(stringValue(sandbox.attributes?.['docker.id']));
+  return false;
 }
 
 function reconcileImageSnapshot(store, scope, nodeId, imageIds) {
@@ -867,7 +874,7 @@ function stringValue(value) {
 
 function stringSet(value) {
   if (!Array.isArray(value)) return undefined;
-  return new Set(value.filter((item) => typeof item === 'string' && item.trim() !== ''));
+  return new Set(value.filter((item) => typeof item === 'string').map((item) => item.trim()).filter(Boolean));
 }
 
 function rowCount(collection) {

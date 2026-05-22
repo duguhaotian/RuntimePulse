@@ -183,6 +183,127 @@ test('reconciles sandbox snapshots from metadata without sample events', () => {
   assert.equal(snapshot.sandboxes, 1);
 });
 
+test('reconciles containerd running snapshots from inventory metadata', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'host-containerd',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [
+        {
+          id: 'k8s-default-live-app',
+          nodeId: 'node-a',
+          imageRef: 'image-a:latest',
+          runtimeType: 'runc',
+          attributes: {
+            'containerd.id': 'live',
+            'snapshot.scope': 'containerd-running',
+          },
+        },
+        {
+          id: 'k8s-default-gone-app',
+          nodeId: 'node-a',
+          imageRef: 'image-a:latest',
+          runtimeType: 'runc',
+          attributes: {
+            'containerd.id': 'gone',
+            'snapshot.scope': 'containerd-running',
+          },
+        },
+      ],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'host-containerd',
+    metadata: {
+      clusters: [],
+      nodes: [{
+        id: 'node-a',
+        attributes: {
+          'snapshot.scope': 'containerd-running',
+          'snapshot.nodeId': 'node-a',
+          'snapshot.sandboxIds': ['k8s-default-live-app'],
+        },
+      }],
+      images: [],
+      sandboxes: [{
+        id: 'k8s-default-live-app',
+        nodeId: 'node-a',
+        imageRef: 'image-a:latest',
+        runtimeType: 'runc',
+        attributes: {
+          'containerd.id': 'live',
+          'snapshot.scope': 'containerd-running',
+        },
+      }],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  const snapshot = liveStoreSnapshot(store);
+  assert.equal(snapshot.sandboxes, 1);
+});
+
+test('empty containerd running snapshot removes stale live sandboxes', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'host-containerd',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{
+        id: 'k8s-default-gone-app',
+        nodeId: 'node-a',
+        imageRef: 'image-a:latest',
+        runtimeType: 'runc',
+        attributes: {
+          'containerd.id': 'gone',
+          'snapshot.scope': 'containerd-running',
+        },
+      }],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'host-containerd',
+    metadata: {
+      clusters: [],
+      nodes: [{
+        id: 'node-a',
+        attributes: {
+          'snapshot.scope': 'containerd-running',
+          'snapshot.nodeId': 'node-a',
+          'snapshot.sandboxIds': [],
+        },
+      }],
+      images: [],
+      sandboxes: [],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  const snapshot = liveStoreSnapshot(store);
+  assert.equal(snapshot.sandboxes, 0);
+});
+
 test('keeps event source attribution when node metadata is refreshed by another source', () => {
   const store = createLiveStore();
   recordLiveBatch(store, {
