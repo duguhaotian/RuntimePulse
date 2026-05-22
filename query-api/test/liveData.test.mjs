@@ -120,3 +120,116 @@ test('counts profile-only reports by ingest source', () => {
   assert.equal(snapshot.profiles, 1);
   assert.equal(source?.profiles, 1);
 });
+
+test('reconciles sandbox snapshots from metadata without sample events', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'test/sandbox-cgroupfs',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [
+        {
+          id: 'docker-live',
+          nodeId: 'node-a',
+          imageRef: 'image-a:latest',
+          runtimeType: 'runc',
+          attributes: { 'snapshot.scope': 'docker-running' },
+        },
+        {
+          id: 'docker-gone',
+          nodeId: 'node-a',
+          imageRef: 'image-a:latest',
+          runtimeType: 'runc',
+          attributes: { 'snapshot.scope': 'docker-running' },
+        },
+      ],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'test/sandbox-cgroupfs',
+    metadata: {
+      clusters: [],
+      nodes: [{
+        id: 'node-a',
+        attributes: {
+          'snapshot.scope': 'docker-running',
+          'snapshot.nodeId': 'node-a',
+          'snapshot.sandboxIds': ['docker-live'],
+        },
+      }],
+      images: [],
+      sandboxes: [{
+        id: 'docker-live',
+        nodeId: 'node-a',
+        imageRef: 'image-a:latest',
+        runtimeType: 'runc',
+        attributes: { 'snapshot.scope': 'docker-running' },
+      }],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  const snapshot = liveStoreSnapshot(store);
+  assert.equal(snapshot.sandboxes, 1);
+});
+
+test('keeps event source attribution when node metadata is refreshed by another source', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'docker-events',
+    metadata: {
+      clusters: [],
+      nodes: [{ id: 'node-a' }],
+      images: [],
+      sandboxes: [],
+    },
+    metrics: [],
+    events: [{
+      id: 'event-a',
+      timestamp: '2026-05-22T02:00:00.000Z',
+      eventType: 'container',
+      eventName: 'docker.start',
+      severity: 'info',
+      nodeId: 'node-a',
+    }],
+    traces: [],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'host-cgroupfs',
+    metadata: {
+      clusters: [],
+      nodes: [{ id: 'node-a' }],
+      images: [],
+      sandboxes: [],
+    },
+    metrics: [{
+      timestamp: '2026-05-22T02:00:01.000Z',
+      name: 'node.cpu.usage_ratio',
+      value: 0.1,
+      unit: 'ratio',
+      group: 'cpu',
+      nodeId: 'node-a',
+    }],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  const snapshot = liveStoreSnapshot(store);
+  const dockerEvents = snapshot.sources.find((item) => item.source === 'docker-events');
+  const cgroupfs = snapshot.sources.find((item) => item.source === 'host-cgroupfs');
+  assert.equal(dockerEvents?.events, 1);
+  assert.equal(cgroupfs?.events ?? 0, 0);
+});

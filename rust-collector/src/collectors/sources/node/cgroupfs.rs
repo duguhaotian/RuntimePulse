@@ -4,7 +4,7 @@
 //! `sources::sandbox`.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde_json::{json, Map};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::{CollectorError, Result};
-use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
+use crate::collectors::core::model::{Metadata, PluginOutput};
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::core::report::node_metric;
 
@@ -124,32 +124,6 @@ impl CollectorPlugin for CgroupfsPlugin {
 
         self.last_seen = Some(Instant::now());
 
-        let mut attributes = Map::new();
-        attributes.insert("plugin".to_string(), json!("cgroupfs"));
-        attributes.insert("scope".to_string(), json!(config.collection_scope));
-        attributes.insert(
-            "cgroupRoot".to_string(),
-            json!(self.root.display().to_string()),
-        );
-        attributes.insert("sampleCount".to_string(), json!(1));
-        attributes.insert("scopeKind".to_string(), json!("host-root-cgroup"));
-
-        let events = vec![EventRecord {
-            id: format!("host-cgroupfs-observed-{}", now.timestamp()),
-            timestamp: ts.clone(),
-            severity: "info".to_string(),
-            event_type: "collector".to_string(),
-            event_name: "cgroupfs.sample.observed".to_string(),
-            message: "Rust host cgroupfs collector sampled cgroup metrics".to_string(),
-            source: format!("runtimepulse-rust-collector/{}/cgroupfs", config.node_id),
-            attributes,
-            sandbox_id: None,
-            image_id: None,
-            node_id: Some(config.node_id.clone()),
-            runtime_type: None,
-            reason: None,
-        }];
-
         Ok(PluginOutput {
             source: None,
             metadata: Metadata {
@@ -176,7 +150,7 @@ impl CollectorPlugin for CgroupfsPlugin {
                 sandboxes: Vec::new(),
             },
             metrics,
-            events,
+            events: Vec::new(),
             traces: Vec::new(),
             profiles: Vec::new(),
         })

@@ -3,12 +3,12 @@
 //! Collects host pressure stall information from `/proc/pressure/*`.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde_json::{json, Map};
+use serde_json::json;
 use std::fs;
 
 use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::Result;
-use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
+use crate::collectors::core::model::{Metadata, PluginOutput};
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::core::report::node_metric;
 
@@ -41,36 +41,6 @@ impl CollectorPlugin for PsiPlugin {
             ));
         }
 
-        let mut attributes = Map::new();
-        attributes.insert("plugin".to_string(), json!("psi"));
-        attributes.insert("scope".to_string(), json!(config.collection_scope));
-        attributes.insert("sampleCount".to_string(), json!(readings.len()));
-        attributes.insert("window".to_string(), json!("avg10"));
-
-        let events = vec![EventRecord {
-            id: format!("host-psi-observed-{}", now.timestamp()),
-            timestamp: ts,
-            severity: if readings.is_empty() {
-                "warning".to_string()
-            } else {
-                "info".to_string()
-            },
-            event_type: "collector".to_string(),
-            event_name: "psi.sample.observed".to_string(),
-            message: if readings.is_empty() {
-                "Rust PSI collector found no pressure stall information".to_string()
-            } else {
-                "Rust PSI collector sampled host pressure metrics".to_string()
-            },
-            source: format!("runtimepulse-rust-collector/{}/psi", config.node_id),
-            attributes,
-            sandbox_id: None,
-            image_id: None,
-            node_id: Some(config.node_id.clone()),
-            runtime_type: None,
-            reason: None,
-        }];
-
         Ok(PluginOutput {
             source: None,
             metadata: Metadata {
@@ -97,7 +67,7 @@ impl CollectorPlugin for PsiPlugin {
                 sandboxes: Vec::new(),
             },
             metrics,
-            events,
+            events: Vec::new(),
             traces: Vec::new(),
             profiles: Vec::new(),
         })

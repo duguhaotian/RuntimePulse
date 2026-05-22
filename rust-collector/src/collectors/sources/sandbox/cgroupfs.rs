@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::{CollectorError, Result};
-use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
+use crate::collectors::core::model::{Metadata, PluginOutput};
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::core::report::metric;
 use crate::collectors::sources::image::layer::{docker_image_metadata_rows, DockerImageCandidate};
@@ -381,37 +381,6 @@ fn collect_cgroup_targets_with_source(
     retain_seen(&mut plugin.last_network_rx_by_sandbox, &sandboxes);
     retain_seen(&mut plugin.last_network_tx_by_sandbox, &sandboxes);
 
-    let mut attributes = Map::new();
-    attributes.insert("plugin".to_string(), json!(sample_plugin));
-    attributes.insert("scope".to_string(), json!(config.collection_scope));
-    attributes.insert("targetCount".to_string(), json!(target_count));
-    attributes.insert("sampleCount".to_string(), json!(sandboxes.len()));
-    attributes.insert("resolver".to_string(), json!("runtime-pid-cgroup"));
-    attributes.insert("snapshot.nodeId".to_string(), json!(config.node_id));
-    attributes.insert(
-        "snapshot.sandboxIds".to_string(),
-        json!(sampled_sandbox_ids),
-    );
-
-    let events = vec![EventRecord {
-        id: format!("docker-sandbox-cgroupfs-observed-{}", now.timestamp()),
-        timestamp: ts,
-        severity: "info".to_string(),
-        event_type: "collector".to_string(),
-        event_name: "sandbox.cgroupfs.sample.observed".to_string(),
-        message: "Sandbox cgroupfs collector sampled runtime-resolved cgroups".to_string(),
-        source: format!(
-            "runtimepulse-rust-collector/{}/{}",
-            config.node_id, sample_plugin
-        ),
-        attributes,
-        sandbox_id: None,
-        image_id: None,
-        node_id: Some(config.node_id.clone()),
-        runtime_type: None,
-        reason: None,
-    }];
-
     Ok(PluginOutput {
         source: None,
         metadata: Metadata {
@@ -427,18 +396,36 @@ fn collect_cgroup_targets_with_source(
                 "status": "ready",
                 "labels": {
                     "collector": "runtimepulse-rust-collector",
-                    "plugin": "docker-sandbox-cgroupfs",
+                    "plugin": sample_plugin,
                     "scope": config.collection_scope,
+                },
+                "attributes": {
+                    "plugin": sample_plugin,
+                    "scope": config.collection_scope,
+                    "targetCount": target_count,
+                    "sampleCount": sandboxes.len(),
+                    "resolver": "runtime-pid-cgroup",
+                    "snapshot.scope": sample_snapshot_scope(sample_plugin),
+                    "snapshot.nodeId": config.node_id,
+                    "snapshot.sandboxIds": sampled_sandbox_ids,
                 }
             })],
             images: image_metadata_rows(image_candidates.into_values().collect()),
             sandboxes,
         },
         metrics,
-        events,
+        events: Vec::new(),
         traces: Vec::new(),
         profiles: Vec::new(),
     })
+}
+
+fn sample_snapshot_scope(sample_plugin: &str) -> &'static str {
+    if sample_plugin == "containerd-sandbox-cgroupfs" {
+        "containerd-running"
+    } else {
+        "docker-running"
+    }
 }
 
 fn sample_plugin_name(

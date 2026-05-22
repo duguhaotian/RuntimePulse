@@ -21,6 +21,7 @@ export function createLiveStore() {
     sourceByImage: new Map(),
     sourceBySandbox: new Map(),
     sourceByMetricSeries: new Map(),
+    sourceByEvent: new Map(),
     sourceByProfile: new Map(),
     snapshotScopeBySandbox: new Map(),
     lastUpdatedAt: undefined,
@@ -32,7 +33,7 @@ export function recordLiveBatch(store, payload) {
   reconcileSnapshotEvents(store, payload.events);
 
   for (const metric of array(payload.metrics)) rememberMetric(store, metric, payload.source);
-  for (const event of array(payload.events)) rememberEvent(store, event);
+  for (const event of array(payload.events)) rememberEvent(store, event, payload.source);
   for (const span of array(payload.traces)) rememberTraceSpan(store, span);
   for (const profile of array(payload.profiles)) rememberProfile(store, profile, payload.source);
 
@@ -179,6 +180,8 @@ function rememberMetadata(store, metadata, source) {
       }
     }
   }
+
+  reconcileSnapshotMetadata(store, metadata);
 }
 
 function normalizeCluster(cluster) {
@@ -251,32 +254,34 @@ function liveSourceSnapshots(store) {
     bySource.set(source, current);
   }
 
-  addEventCountsBySource(bySource, store.eventsBySandbox, store.sourceBySandbox);
-  addEventCountsBySource(bySource, store.eventsByNode, store.sourceByNode);
-  addEventCountsBySource(bySource, store.eventsByImage, store.sourceByImage);
+  addEventCountsBySource(bySource, store.eventsBySandbox, store.sourceBySandbox, store.sourceByEvent);
+  addEventCountsBySource(bySource, store.eventsByNode, store.sourceByNode, store.sourceByEvent);
+  addEventCountsBySource(bySource, store.eventsByImage, store.sourceByImage, store.sourceByEvent);
 
   return Array.from(bySource.values())
     .map(({ eventIds: _eventIds, ...snapshot }) => snapshot)
     .sort((left, right) => right.metricPoints - left.metricPoints);
 }
 
-function addEventCountsBySource(bySource, eventsByKey, sourceByKey) {
+function addEventCountsBySource(bySource, eventsByKey, sourceByKey, sourceByEvent) {
   for (const [key, rows] of eventsByKey.entries()) {
-    const source = sourceByKey.get(key);
-    if (!source) continue;
-    const current = bySource.get(source) ?? {
-      source,
-      sandboxes: 0,
-      metricSeries: 0,
-      metricPoints: 0,
-      events: 0,
-      traces: 0,
-      profiles: 0,
-    };
-    current.eventIds ??= new Set();
-    for (const row of rows) current.eventIds.add(rowKey(row));
-    current.events = current.eventIds.size;
-    bySource.set(source, current);
+    for (const row of rows) {
+      const source = sourceByEvent.get(rowKey(row)) ?? sourceByKey.get(key);
+      if (!source) continue;
+      const current = bySource.get(source) ?? {
+        source,
+        sandboxes: 0,
+        metricSeries: 0,
+        metricPoints: 0,
+        events: 0,
+        traces: 0,
+        profiles: 0,
+      };
+      current.eventIds ??= new Set();
+      current.eventIds.add(rowKey(row));
+      current.events = current.eventIds.size;
+      bySource.set(source, current);
+    }
   }
 }
 
@@ -474,6 +479,18 @@ function removeLiveSandbox(store, sandboxId) {
   store.sandboxes.delete(sandboxId);
 }
 
+function reconcileSnapshotMetadata(store, metadata) {
+  for (const node of array(metadata?.nodes)) {
+    const attributes = isObject(node.attributes) ? node.attributes : {};
+    const scope = stringValue(attributes['snapshot.scope']);
+    const nodeId = stringValue(attributes['snapshot.nodeId']) ?? stringValue(node.id);
+    const sandboxIds = stringSet(attributes['snapshot.sandboxIds']);
+
+    if (!scope || !nodeId || !sandboxIds) continue;
+    reconcileSandboxSnapshot(store, scope, nodeId, sandboxIds);
+  }
+}
+
 function reconcileSnapshotEvents(store, events) {
   for (const event of array(events)) {
     const attributes = isObject(event.attributes) ? event.attributes : {};
@@ -492,11 +509,15 @@ function reconcileSnapshotEvents(store, events) {
 
     if (!sandboxIds) continue;
 
-    for (const sandbox of Array.from(store.sandboxes.values())) {
-      if (sandbox.nodeId !== nodeId) continue;
-      if (!sandboxMatchesSnapshotScope(sandbox, scope)) continue;
-      if (!sandboxIds.has(sandbox.id)) removeLiveSandbox(store, sandbox.id);
-    }
+    reconcileSandboxSnapshot(store, scope, nodeId, sandboxIds);
+  }
+}
+
+function reconcileSandboxSnapshot(store, scope, nodeId, sandboxIds) {
+  for (const sandbox of Array.from(store.sandboxes.values())) {
+    if (sandbox.nodeId !== nodeId) continue;
+    if (!sandboxMatchesSnapshotScope(sandbox, scope)) continue;
+    if (!sandboxIds.has(sandbox.id)) removeLiveSandbox(store, sandbox.id);
   }
 }
 
@@ -548,7 +569,8 @@ function rememberProfile(store, profile, source) {
   if (source && profile?.id) store.sourceByProfile.set(profileKey(profile), source);
 }
 
-function rememberEvent(store, event) {
+function rememberEvent(store, event, source) {
+  if (source) store.sourceByEvent.set(rowKey(event), source);
   rememberRow(store.eventsBySandbox, event.sandboxId, event, rowLimit('events'));
 
   const nodeId = stringValue(event.nodeId)
