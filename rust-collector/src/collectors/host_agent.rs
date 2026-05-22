@@ -337,6 +337,9 @@ fn collect_periodic(
     }
     if sources.containerd_sandbox_cgroupfs {
         collect_source("host-containerd-cgroupfs", tx, stats, || {
+            if let Some(active_targets) = active_containerd_targets {
+                refresh_active_containerd_targets_from_inventory(active_targets)?;
+            }
             let targets = active_containerd_targets
                 .map(active_containerd_targets_snapshot)
                 .transpose()?
@@ -1257,9 +1260,29 @@ fn has_plugin_output_payload(output: &PluginOutput) -> bool {
 }
 
 fn active_containerd_targets_from_inventory() -> Result<ActiveContainerdTargets> {
+    Ok(Arc::new(Mutex::new(
+        active_containerd_targets_map_from_tasks(collect_containerd_task_targets()?),
+    )))
+}
+
+fn refresh_active_containerd_targets_from_inventory(
+    active_targets: &ActiveContainerdTargets,
+) -> Result<usize> {
+    let targets = active_containerd_targets_map_from_tasks(collect_containerd_task_targets()?);
+    let count = targets.len();
+    *active_targets.lock().map_err(|_| CollectorError::Plugin {
+        plugin: "containerd-sandbox-cgroupfs".to_string(),
+        message: "active containerd target set lock poisoned".to_string(),
+    })? = targets;
+    Ok(count)
+}
+
+fn active_containerd_targets_map_from_tasks(
+    tasks: Vec<crate::collectors::sources::runtime::containerd::ContainerdTaskTarget>,
+) -> HashMap<String, ContainerdSandboxCgroupTarget> {
     let mut targets = HashMap::new();
 
-    for task in collect_containerd_task_targets()? {
+    for task in tasks {
         let event = ContainerdEvent {
             namespace: task.namespace.clone(),
             action: "task_create".to_string(),
@@ -1278,7 +1301,7 @@ fn active_containerd_targets_from_inventory() -> Result<ActiveContainerdTargets>
         );
     }
 
-    Ok(Arc::new(Mutex::new(targets)))
+    targets
 }
 
 fn active_containerd_targets_snapshot(
@@ -1957,13 +1980,24 @@ fn log_host_agent_sources(sources: &HostAgentSources) {
             "level": "info",
             "message": "host_agent_sources_enabled",
             "sources": sources.enabled_names(),
-            "sandboxSampling": if sources.docker_sandbox_cgroupfs {
-                "docker-active-set"
-            } else {
-                "disabled"
-            },
+            "sandboxSampling": sandbox_sampling_mode(sources),
         })
     );
+}
+
+fn sandbox_sampling_mode(sources: &HostAgentSources) -> String {
+    let mut modes = Vec::new();
+    if sources.docker_sandbox_cgroupfs {
+        modes.push("docker-active-set");
+    }
+    if sources.containerd_sandbox_cgroupfs {
+        modes.push("containerd-task-active-set");
+    }
+    if modes.is_empty() {
+        "disabled".to_string()
+    } else {
+        modes.join(",")
+    }
 }
 
 #[cfg(test)]
@@ -2030,6 +2064,79 @@ mod tests {
                 .get("k8s.pod")
                 .and_then(|value| value.as_str()),
             Some("runtimepulse-demo")
+        );
+    }
+
+    #[test]
+    fn containerd_task_inventory_builds_kubernetes_cgroup_targets() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "io.kubernetes.pod.namespace".to_string(),
+            "default".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.pod.name".to_string(),
+            "runtimepulse-demo".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.container.name".to_string(),
+            "app".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.pod.uid".to_string(),
+            "runtimepulse-demo-uid".to_string(),
+        );
+
+        let targets = active_containerd_targets_map_from_tasks(vec![
+            crate::collectors::sources::runtime::containerd::ContainerdTaskTarget {
+                container_id: "containerd-demo".to_string(),
+                namespace: "k8s.io".to_string(),
+                image_ref: "docker.io/library/nginx:latest".to_string(),
+                runtime_name: "io.containerd.runc.v2".to_string(),
+                labels,
+                pid: 1234,
+                status: "RUNNING".to_string(),
+            },
+        ]);
+
+        let target = targets
+            .get("k8s.io/containerd-demo")
+            .expect("target should be keyed by containerd namespace/id");
+        assert_eq!(target.sandbox_id, "k8s-default-runtimepulse-demo-app");
+        assert_eq!(target.namespace, "default");
+        assert_eq!(target.workload_name, "runtimepulse-demo/app");
+        assert_eq!(target.pid, 1234);
+    }
+
+    #[test]
+    fn sandbox_sampling_mode_lists_containerd_active_set() {
+        let mut sources = HostAgentSources {
+            procfs: false,
+            psi: false,
+            cgroupfs: false,
+            docker_inventory: false,
+            containerd_inventory: false,
+            docker_events: false,
+            containerd_events: false,
+            kubelet_events: false,
+            kubernetes_metrics: false,
+            docker_sandbox_cgroupfs: true,
+            containerd_sandbox_cgroupfs: true,
+            image_cache: false,
+            profile_report: false,
+            command: false,
+            http: false,
+        };
+
+        assert_eq!(
+            sandbox_sampling_mode(&sources),
+            "docker-active-set,containerd-task-active-set"
+        );
+
+        sources.docker_sandbox_cgroupfs = false;
+        assert_eq!(
+            sandbox_sampling_mode(&sources),
+            "containerd-task-active-set"
         );
     }
 }

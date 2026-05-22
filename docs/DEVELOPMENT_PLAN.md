@@ -163,6 +163,7 @@ Implemented:
 - Containerd inventory no longer fabricates `startedAt` from the periodic collection time; startup completion time must come from task start events or startup trace spans.
 - Docker and containerd periodic inventory no longer emit per-container `*.container.observed` events; inventory updates remain metadata, while lifecycle/event streams own timeline events.
 - Node and sandbox metric samplers no longer emit periodic `*.sample.observed` events; metrics carry the samples, and sandbox active-set reconciliation is driven by metadata snapshot attributes.
+- Containerd sandbox cgroup sampling refreshes its active target set from containerd task inventory on each collection cycle, while containerd events still provide fast start/stop updates.
 - CRI/Kubelet enrichment events now use the same Kubernetes sandbox id when pod/container labels are present, so lifecycle enrichment does not split from containerd inventory or Prometheus metric series.
 - The host-agent default source set is `procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs`; Docker sandbox cgroupfs sampling is driven by startup inventory plus lifecycle-maintained active container ids, not broad cgroup scanning.
 - Host-agent self-observability reports node-level metrics for queue depth, enqueued/dropped reports, collector errors, sender success/failure counters, and runtime event stream health.
