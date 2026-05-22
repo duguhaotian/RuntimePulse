@@ -142,34 +142,6 @@ pub fn collect_docker_inventory(
             }
         }));
 
-        let mut attributes = Map::new();
-        attributes.insert("plugin".to_string(), json!("docker"));
-        attributes.insert("scope".to_string(), json!(config.collection_scope));
-        attributes.insert("dockerId".to_string(), json!(container.id));
-        attributes.insert("dockerStatus".to_string(), json!(container.state.status));
-
-        events.push(EventRecord {
-            id: format!("docker-{}-observed-{}", short_id, now.timestamp()),
-            timestamp: ts.clone(),
-            severity: if status == "failed" { "error" } else { "info" }.to_string(),
-            event_type: "container".to_string(),
-            event_name: "docker.container.observed".to_string(),
-            message: format!("Docker container {workload_name} is {status}."),
-            source: format!("runtimepulse-rust-collector/{}/docker", config.node_id),
-            attributes,
-            sandbox_id: Some(docker_sandbox_id(&container.id)),
-            image_id: None,
-            node_id: Some(config.node_id.clone()),
-            runtime_type: Some(runtime_type.to_string()),
-            reason: if container.state.oom_killed {
-                Some("oom_killed".to_string())
-            } else if !container.state.error.is_empty() {
-                Some(container.state.error)
-            } else {
-                None
-            },
-        });
-
         if let Some(started_at) = started_at.as_ref() {
             let Some(duration_ms) = duration_ms_between(&created_at, started_at) else {
                 continue;

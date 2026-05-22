@@ -442,8 +442,6 @@ async fn collect_containerd_inventory_async(
     };
     let mut images = BTreeMap::new();
     let mut sandboxes = Vec::new();
-    let mut events = Vec::new();
-
     for namespace in namespaces {
         let content = async_list_content(&client, &namespace)
             .await
@@ -548,58 +546,6 @@ async fn collect_containerd_inventory_async(
                     "k8s.pod_uid": identity.pod_uid,
                 }
             }));
-
-            let mut attributes = Map::new();
-            attributes.insert("plugin".to_string(), json!("containerd"));
-            attributes.insert("scope".to_string(), json!(config.collection_scope));
-            attributes.insert("containerd.namespace".to_string(), json!(namespace));
-            attributes.insert("containerd.id".to_string(), json!(container.id));
-            attributes.insert("containerd.taskStatus".to_string(), json!(task_status));
-            attributes.insert("containerd.pid".to_string(), json!(task_pid));
-            attributes.insert("containerd.exitedAt".to_string(), json!(exited_at));
-            attributes.insert("lifecycle.action".to_string(), json!("inventory"));
-            attributes.insert(
-                "lifecycle.current".to_string(),
-                json!(sandbox_status == "running"),
-            );
-            attributes.insert(
-                "containerd.runtime_sandbox_id".to_string(),
-                json!(identity.runtime_sandbox_id),
-            );
-            attributes.insert(
-                "containerd.snapshotter".to_string(),
-                json!(container.snapshotter),
-            );
-            attributes.insert(
-                "k8s.namespace".to_string(),
-                json!(identity.kubernetes_namespace),
-            );
-            attributes.insert("k8s.pod".to_string(), json!(identity.pod_name));
-            attributes.insert("k8s.container".to_string(), json!(identity.container_name));
-            attributes.insert("k8s.pod_uid".to_string(), json!(identity.pod_uid));
-
-            events.push(EventRecord {
-                id: format!(
-                    "containerd-{}-{}-observed-{}",
-                    sanitize_id(&namespace),
-                    sanitize_id(&container.id),
-                    now.timestamp()
-                ),
-                timestamp: ts.clone(),
-                severity: "info".to_string(),
-                event_type: "container".to_string(),
-                event_name: "containerd.container.observed".to_string(),
-                message: format!(
-                    "containerd container {workload_name} is {sandbox_status} in namespace {namespace}."
-                ),
-                source: format!("runtimepulse-rust-collector/{}/containerd", config.node_id),
-                attributes,
-                sandbox_id: Some(identity.sandbox_id),
-                image_id: None,
-                node_id: Some(config.node_id.clone()),
-                runtime_type: Some(runtime_type),
-                reason: None,
-            });
         }
     }
 
@@ -626,7 +572,7 @@ async fn collect_containerd_inventory_async(
             sandboxes,
         },
         metrics: Vec::new(),
-        events,
+        events: Vec::new(),
         traces: Vec::new(),
         profiles: Vec::new(),
     })
