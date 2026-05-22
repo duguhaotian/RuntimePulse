@@ -89,3 +89,34 @@ test('counts metric-only pod network series by ingest source', () => {
   assert.equal(source?.metricSeries, 1);
   assert.equal(source?.metricPoints, 1);
 });
+
+test('counts profile-only reports by ingest source', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'test/profile-report',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [{
+      id: 'profile-1',
+      timestamp: '2026-05-22T02:00:00.000Z',
+      sandboxId: 'sandbox-a',
+      profileType: 'cpu',
+      processRole: 'app',
+      durationMs: 5000,
+      sampleCount: 77,
+      objectUri: 'file:///tmp/profile.perf',
+    }],
+  });
+
+  const snapshot = liveStoreSnapshot(store);
+  const source = snapshot.sources.find((item) => item.source === 'test/profile-report');
+  assert.equal(snapshot.profiles, 1);
+  assert.equal(source?.profiles, 1);
+});

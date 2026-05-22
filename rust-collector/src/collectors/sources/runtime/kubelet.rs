@@ -518,6 +518,7 @@ mod tests {
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             cgroup_max_entries: 200,
             image_cache_report_path: None,
+            profile_report_path: None,
             plugins: Vec::new(),
             command_plugins: Vec::new(),
             http_plugins: Vec::new(),

@@ -31,6 +31,7 @@ use crate::collectors::sources::kubernetes::metrics::KubernetesMetricsPlugin;
 use crate::collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use crate::collectors::sources::node::procfs::ProcfsPlugin;
 use crate::collectors::sources::node::psi::PsiPlugin;
+use crate::collectors::sources::profiling::report::ProfileReportPlugin;
 use crate::collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets, containerd_image_id_from_ref,
     output_from_runtime_event as containerd_output_from_event, runtime_type_from_containerd_name,
@@ -84,6 +85,7 @@ struct HostAgentSources {
     docker_sandbox_cgroupfs: bool,
     containerd_sandbox_cgroupfs: bool,
     image_cache: bool,
+    profile_report: bool,
     command: bool,
     http: bool,
 }
@@ -212,6 +214,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut cgroupfs = CgroupfsPlugin::new(config.cgroup_root.clone(), config.cgroup_max_entries);
     let mut docker_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
+    let mut profile_report = ProfileReportPlugin::new(config.profile_report_path.clone());
     let mut kubernetes_metrics = if sources.kubernetes_metrics {
         Some(KubernetesMetricsPlugin::from_env().ok_or_else(|| {
             CollectorError::Config(
@@ -234,6 +237,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut cgroupfs,
             &mut docker_cgroupfs,
             &mut image_cache,
+            &mut profile_report,
             kubernetes_metrics.as_mut(),
             &mut adapter_plugins,
             active_docker_ids.as_ref(),
@@ -290,6 +294,7 @@ fn collect_periodic(
     cgroupfs: &mut CgroupfsPlugin,
     docker_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     image_cache: &mut ImageCachePlugin,
+    profile_report: &mut ProfileReportPlugin,
     kubernetes_metrics: Option<&mut KubernetesMetricsPlugin>,
     adapter_plugins: &mut [Box<dyn CollectorPlugin>],
     active_docker_ids: Option<&ActiveDockerIds>,
@@ -342,6 +347,11 @@ fn collect_periodic(
     if sources.image_cache {
         collect_source("host-image-cache", tx, stats, || {
             image_cache.collect(now, config)
+        });
+    }
+    if sources.profile_report {
+        collect_source("host-profile-report", tx, stats, || {
+            profile_report.collect(now, config)
         });
     }
     if let Some(kubernetes_metrics) = kubernetes_metrics {
@@ -1783,6 +1793,7 @@ impl HostAgentSources {
             docker_sandbox_cgroupfs: false,
             containerd_sandbox_cgroupfs: false,
             image_cache: false,
+            profile_report: false,
             command: false,
             http: false,
         };
@@ -1816,6 +1827,9 @@ impl HostAgentSources {
                 }
                 "image-cache" | "host-image-cache" | "snapshotter-cache" => {
                     sources.image_cache = true;
+                }
+                "profile-report" | "host-profile-report" | "profiles" | "profiling-report" => {
+                    sources.profile_report = true;
                 }
                 "command" | "host-command" | "adapter-command" => sources.command = true,
                 "http" | "host-http" | "adapter-http" => sources.http = true,
@@ -1872,6 +1886,9 @@ impl HostAgentSources {
         if self.image_cache {
             names.push("image-cache");
         }
+        if self.profile_report {
+            names.push("profile-report");
+        }
         if self.command {
             names.push("command");
         }
@@ -1926,6 +1943,7 @@ mod tests {
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             cgroup_max_entries: 200,
             image_cache_report_path: None,
+            profile_report_path: None,
             plugins: Vec::new(),
             command_plugins: Vec::new(),
             http_plugins: Vec::new(),

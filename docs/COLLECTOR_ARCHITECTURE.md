@@ -291,6 +291,11 @@ Examples:
 - runtime-specific profiles
 
 Profiling sources can be host-scoped or sandbox-scoped depending on the probe and permissions.
+`profile-report` is the first generic ingestion path: real profiling tools write
+RuntimePulse JSON/JSONL profile artifact indexes, and host-agent forwards them
+through the same bounded queue, batch sender, and outlet path as other host
+sources. Native perf/eBPF collectors can later reuse the same normalized
+`ProfileArtifact` output instead of creating a separate profile channel.
 
 ## Runtime Groups
 
@@ -320,6 +325,7 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 | Docker container lifecycle | `sources/runtime/docker/lifecycle.rs` converts Docker container events to sandbox lifecycle output |
 | Docker image events | `sources/image/download.rs` converts Docker image events to image pull/tag/delete output |
 | Snapshotter/image cache reports | `sources/image/cache.rs` converts real exporter JSON/JSONL into image stage spans and lazy block-cache curves |
+| Profile artifact reports | `sources/profiling/report.rs` converts perf/eBPF/third-party JSON/JSONL profile indexes into `ProfileArtifact` rows |
 | `host-docker-events` | unified Docker event collection plus semantic dispatch |
 | `host-docker-cgroupfs` | `sources/sandbox/cgroupfs.rs` using Docker PID cgroup resolution |
 | `host-docker-sandbox-agent` | Debug command for `sources/sandbox/manager.rs`; the same active-set helpers are now reused by `host-agent` |
@@ -337,6 +343,6 @@ starting each source manually.
 2. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
 3. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place.
 4. Add Kata and Firecracker sandbox sources after the containerd/Kubernetes path is stable.
-5. Add eBPF/perf profiling sources and profile artifact ingestion.
+5. Add native eBPF/perf profiling sources on top of the generic profile artifact ingestion path.
 6. Add gVisor-specific sources last, after the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
 7. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.

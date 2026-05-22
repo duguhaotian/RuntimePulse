@@ -19,6 +19,7 @@ pub struct CollectorConfig {
     pub cgroup_root: PathBuf,
     pub cgroup_max_entries: usize,
     pub image_cache_report_path: Option<PathBuf>,
+    pub profile_report_path: Option<PathBuf>,
     pub plugins: Vec<String>,
     pub command_plugins: Vec<CommandPluginConfig>,
     pub http_plugins: Vec<HttpPluginConfig>,
@@ -77,6 +78,11 @@ impl CollectorConfig {
                 .unwrap_or(200)
                 .max(1) as usize,
             image_cache_report_path: env::var("RUNTIMEPULSE_IMAGE_CACHE_REPORT_PATH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
+            profile_report_path: env::var("RUNTIMEPULSE_PROFILE_REPORT_PATH")
+                .or_else(|_| env::var("RUNTIMEPULSE_PROFILING_REPORT_PATH"))
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),

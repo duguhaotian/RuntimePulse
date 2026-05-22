@@ -247,6 +247,40 @@ image observation:
 
 See `rust-collector/examples/image-cache-report.json` for a complete example.
 
+## Profile Artifact Reports
+
+Use `profile-report` when a real perf/eBPF/third-party profiler can export
+profile artifact indexes. RuntimePulse stores the profile metadata and object
+URI; the profiler still owns the raw pprof/perf/flamegraph file.
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=profile-report
+RUNTIMEPULSE_PROFILE_REPORT_PATH=/var/lib/runtimepulse/profile-report.jsonl
+runtimepulse-collector host-agent
+```
+
+The file can be a RuntimePulse `PluginOutput`, a lightweight JSON object, a JSON
+array, or JSONL. Lightweight rows only need the target sandbox and profiles:
+
+```json
+{
+  "sandboxId": "docker-0123456789ab",
+  "source": "perf",
+  "timestamp": "2026-05-22T00:00:00.000Z",
+  "profiles": [
+    {
+      "profileType": "cpu",
+      "processRole": "app",
+      "durationMs": 10000,
+      "sampleCount": 2451,
+      "objectUri": "file:///var/lib/runtimepulse/profiles/docker-0123456789ab/cpu.perf"
+    }
+  ]
+}
+```
+
+See `rust-collector/examples/profile-report.jsonl` for a complete JSONL example.
+
 ## Container Cgroup Collection
 
 Container cgroupfs metrics should be collected by a lifecycle-aware runtime collector, not by `host-cgroupfs`.

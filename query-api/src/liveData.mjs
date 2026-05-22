@@ -21,6 +21,7 @@ export function createLiveStore() {
     sourceByImage: new Map(),
     sourceBySandbox: new Map(),
     sourceByMetricSeries: new Map(),
+    sourceByProfile: new Map(),
     snapshotScopeBySandbox: new Map(),
     lastUpdatedAt: undefined,
   };
@@ -33,7 +34,7 @@ export function recordLiveBatch(store, payload) {
   for (const metric of array(payload.metrics)) rememberMetric(store, metric, payload.source);
   for (const event of array(payload.events)) rememberEvent(store, event);
   for (const span of array(payload.traces)) rememberTraceSpan(store, span);
-  for (const profile of array(payload.profiles)) rememberRow(store.profilesBySandbox, profile.sandboxId, profile, rowLimit('profiles'));
+  for (const profile of array(payload.profiles)) rememberProfile(store, profile, payload.source);
 
   reconcileSnapshotEvents(store, payload.events);
   for (const sandbox of store.sandboxes.values()) refreshSandboxDerivedFields(store, sandbox);
@@ -217,11 +218,11 @@ function liveSourceSnapshots(store) {
 
     current.sandboxes += store.sandboxes.has(sandboxId) ? 1 : 0;
     current.traces += store.tracesBySandbox.get(sandboxId)?.length ?? 0;
-    current.profiles += store.profilesBySandbox.get(sandboxId)?.length ?? 0;
     bySource.set(source, current);
   }
 
   addMetricCountsBySource(bySource, store);
+  addProfileCountsBySource(bySource, store);
 
   for (const [nodeId, source] of store.sourceByNode.entries()) {
     const current = bySource.get(source) ?? {
@@ -542,6 +543,11 @@ function rememberTraceSpan(store, span) {
   refreshSandboxFromTraceSpan(store, span);
 }
 
+function rememberProfile(store, profile, source) {
+  rememberRow(store.profilesBySandbox, profile.sandboxId, profile, rowLimit('profiles'));
+  if (source && profile?.id) store.sourceByProfile.set(profileKey(profile), source);
+}
+
 function rememberEvent(store, event) {
   rememberRow(store.eventsBySandbox, event.sandboxId, event, rowLimit('events'));
 
@@ -555,6 +561,30 @@ function rememberEvent(store, event) {
     ?? stringValue(event.attributes?.imageId);
   if (imageId && imageRemovalEvent(event)) removeLiveImage(store, imageId);
   rememberRow(store.eventsByImage, imageId, { ...event, imageId }, rowLimit('events'));
+}
+
+function addProfileCountsBySource(bySource, store) {
+  for (const profiles of store.profilesBySandbox.values()) {
+    for (const profile of profiles) {
+      const source = store.sourceByProfile.get(profileKey(profile)) ?? store.sourceBySandbox.get(profile.sandboxId);
+      if (!source) continue;
+      const current = bySource.get(source) ?? {
+        source,
+        sandboxes: 0,
+        metricSeries: 0,
+        metricPoints: 0,
+        events: 0,
+        traces: 0,
+        profiles: 0,
+      };
+      current.profiles += 1;
+      bySource.set(source, current);
+    }
+  }
+}
+
+function profileKey(profile) {
+  return `${profile.sandboxId ?? 'unknown'}:${profile.id ?? 'unknown'}`;
 }
 
 function imageRemovalEvent(event) {

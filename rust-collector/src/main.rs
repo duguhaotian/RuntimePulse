@@ -14,6 +14,7 @@ use collectors::sources::image::cache::ImageCachePlugin;
 use collectors::sources::image::download::output_from_event as image_output_from_event;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
+use collectors::sources::profiling::report::ProfileReportPlugin;
 use collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets,
     output_from_runtime_event as containerd_output_from_event, stream_containerd_events,
@@ -548,6 +549,9 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             "image-cache" | "snapshotter-cache" => plugins.push(Box::new(ImageCachePlugin::new(
                 config.image_cache_report_path.clone(),
             ))),
+            "profile-report" | "profiles" | "profiling-report" => plugins.push(Box::new(
+                ProfileReportPlugin::new(config.profile_report_path.clone()),
+            )),
             "command" => {
                 if config.command_plugins.is_empty() {
                     return Err(CollectorError::Config(
