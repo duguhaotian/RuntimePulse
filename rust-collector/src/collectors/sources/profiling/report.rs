@@ -80,6 +80,15 @@ pub fn profile_output_from_content(
     now: DateTime<Utc>,
     config: &CollectorConfig,
 ) -> Result<PluginOutput> {
+    profile_output_from_content_with_plugin(content, now, config, "profile-report")
+}
+
+pub fn profile_output_from_content_with_plugin(
+    content: &str,
+    now: DateTime<Utc>,
+    config: &CollectorConfig,
+    plugin_name: &str,
+) -> Result<PluginOutput> {
     let fallback_timestamp = timestamp(now);
     let mut output = PluginOutput::default();
 
@@ -89,10 +98,7 @@ pub fn profile_output_from_content(
                 merge_plugin_output(&mut output, runtimepulse_output);
             }
             ParsedProfileReport::Lightweight(report) => {
-                merge_plugin_output(
-                    &mut output,
-                    output_from_lightweight_report(report, &fallback_timestamp),
-                );
+                merge_plugin_output(&mut output, output_from_lightweight_report(report, &fallback_timestamp));
             }
         }
     }
@@ -105,7 +111,7 @@ pub fn profile_output_from_content(
             "status": "ready",
             "labels": {
                 "collector": "runtimepulse-rust-collector",
-                "plugin": "profile-report",
+                "plugin": plugin_name,
                 "scope": config.collection_scope,
             }
         }));

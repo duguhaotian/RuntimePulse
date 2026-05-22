@@ -31,6 +31,8 @@ use crate::collectors::sources::kubernetes::metrics::KubernetesMetricsPlugin;
 use crate::collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use crate::collectors::sources::node::procfs::ProcfsPlugin;
 use crate::collectors::sources::node::psi::PsiPlugin;
+use crate::collectors::sources::profiling::ebpf::EbpfProfilePlugin;
+use crate::collectors::sources::profiling::perf::PerfProfilePlugin;
 use crate::collectors::sources::profiling::report::ProfileReportPlugin;
 use crate::collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets, containerd_image_id_from_ref,
@@ -86,6 +88,8 @@ struct HostAgentSources {
     containerd_sandbox_cgroupfs: bool,
     image_cache: bool,
     profile_report: bool,
+    perf: bool,
+    ebpf: bool,
     command: bool,
     http: bool,
 }
@@ -215,6 +219,8 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut docker_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
     let mut profile_report = ProfileReportPlugin::new(config.profile_report_path.clone());
+    let mut perf = PerfProfilePlugin::new(config.perf_report_path.clone());
+    let mut ebpf = EbpfProfilePlugin::new(config.ebpf_report_path.clone());
     let mut kubernetes_metrics = if sources.kubernetes_metrics {
         Some(KubernetesMetricsPlugin::from_env().ok_or_else(|| {
             CollectorError::Config(
@@ -238,6 +244,8 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut docker_cgroupfs,
             &mut image_cache,
             &mut profile_report,
+            &mut perf,
+            &mut ebpf,
             kubernetes_metrics.as_mut(),
             &mut adapter_plugins,
             active_docker_ids.as_ref(),
@@ -295,6 +303,8 @@ fn collect_periodic(
     docker_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     image_cache: &mut ImageCachePlugin,
     profile_report: &mut ProfileReportPlugin,
+    perf: &mut PerfProfilePlugin,
+    ebpf: &mut EbpfProfilePlugin,
     kubernetes_metrics: Option<&mut KubernetesMetricsPlugin>,
     adapter_plugins: &mut [Box<dyn CollectorPlugin>],
     active_docker_ids: Option<&ActiveDockerIds>,
@@ -356,6 +366,12 @@ fn collect_periodic(
         collect_source("host-profile-report", tx, stats, || {
             profile_report.collect(now, config)
         });
+    }
+    if sources.perf {
+        collect_source("host-perf", tx, stats, || perf.collect(now, config));
+    }
+    if sources.ebpf {
+        collect_source("host-ebpf", tx, stats, || ebpf.collect(now, config));
     }
     if let Some(kubernetes_metrics) = kubernetes_metrics {
         collect_source("host-kubernetes-metrics", tx, stats, || {
@@ -1858,6 +1874,8 @@ impl HostAgentSources {
             containerd_sandbox_cgroupfs: false,
             image_cache: false,
             profile_report: false,
+            perf: false,
+            ebpf: false,
             command: false,
             http: false,
         };
@@ -1894,6 +1912,12 @@ impl HostAgentSources {
                 }
                 "profile-report" | "host-profile-report" | "profiles" | "profiling-report" => {
                     sources.profile_report = true;
+                }
+                "perf" | "host-perf" | "perf-report" | "host-perf-report" => {
+                    sources.perf = true;
+                }
+                "ebpf" | "eBPF" | "host-ebpf" | "ebpf-report" | "host-ebpf-report" => {
+                    sources.ebpf = true;
                 }
                 "command" | "host-command" | "adapter-command" => sources.command = true,
                 "http" | "host-http" | "adapter-http" => sources.http = true,
@@ -1952,6 +1976,12 @@ impl HostAgentSources {
         }
         if self.profile_report {
             names.push("profile-report");
+        }
+        if self.perf {
+            names.push("perf");
+        }
+        if self.ebpf {
+            names.push("ebpf");
         }
         if self.command {
             names.push("command");
