@@ -4251,3 +4251,606 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
     min-height: 30px;
   }
 }
+
+/* Mobile and narrow viewport layout */
+@media (max-width: 980px) {
+  body {
+    min-width: 0;
+  }
+
+  .app-shell {
+    display: block;
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    height: auto;
+    padding: 10px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    background: rgba(12, 16, 22, 0.97);
+    backdrop-filter: blur(18px);
+  }
+
+  .brand {
+    padding: 2px 2px 10px;
+  }
+
+  .brand-mark {
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    font-size: 11px;
+  }
+
+  .brand h1 {
+    font-size: 15px;
+  }
+
+  .brand p,
+  .workspace-switcher,
+  .sidebar-section,
+  .sidebar-note {
+    display: none;
+  }
+
+  .nav {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav button {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+
+  .nav button:disabled {
+    display: none;
+  }
+
+  .content-shell {
+    width: 100%;
+  }
+
+  .topbar {
+    position: relative;
+    z-index: 5;
+    display: grid;
+    gap: 12px;
+    min-height: auto;
+    padding: 13px 14px;
+  }
+
+  .topbar h1 {
+    font-size: 21px;
+  }
+
+  .topbar-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .topbar-search {
+    order: 9;
+    width: 100%;
+  }
+
+  .main-panel {
+    padding: 14px 12px 28px;
+    overflow: visible;
+  }
+
+  .page-stack {
+    gap: 14px;
+  }
+
+  .page-header,
+  .detail-header,
+  .level-card-header,
+  .saved-views-header,
+  .section-heading,
+  .section-titlebar,
+  .data-section-header,
+  .metric-panel-toolbar,
+  .trace-compare-header,
+  .node-pressure-header,
+  .image-layer-header,
+  .span-detail-header,
+  .selected-event-context {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .page-header,
+  .detail-header {
+    gap: 12px;
+  }
+
+  h2 {
+    font-size: 23px;
+    line-height: 1.12;
+  }
+
+  .page-header p,
+  .detail-header p {
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .header-actions,
+  .run-actions,
+  .saved-views-form,
+  .recent-tab-bar,
+  .recent-toolbar,
+  .modal-actions,
+  .trace-compare-meta,
+  .bottleneck-metrics,
+  .pressure-legend {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .saved-views-form input,
+  .recent-toolbar select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .summary-grid,
+  .detail-summary,
+  .collector-summary-grid,
+  .collector-grid,
+  .collector-count-grid,
+  .live-store-grid,
+  .collector-trend-grid,
+  .filter-bar,
+  .level-page-grid,
+  .node-detail-grid,
+  .node-static-grid,
+  .node-temporal-grid,
+  .host-agent-health-summary,
+  .node-lists-grid,
+  .two-column,
+  .run-layout-grid,
+  .detail-data-sections,
+  .data-section-grid,
+  .static-facts-grid,
+  .source-facts-grid,
+  .analysis-finding-grid,
+  .chart-grid,
+  .metric-panel-grid.compact,
+  .metric-panel-grid.expanded,
+  .container-image-grid,
+  .container-image-facts,
+  .node-pressure-summary,
+  .image-layer-summary,
+  .image-temporal-grid,
+  .profile-viewer-grid,
+  .compare-summary-grid,
+  .compare-bars,
+  .startup-temperature-grid,
+  .trace-compare-grid,
+  .time-window-selector,
+  .image-modal-summary,
+  .container-modal-header,
+  .modal-metric-grid,
+  .container-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-card {
+    min-height: 82px;
+  }
+
+  .summary-card strong {
+    font-size: 21px;
+  }
+
+  .panel-card,
+  .chart-card,
+  .node-section-card,
+  .data-section,
+  .collector-panel,
+  .level-card {
+    padding: 13px;
+  }
+
+  .table-card,
+  .recent-sample-table,
+  .node-health-table,
+  .comparison-table-card,
+  .profile-list-card {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  table,
+  .recent-sample-table table,
+  .live-source-table table,
+  .node-health-table table {
+    min-width: 720px;
+  }
+
+  th,
+  td {
+    padding: 10px 11px;
+  }
+
+  .tabs,
+  .run-tabs,
+  .comparison-mode-bar {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tabs button,
+  .run-tabs button,
+  .comparison-mode-bar button {
+    flex: 0 0 auto;
+  }
+
+  .metric-chart-card,
+  .raw-json,
+  .node-events-panel,
+  .detail-modal,
+  .trace-span-modal {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .metric-svg,
+  .flamegraph-svg {
+    min-width: 520px;
+  }
+
+  .event-title,
+  .event-list-title,
+  .merged-lifecycle-header,
+  .merged-lifecycle-axis {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .event-meta,
+  .event-list-meta {
+    flex-wrap: wrap;
+  }
+
+  .collector-trend-card,
+  .sparkline-row,
+  .merged-lifecycle-row,
+  .bottleneck-row,
+  .stage-heatmap-row,
+  .lifecycle-container-row,
+  .image-layer-row,
+  .download-step,
+  .span-attributes dl > div {
+    grid-template-columns: 1fr;
+  }
+
+  .image-cache-summary {
+    justify-items: start;
+  }
+
+  .bottleneck-metrics {
+    justify-content: flex-start;
+  }
+
+  .pressure-overlay-chart,
+  .stage-heatmap-cells {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .pressure-overlay-chart {
+    grid-template-columns: repeat(48, minmax(8px, 1fr));
+  }
+
+  .stage-heatmap-cells {
+    grid-template-columns: repeat(24, minmax(10px, 1fr));
+  }
+
+  .merged-span-track {
+    min-height: 30px;
+  }
+
+  .detail-modal-backdrop {
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .detail-modal {
+    width: 100%;
+    max-height: calc(100dvh - 20px);
+    padding: 13px;
+  }
+}
+
+@media (max-width: 620px) {
+  .topbar-actions .topbar-button,
+  .topbar-actions .data-pill {
+    flex: 1 1 auto;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .filter-bar {
+    padding: 8px;
+  }
+
+  .saved-view-card,
+  .batch-count-row,
+  .store-limit-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .collector-spark-bars {
+    grid-template-columns: repeat(12, minmax(10px, 1fr));
+    overflow-x: auto;
+  }
+
+  .metric-svg,
+  .flamegraph-svg {
+    min-width: 460px;
+  }
+
+  table,
+  .recent-sample-table table,
+  .live-source-table table,
+  .node-health-table table {
+    min-width: 640px;
+  }
+
+  .topbar-search {
+    display: none;
+  }
+
+  .nav button {
+    min-width: 112px;
+    justify-content: center;
+  }
+}
+
+@media (max-width: 420px) {
+  .main-panel {
+    padding-inline: 10px;
+  }
+
+  .brand h1 {
+    font-size: 14px;
+  }
+
+  .nav button {
+    min-width: 98px;
+    gap: 7px;
+    padding-inline: 8px;
+  }
+
+  .nav-icon {
+    width: 20px;
+    height: 20px;
+  }
+
+  .summary-card strong {
+    font-size: 19px;
+  }
+}
+
+@media (min-width: 981px) and (max-width: 1180px) {
+  body {
+    min-width: 0;
+  }
+
+  .app-shell {
+    grid-template-columns: 224px minmax(0, 1fr);
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .topbar-actions {
+    flex-wrap: wrap;
+  }
+
+  .topbar-search {
+    width: min(300px, 100%);
+  }
+
+  .summary-grid,
+  .collector-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .detail-summary,
+  .metric-panel-grid.compact,
+  .source-facts-grid,
+  .compare-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* Phone viewport hardening: avoid page-level horizontal panning. */
+@media (max-width: 700px) {
+  html,
+  body,
+  #root,
+  .app-shell,
+  .content-shell,
+  .main-panel {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  *,
+  *::before,
+  *::after {
+    min-width: 0;
+  }
+
+  .nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow-x: visible;
+  }
+
+  .nav button {
+    min-width: 0;
+    justify-content: center;
+    padding-inline: 7px;
+  }
+
+  .nav button span:last-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .topbar-actions,
+  .header-actions,
+  .run-actions,
+  .recent-tab-bar,
+  .tabs,
+  .run-tabs,
+  .comparison-mode-bar {
+    width: 100%;
+  }
+
+  .topbar-actions > *,
+  .header-actions > *,
+  .run-actions > * {
+    min-width: 0;
+  }
+
+  .tabs,
+  .run-tabs,
+  .comparison-mode-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+    overflow-x: hidden;
+  }
+
+  .tabs button,
+  .run-tabs button,
+  .comparison-mode-bar button {
+    justify-content: center;
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .table-card,
+  .recent-sample-table,
+  .node-health-table,
+  .comparison-table-card,
+  .profile-list-card {
+    overflow-x: hidden;
+  }
+
+  table,
+  .recent-sample-table table,
+  .live-source-table table,
+  .node-health-table table {
+    min-width: 0 !important;
+    width: 100%;
+  }
+
+  table thead {
+    display: none;
+  }
+
+  table,
+  table tbody,
+  table tr,
+  table td {
+    display: block;
+  }
+
+  table tr {
+    margin: 0 0 10px;
+    overflow: hidden;
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    border-radius: 12px;
+    background: rgba(10, 14, 20, 0.36);
+  }
+
+  table td {
+    width: 100%;
+    padding: 9px 10px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  table td:last-child {
+    border-bottom: 0;
+  }
+
+  td small,
+  .truncate,
+  .event-list-meta span,
+  .event-meta span,
+  .source-fact strong,
+  .node-fact strong,
+  .bottleneck-label strong,
+  .bottleneck-label span,
+  .stage-heatmap-label strong,
+  .stage-heatmap-label span,
+  .metric-kind dd,
+  .span-attributes dd {
+    max-width: 100%;
+    white-space: normal;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  .metric-chart-card,
+  .raw-json,
+  .node-events-panel,
+  .detail-modal,
+  .trace-span-modal,
+  .pressure-overlay-chart,
+  .stage-heatmap-cells {
+    overflow-x: hidden;
+  }
+
+  .metric-svg,
+  .flamegraph-svg,
+  svg {
+    min-width: 0 !important;
+    max-width: 100%;
+  }
+
+  .pressure-overlay-chart {
+    grid-template-columns: repeat(24, minmax(0, 1fr));
+  }
+
+  .stage-heatmap-cells {
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
+
+  .image-layer-row,
+  .download-step,
+  .bottleneck-row,
+  .stage-heatmap-row,
+  .lifecycle-container-row,
+  .sparkline-row {
+    gap: 8px;
+  }
+}
