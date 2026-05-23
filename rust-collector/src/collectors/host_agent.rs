@@ -63,6 +63,7 @@ const DEFAULT_FLUSH_MS: u64 = 1000;
 const DEFAULT_SPOOL_DIR: &str = "/tmp/runtimepulse/host-agent-spool";
 const DEFAULT_SPOOL_MAX_FILES: usize = 256;
 const MAX_REPORTS_PER_BATCH: usize = 64;
+const DEFAULT_EVENT_STREAM_RESTART_MS: u64 = 5000;
 const DEFAULT_HOST_AGENT_SOURCES: &[&str] = &[
     "procfs",
     "psi",
@@ -166,6 +167,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         None
     };
 
+    let restart_delay = event_stream_restart_delay();
     let docker_event_thread = if !config.once && sources.needs_docker_event_stream() {
         let event_tx = tx.clone();
         let event_config = config.clone();
@@ -173,12 +175,13 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         let event_active_docker_ids = active_docker_ids.clone();
         let event_stats = Arc::clone(&stats);
         Some(thread::spawn(move || {
-            run_docker_event_worker(
+            run_docker_event_worker_loop(
                 event_config,
                 event_tx,
                 event_sources,
                 event_active_docker_ids,
                 event_stats,
+                restart_delay,
             )
         }))
     } else {
@@ -191,11 +194,12 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         let event_active_containerd_targets = active_containerd_targets.clone();
         let event_stats = Arc::clone(&stats);
         Some(thread::spawn(move || {
-            run_containerd_event_worker(
+            run_containerd_event_worker_loop(
                 event_config,
                 event_tx,
                 event_active_containerd_targets,
                 event_stats,
+                restart_delay,
             )
         }))
     } else {
@@ -207,7 +211,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         let event_config = config.clone();
         let event_stats = Arc::clone(&stats);
         Some(thread::spawn(move || {
-            run_kubelet_event_worker(event_config, event_tx, event_stats)
+            run_kubelet_event_worker_loop(event_config, event_tx, event_stats, restart_delay)
         }))
     } else {
         None
@@ -414,18 +418,43 @@ fn collect_source<F>(
     enqueue_collected(source, tx, result, stats);
 }
 
-fn run_docker_event_worker(
+fn run_docker_event_worker_loop(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
     sources: HostAgentSources,
     active_docker_ids: Option<ActiveDockerIds>,
     stats: Arc<HostAgentStats>,
+    restart_delay: Duration,
 ) -> Result<()> {
-    if config.once {
-        return Ok(());
+    let mut restart_attempt = false;
+    loop {
+        match run_docker_event_worker_once(
+            config.clone(),
+            tx.clone(),
+            sources.clone(),
+            active_docker_ids.clone(),
+            Arc::clone(&stats),
+            restart_attempt,
+        ) {
+            Ok(()) => log_event_stream_restart("docker-events", "stream exited", restart_delay),
+            Err(error) => {
+                log_event_stream_restart("docker-events", &error.to_string(), restart_delay)
+            }
+        }
+        restart_attempt = true;
+        thread::sleep(restart_delay);
     }
+}
 
-    mark_event_stream_running(&stats, "docker-events", true);
+fn run_docker_event_worker_once(
+    config: CollectorConfig,
+    tx: SyncSender<PluginOutput>,
+    sources: HostAgentSources,
+    active_docker_ids: Option<ActiveDockerIds>,
+    stats: Arc<HostAgentStats>,
+    restart_attempt: bool,
+) -> Result<()> {
+    mark_event_stream_running(&stats, "docker-events", true, restart_attempt);
     let mut startup_trace_tracker = DockerStartupTraceTracker::default();
     let result = stream_docker_events(&config, |event| {
         mark_event_stream_event(&stats, "docker-events", docker_event_timestamp(&event));
@@ -440,24 +469,47 @@ fn run_docker_event_worker(
         }
         Ok(())
     });
-    mark_event_stream_running(&stats, "docker-events", false);
+    mark_event_stream_running(&stats, "docker-events", false, false);
     if result.is_err() {
         mark_event_stream_error(&stats, "docker-events");
     }
     result
 }
 
-fn run_containerd_event_worker(
+fn run_containerd_event_worker_loop(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
     active_containerd_targets: Option<ActiveContainerdTargets>,
     stats: Arc<HostAgentStats>,
+    restart_delay: Duration,
 ) -> Result<()> {
-    if config.once {
-        return Ok(());
+    let mut restart_attempt = false;
+    loop {
+        match run_containerd_event_worker_once(
+            config.clone(),
+            tx.clone(),
+            active_containerd_targets.clone(),
+            Arc::clone(&stats),
+            restart_attempt,
+        ) {
+            Ok(()) => log_event_stream_restart("containerd-events", "stream exited", restart_delay),
+            Err(error) => {
+                log_event_stream_restart("containerd-events", &error.to_string(), restart_delay)
+            }
+        }
+        restart_attempt = true;
+        thread::sleep(restart_delay);
     }
+}
 
-    mark_event_stream_running(&stats, "containerd-events", true);
+fn run_containerd_event_worker_once(
+    config: CollectorConfig,
+    tx: SyncSender<PluginOutput>,
+    active_containerd_targets: Option<ActiveContainerdTargets>,
+    stats: Arc<HostAgentStats>,
+    restart_attempt: bool,
+) -> Result<()> {
+    mark_event_stream_running(&stats, "containerd-events", true, restart_attempt);
     let mut startup_trace_tracker = ContainerdStartupTraceTracker::default();
     let result = stream_containerd_events(&config, |event| {
         mark_event_stream_event(
@@ -477,19 +529,44 @@ fn run_containerd_event_worker(
         }
         Ok(())
     });
-    mark_event_stream_running(&stats, "containerd-events", false);
+    mark_event_stream_running(&stats, "containerd-events", false, false);
     if result.is_err() {
         mark_event_stream_error(&stats, "containerd-events");
     }
     result
 }
 
-fn run_kubelet_event_worker(
+fn run_kubelet_event_worker_loop(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
     stats: Arc<HostAgentStats>,
+    restart_delay: Duration,
 ) -> Result<()> {
-    mark_event_stream_running(&stats, "kubelet-events", true);
+    let mut restart_attempt = false;
+    loop {
+        match run_kubelet_event_worker_once(
+            config.clone(),
+            tx.clone(),
+            Arc::clone(&stats),
+            restart_attempt,
+        ) {
+            Ok(()) => log_event_stream_restart("kubelet-events", "stream exited", restart_delay),
+            Err(error) => {
+                log_event_stream_restart("kubelet-events", &error.to_string(), restart_delay)
+            }
+        }
+        restart_attempt = true;
+        thread::sleep(restart_delay);
+    }
+}
+
+fn run_kubelet_event_worker_once(
+    config: CollectorConfig,
+    tx: SyncSender<PluginOutput>,
+    stats: Arc<HostAgentStats>,
+    restart_attempt: bool,
+) -> Result<()> {
+    mark_event_stream_running(&stats, "kubelet-events", true, restart_attempt);
     let result = stream_cri_events(&config, |event| {
         mark_event_stream_event(&stats, "kubelet-events", cri_event_timestamp(&event));
         if let Some(output) = output_from_cri_event(event, &config) {
@@ -497,11 +574,32 @@ fn run_kubelet_event_worker(
         }
         Ok(())
     });
-    mark_event_stream_running(&stats, "kubelet-events", false);
+    mark_event_stream_running(&stats, "kubelet-events", false, false);
     if result.is_err() {
         mark_event_stream_error(&stats, "kubelet-events");
     }
     result
+}
+
+fn log_event_stream_restart(stream: &str, reason: &str, restart_delay: Duration) {
+    eprintln!(
+        "{}",
+        json!({
+            "level": "warning",
+            "message": "host_agent_event_stream_restarting",
+            "stream": stream,
+            "reason": reason,
+            "restartDelayMs": restart_delay.as_millis(),
+        })
+    );
+}
+
+fn event_stream_restart_delay() -> Duration {
+    Duration::from_millis(
+        env_u64("RUNTIMEPULSE_HOST_AGENT_EVENT_RESTART_MS")
+            .unwrap_or(DEFAULT_EVENT_STREAM_RESTART_MS)
+            .max(1000),
+    )
 }
 
 fn run_sender(
@@ -912,9 +1010,14 @@ fn initialize_event_stream_stats(stats: &HostAgentStats, sources: &HostAgentSour
     });
 }
 
-fn mark_event_stream_running(stats: &HostAgentStats, stream: &str, running: bool) {
+fn mark_event_stream_running(
+    stats: &HostAgentStats,
+    stream: &str,
+    running: bool,
+    restart_attempt: bool,
+) {
     update_event_stream_stat(stats, stream, |row| {
-        if running && !row.running {
+        if restart_attempt && running && !row.running {
             row.restarts_total += 1;
         }
         row.running = running;
