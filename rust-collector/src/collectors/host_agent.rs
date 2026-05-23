@@ -221,6 +221,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut psi = PsiPlugin::new();
     let mut cgroupfs = CgroupfsPlugin::new(config.cgroup_root.clone(), config.cgroup_max_entries);
     let mut docker_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
+    let mut containerd_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
     let mut profile_report = ProfileReportPlugin::new(config.profile_report_path.clone());
     let mut perf = PerfProfilePlugin::new(config.perf_report_path.clone());
@@ -246,6 +247,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut psi,
             &mut cgroupfs,
             &mut docker_cgroupfs,
+            &mut containerd_cgroupfs,
             &mut image_cache,
             &mut profile_report,
             &mut perf,
@@ -305,6 +307,7 @@ fn collect_periodic(
     psi: &mut PsiPlugin,
     cgroupfs: &mut CgroupfsPlugin,
     docker_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
+    containerd_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     image_cache: &mut ImageCachePlugin,
     profile_report: &mut ProfileReportPlugin,
     perf: &mut PerfProfilePlugin,
@@ -358,7 +361,7 @@ fn collect_periodic(
                 .map(active_containerd_targets_snapshot)
                 .transpose()?
                 .unwrap_or_default();
-            docker_cgroupfs.collect_for_containerd_targets(now, config, &targets)
+            containerd_cgroupfs.collect_for_containerd_targets(now, config, &targets)
         });
     }
     if sources.image_cache {

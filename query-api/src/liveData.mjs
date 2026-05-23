@@ -441,6 +441,9 @@ function mergeSandbox(existing, incoming) {
   if (!existing) return incoming;
   const lifecycleAction = incoming.attributes?.['lifecycle.action'];
   const keepTraceStartup = startupDurationSource(existing) === 'trace' && startupDurationSource(incoming) !== 'trace';
+  const incomingCpu = numberOr(incoming.cpuAvg, 0);
+  const existingCpu = numberOr(existing.cpuAvg, 0);
+  const metadataCpu = incomingCpu > 0 ? incomingCpu : existingCpu;
 
   return {
     ...existing,
@@ -450,7 +453,7 @@ function mergeSandbox(existing, incoming) {
     stoppedAt: incoming.stoppedAt ?? existing.stoppedAt,
     removedAt: incoming.removedAt ?? existing.removedAt,
     startupDurationMs: keepTraceStartup ? existing.startupDurationMs : incoming.startupDurationMs || existing.startupDurationMs,
-    cpuAvg: incoming.cpuAvg || existing.cpuAvg,
+    cpuAvg: metadataCpu,
     memoryPeakBytes: Math.max(incoming.memoryPeakBytes, existing.memoryPeakBytes),
     eventCount: Math.max(incoming.eventCount, existing.eventCount),
     labels: { ...existing.labels, ...incoming.labels },
@@ -747,7 +750,12 @@ function refreshSandboxFromMetric(store, metric) {
     applySandboxStartupDuration(sandbox, metric.value, undefined, 'metric');
     if (historicalSandbox) applySandboxStartupDuration(historicalSandbox, metric.value, undefined, 'metric');
   }
-  if (metric.name === 'sandbox.cpu.usage_ratio') sandbox.cpuAvg = metric.value;
+  if (metric.name === 'sandbox.cpu.usage_ratio') {
+    const cpuAverage = averageMetricSeriesValue(store.metricsBySandbox.get(metric.sandboxId)?.get(metricSeriesId('sandbox', metric.sandboxId, metric)))
+      ?? numberOr(metric.value, 0);
+    sandbox.cpuAvg = cpuAverage;
+    if (historicalSandbox) historicalSandbox.cpuAvg = cpuAverage;
+  }
   if (metric.name === 'sandbox.memory.working_set_bytes') {
     sandbox.memoryPeakBytes = Math.max(sandbox.memoryPeakBytes, metric.value);
   }
@@ -854,6 +862,13 @@ function metricLabel(name) {
 
 function imageIdFromRef(ref) {
   return `collector-${String(ref).replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'image'}`;
+}
+
+function averageMetricSeriesValue(series) {
+  const points = array(series?.points);
+  if (points.length === 0) return undefined;
+  const values = points.map((point) => numberOr(point.value, 0));
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function numberOr(value, fallback) {
