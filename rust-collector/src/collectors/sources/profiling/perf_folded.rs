@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::Result;
 use crate::collectors::core::model::PluginOutput;
+use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::sources::profiling::report::{
     merge_profile_output, profile_output_from_content_with_plugin,
 };
@@ -36,6 +37,26 @@ struct FoldedProfileTarget {
     process_role: String,
 }
 
+pub struct PerfFoldedProfilePlugin {
+    path: Option<PathBuf>,
+}
+
+impl PerfFoldedProfilePlugin {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Self { path }
+    }
+}
+
+impl CollectorPlugin for PerfFoldedProfilePlugin {
+    fn name(&self) -> &str {
+        "perf-folded"
+    }
+
+    fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
+        collect_perf_folded_profiles_with_path(now, config, self.path.clone())
+    }
+}
+
 pub fn emit_perf_folded_profiles(config: &CollectorConfig) -> Result<()> {
     let output = collect_perf_folded_profiles(Utc::now(), config)?;
     println!("{}", serde_json::to_string(&output)?);
@@ -46,8 +67,16 @@ pub fn collect_perf_folded_profiles(
     now: DateTime<Utc>,
     config: &CollectorConfig,
 ) -> Result<PluginOutput> {
+    collect_perf_folded_profiles_with_path(now, config, config.perf_folded_path.clone())
+}
+
+fn collect_perf_folded_profiles_with_path(
+    now: DateTime<Utc>,
+    config: &CollectorConfig,
+    fallback_path: Option<PathBuf>,
+) -> Result<PluginOutput> {
     let mut output = PluginOutput::default();
-    let targets = perf_folded_targets();
+    let targets = perf_folded_targets(fallback_path);
 
     for target in targets {
         let folded = match fs::read_to_string(&target.folded_path) {
@@ -135,7 +164,7 @@ fn lightweight_report_from_folded(
     .to_string())
 }
 
-fn perf_folded_targets() -> Vec<FoldedProfileTarget> {
+fn perf_folded_targets(fallback_path: Option<PathBuf>) -> Vec<FoldedProfileTarget> {
     if let Ok(value) = env::var("RUNTIMEPULSE_PERF_FOLDED_TARGETS") {
         let targets = value
             .split(';')
@@ -146,16 +175,18 @@ fn perf_folded_targets() -> Vec<FoldedProfileTarget> {
         }
     }
 
-    let Some(path) = env::var("RUNTIMEPULSE_PERF_FOLDED_PATH")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-    else {
+    let Some(path) = fallback_path.or_else(|| {
+        env::var("RUNTIMEPULSE_PERF_FOLDED_PATH")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+    }) else {
         return Vec::new();
     };
     vec![FoldedProfileTarget {
         sandbox_id: env::var("RUNTIMEPULSE_PERF_FOLDED_SANDBOX_ID")
             .unwrap_or_else(|_| "host-perf-folded".to_string()),
-        folded_path: PathBuf::from(path),
+        folded_path: path,
         object_uri: env::var("RUNTIMEPULSE_PERF_FOLDED_OBJECT_URI").unwrap_or_default(),
         profile_type: env::var("RUNTIMEPULSE_PERF_FOLDED_PROFILE_TYPE")
             .unwrap_or_else(|_| "cpu".to_string()),
@@ -322,6 +353,7 @@ mod tests {
             diagnostic_report_command: None,
             diagnostic_report_command_timeout: Duration::from_secs(1),
             perf_report_path: None,
+            perf_folded_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,
             ebpf_profile_command: None,

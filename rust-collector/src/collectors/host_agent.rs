@@ -33,6 +33,7 @@ use crate::collectors::sources::node::procfs::ProcfsPlugin;
 use crate::collectors::sources::node::psi::PsiPlugin;
 use crate::collectors::sources::profiling::ebpf::EbpfProfilePlugin;
 use crate::collectors::sources::profiling::perf::PerfProfilePlugin;
+use crate::collectors::sources::profiling::perf_folded::PerfFoldedProfilePlugin;
 use crate::collectors::sources::profiling::report::ProfileReportPlugin;
 use crate::collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets, containerd_image_id_from_ref,
@@ -92,6 +93,7 @@ struct HostAgentSources {
     diagnostic_report: bool,
     profile_report: bool,
     perf: bool,
+    perf_folded: bool,
     ebpf: bool,
     command: bool,
     http: bool,
@@ -236,6 +238,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         config.perf_profile_command.clone(),
         config.profile_command_timeout,
     );
+    let mut perf_folded = PerfFoldedProfilePlugin::new(config.perf_folded_path.clone());
     let mut ebpf = EbpfProfilePlugin::new(
         config.ebpf_report_path.clone(),
         config.ebpf_profile_command.clone(),
@@ -267,6 +270,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut diagnostic_report,
             &mut profile_report,
             &mut perf,
+            &mut perf_folded,
             &mut ebpf,
             kubernetes_metrics.as_mut(),
             &mut adapter_plugins,
@@ -328,6 +332,7 @@ fn collect_periodic(
     diagnostic_report: &mut DiagnosticReportPlugin,
     profile_report: &mut ProfileReportPlugin,
     perf: &mut PerfProfilePlugin,
+    perf_folded: &mut PerfFoldedProfilePlugin,
     ebpf: &mut EbpfProfilePlugin,
     kubernetes_metrics: Option<&mut KubernetesMetricsPlugin>,
     adapter_plugins: &mut [Box<dyn CollectorPlugin>],
@@ -398,6 +403,11 @@ fn collect_periodic(
     }
     if sources.perf {
         collect_source("host-perf", tx, stats, || perf.collect(now, config));
+    }
+    if sources.perf_folded {
+        collect_source("host-perf-folded", tx, stats, || {
+            perf_folded.collect(now, config)
+        });
     }
     if sources.ebpf {
         collect_source("host-ebpf", tx, stats, || ebpf.collect(now, config));
@@ -2004,6 +2014,7 @@ impl HostAgentSources {
             diagnostic_report: false,
             profile_report: false,
             perf: false,
+            perf_folded: false,
             ebpf: false,
             command: false,
             http: false,
@@ -2047,6 +2058,9 @@ impl HostAgentSources {
                 }
                 "perf" | "host-perf" | "perf-report" | "host-perf-report" => {
                     sources.perf = true;
+                }
+                "perf-folded" | "host-perf-folded" | "perf-folded-report" => {
+                    sources.perf_folded = true;
                 }
                 "ebpf" | "eBPF" | "host-ebpf" | "ebpf-report" | "host-ebpf-report" => {
                     sources.ebpf = true;
@@ -2114,6 +2128,9 @@ impl HostAgentSources {
         }
         if self.perf {
             names.push("perf");
+        }
+        if self.perf_folded {
+            names.push("perf-folded");
         }
         if self.ebpf {
             names.push("ebpf");
@@ -2188,6 +2205,7 @@ mod tests {
             diagnostic_report_command: None,
             diagnostic_report_command_timeout: Duration::from_secs(1),
             perf_report_path: None,
+            perf_folded_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,
             ebpf_profile_command: None,
@@ -2299,6 +2317,7 @@ mod tests {
             diagnostic_report: false,
             profile_report: false,
             perf: false,
+            perf_folded: false,
             ebpf: false,
             command: false,
             http: false,

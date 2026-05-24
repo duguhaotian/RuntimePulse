@@ -14,7 +14,9 @@ use collectors::sources::image::cache::ImageCachePlugin;
 use collectors::sources::image::download::output_from_event as image_output_from_event;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
-use collectors::sources::profiling::perf_folded::emit_perf_folded_profiles;
+use collectors::sources::profiling::perf_folded::{
+    emit_perf_folded_profiles, PerfFoldedProfilePlugin,
+};
 use collectors::sources::profiling::report::ProfileReportPlugin;
 use collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets,
@@ -588,6 +590,9 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             ))),
             "profile-report" | "profiles" | "profiling-report" => plugins.push(Box::new(
                 ProfileReportPlugin::new(config.profile_report_path.clone()),
+            )),
+            "perf-folded" | "perf-folded-report" => plugins.push(Box::new(
+                PerfFoldedProfilePlugin::new(config.perf_folded_path.clone()),
             )),
             "diagnostic-report" | "diagnostics" => {
                 plugins.push(Box::new(DiagnosticReportPlugin::new(

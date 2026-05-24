@@ -812,6 +812,7 @@ mod tests {
             diagnostic_report_command: None,
             diagnostic_report_command_timeout: Duration::from_secs(1),
             perf_report_path: None,
+            perf_folded_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,
             ebpf_profile_command: None,

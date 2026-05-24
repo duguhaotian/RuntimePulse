@@ -396,9 +396,9 @@ The command timeout defaults to `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` or 3000 ms.
 Timed-out profiler command process groups are terminated before the next
 collection interval.
 
-For a lightweight native perf path, `runtimepulse-collector perf-folded` converts
-folded stack files into RuntimePulse profile artifacts with inline flamegraph
-trees. It is useful when hosts already run `perf script | stackcollapse-perf.pl`
+For a lightweight native perf path, enable the `perf-folded` source or run
+`runtimepulse-collector perf-folded`; it converts folded stack files into
+RuntimePulse profile artifacts with inline flamegraph trees. It is useful when hosts already run `perf script | stackcollapse-perf.pl`
 or an equivalent exporter. Useful settings:
 
 | Variable | Default | Purpose |
@@ -411,6 +411,15 @@ or an equivalent exporter. Useful settings:
 | `RUNTIMEPULSE_PERF_FOLDED_DURATION_MS` | `0` | Capture window used to derive sample rate. |
 | `RUNTIMEPULSE_PERF_FOLDED_TARGETS` | unset | Semicolon-separated multi-target specs such as `sandbox=s1,path=/tmp/a.folded,role=runtime`. |
 | `RUNTIMEPULSE_PERF_FOLDED_OUTPUT_DIR` | `/tmp/runtimepulse/profiles/perf-folded` | Directory for copied folded stack artifacts when no object URI is supplied. |
+
+Native host-agent source mode:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=perf-folded
+RUNTIMEPULSE_PERF_FOLDED_PATH=/var/lib/runtimepulse/profiles/demo.folded
+RUNTIMEPULSE_PERF_FOLDED_SANDBOX_ID=docker-0123456789ab
+runtimepulse-collector host-agent
+```
 
 It can also be used through the existing perf command hook because `perf-folded`
 prints a RuntimePulse-compatible `PluginOutput`:

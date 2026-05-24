@@ -24,6 +24,7 @@ pub struct CollectorConfig {
     pub diagnostic_report_command: Option<String>,
     pub diagnostic_report_command_timeout: Duration,
     pub perf_report_path: Option<PathBuf>,
+    pub perf_folded_path: Option<PathBuf>,
     pub ebpf_report_path: Option<PathBuf>,
     pub perf_profile_command: Option<String>,
     pub ebpf_profile_command: Option<String>,
@@ -109,6 +110,10 @@ impl CollectorConfig {
             .or_else(|| env_duration_ms("RUNTIMEPULSE_DIAGNOSTICS_REPORT_TIMEOUT_MS"))
             .unwrap_or_else(adapter_timeout),
             perf_report_path: env::var("RUNTIMEPULSE_PERF_REPORT_PATH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
+            perf_folded_path: env::var("RUNTIMEPULSE_PERF_FOLDED_PATH")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
