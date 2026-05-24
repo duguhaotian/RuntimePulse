@@ -224,8 +224,16 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut containerd_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
     let mut profile_report = ProfileReportPlugin::new(config.profile_report_path.clone());
-    let mut perf = PerfProfilePlugin::new(config.perf_report_path.clone());
-    let mut ebpf = EbpfProfilePlugin::new(config.ebpf_report_path.clone());
+    let mut perf = PerfProfilePlugin::new(
+        config.perf_report_path.clone(),
+        config.perf_profile_command.clone(),
+        config.profile_command_timeout,
+    );
+    let mut ebpf = EbpfProfilePlugin::new(
+        config.ebpf_report_path.clone(),
+        config.ebpf_profile_command.clone(),
+        config.profile_command_timeout,
+    );
     let mut kubernetes_metrics = if sources.kubernetes_metrics {
         Some(KubernetesMetricsPlugin::from_env().ok_or_else(|| {
             CollectorError::Config(
@@ -2155,6 +2163,11 @@ mod tests {
             cgroup_max_entries: 200,
             image_cache_report_path: None,
             profile_report_path: None,
+            perf_report_path: None,
+            ebpf_report_path: None,
+            perf_profile_command: None,
+            ebpf_profile_command: None,
+            profile_command_timeout: Duration::from_secs(1),
             plugins: Vec::new(),
             command_plugins: Vec::new(),
             http_plugins: Vec::new(),
@@ -2260,6 +2273,8 @@ mod tests {
             containerd_sandbox_cgroupfs: true,
             image_cache: false,
             profile_report: false,
+            perf: false,
+            ebpf: false,
             command: false,
             http: false,
         };

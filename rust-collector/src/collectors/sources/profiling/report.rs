@@ -9,10 +9,15 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::collectors::core::config::CollectorConfig;
-use crate::collectors::core::error::Result;
+use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::{
     EventRecord, Metadata, MetricSample, PluginOutput, ProfileArtifact,
 };
@@ -107,6 +112,24 @@ pub fn profile_output_from_content(
     config: &CollectorConfig,
 ) -> Result<PluginOutput> {
     profile_output_from_content_with_plugin(content, now, config, "profile-report")
+}
+
+pub fn profile_output_from_command(
+    command: &str,
+    timeout: Duration,
+    now: DateTime<Utc>,
+    config: &CollectorConfig,
+    plugin_name: &str,
+) -> Result<PluginOutput> {
+    let content = run_profile_command(command, timeout, plugin_name)?;
+    if content.trim().is_empty() {
+        return Ok(PluginOutput::default());
+    }
+    profile_output_from_content_with_plugin(&content, now, config, plugin_name)
+}
+
+pub fn merge_profile_output(target: &mut PluginOutput, output: PluginOutput) {
+    merge_plugin_output(target, output);
 }
 
 pub fn profile_output_from_content_with_plugin(
@@ -484,6 +507,63 @@ fn profile_events(profiles: &[ProfileArtifact], source: &str) -> Vec<EventRecord
         .collect()
 }
 
+fn run_profile_command(command: &str, timeout: Duration, plugin_name: &str) -> Result<String> {
+    let mut child_command = Command::new("sh");
+    child_command
+        .arg("-lc")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    child_command.process_group(0);
+    let mut child = child_command.spawn()?;
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            if !output.status.success() {
+                return Err(CollectorError::Plugin {
+                    plugin: plugin_name.to_string(),
+                    message: format!(
+                        "profile command exited with status {:?}: {}",
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                });
+            }
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+
+        if started.elapsed() >= timeout {
+            kill_child_tree(&mut child);
+            let _ = child.wait();
+            return Err(CollectorError::Plugin {
+                plugin: plugin_name.to_string(),
+                message: format!("profile command timed out after {} ms", timeout.as_millis()),
+            });
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn kill_child_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-TERM", &group]).status();
+        thread::sleep(Duration::from_millis(50));
+        let _ = Command::new("kill").args(["-KILL", &group]).status();
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    {
+        let _ = child.kill();
+    }
+}
+
 fn merge_plugin_output(target: &mut PluginOutput, output: PluginOutput) {
     target.metadata.clusters.extend(output.metadata.clusters);
     target.metadata.nodes.extend(output.metadata.nodes);
@@ -551,6 +631,9 @@ mod tests {
             profile_report_path: None,
             perf_report_path: None,
             ebpf_report_path: None,
+            perf_profile_command: None,
+            ebpf_profile_command: None,
+            profile_command_timeout: Duration::from_secs(1),
             plugins: Vec::new(),
             command_plugins: Vec::new(),
             http_plugins: Vec::new(),

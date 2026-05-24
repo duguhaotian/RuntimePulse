@@ -37,6 +37,8 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet for single-node Docker scenarios.
 - `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, network, and process metrics without scanning the whole cgroup tree.
 - `host-image-cache`: runs on the host, reads a RuntimePulse JSON/JSONL report emitted by a real snapshotter or image-cache exporter, and reports lazy block-cache metrics plus precise image stage spans.
+- `host-perf`: runs on the host, reads a perf profile artifact report or executes a configured perf exporter command that writes RuntimePulse-compatible JSON to stdout.
+- `host-ebpf`: runs on the host, reads an eBPF profile artifact report or executes a configured eBPF exporter command that writes RuntimePulse-compatible JSON to stdout.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
 
@@ -283,8 +285,28 @@ RUNTIMEPULSE_PROFILE_REPORT_PATH=/var/lib/runtimepulse/profile-report.jsonl
 runtimepulse-collector host-agent
 ```
 
-The file can be a RuntimePulse `PluginOutput`, a lightweight JSON object, a JSON
-array, or JSONL. Lightweight rows only need the target sandbox and profiles:
+For profiler-specific adapters, enable `perf` or `ebpf`. Each adapter can read
+a report file, execute an exporter command, or merge both sources on each tick.
+Commands run on the host through the host-agent and must write the same
+RuntimePulse `PluginOutput` or lightweight profile JSON/JSONL to stdout:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=perf,ebpf
+RUNTIMEPULSE_PERF_REPORT_PATH=/var/lib/runtimepulse/perf-report.jsonl
+RUNTIMEPULSE_PERF_PROFILE_CMD='perf-summary --runtimepulse-json'
+RUNTIMEPULSE_EBPF_REPORT_PATH=/var/lib/runtimepulse/ebpf-report.jsonl
+RUNTIMEPULSE_EBPF_PROFILE_CMD='ebpf-profiler export --format runtimepulse-json'
+RUNTIMEPULSE_PROFILE_COMMAND_TIMEOUT_MS=5000
+runtimepulse-collector host-agent
+```
+
+The command timeout defaults to `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` or 3000 ms.
+Timed-out profiler command process groups are terminated before the next
+collection interval.
+
+The file or command output can be a RuntimePulse `PluginOutput`, a lightweight
+JSON object, a JSON array, or JSONL. Lightweight rows only need the target
+sandbox and profiles:
 
 ```json
 {

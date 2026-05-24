@@ -341,7 +341,7 @@ starting each source manually.
 
 1. Deepen non-Kubernetes P1 collector data first: snapshotter/image-cache fidelity, native profiling adapter hooks, and diagnostic artifact workflows.
 2. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place and now accepts layer-level cache counters plus prefetch records.
-3. Add native eBPF/perf profiling sources on top of the generic profile artifact ingestion path.
+3. Expand native eBPF/perf profiling sources beyond the generic profile artifact ingestion path and current host-agent file/command exporter hooks when real profiler backends are selected.
 4. Complete the Kubernetes path on containerd after the non-Kubernetes P1 collector work: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
 5. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
 6. Add Kata and Firecracker sandbox sources after the containerd/Kubernetes path is stable.

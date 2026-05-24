@@ -22,6 +22,9 @@ pub struct CollectorConfig {
     pub profile_report_path: Option<PathBuf>,
     pub perf_report_path: Option<PathBuf>,
     pub ebpf_report_path: Option<PathBuf>,
+    pub perf_profile_command: Option<String>,
+    pub ebpf_profile_command: Option<String>,
+    pub profile_command_timeout: Duration,
     pub plugins: Vec<String>,
     pub command_plugins: Vec<CommandPluginConfig>,
     pub http_plugins: Vec<HttpPluginConfig>,
@@ -96,6 +99,14 @@ impl CollectorConfig {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
+            perf_profile_command: env::var("RUNTIMEPULSE_PERF_PROFILE_CMD")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            ebpf_profile_command: env::var("RUNTIMEPULSE_EBPF_PROFILE_CMD")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            profile_command_timeout: env_duration_ms("RUNTIMEPULSE_PROFILE_COMMAND_TIMEOUT_MS")
+                .unwrap_or_else(adapter_timeout),
             plugins,
             command_plugins: command_plugin_configs(),
             http_plugins: http_plugin_configs(),

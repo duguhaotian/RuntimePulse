@@ -15,7 +15,7 @@ Development is now collector-first and container-first.
 
 Current execution order has been adjusted for collector-first development:
 
-1. Complete non-Kubernetes P1 collector depth first: snapshotter/image-cache report fidelity, native profiling adapters, and runtime diagnostic artifacts.
+1. Complete non-Kubernetes P1 collector depth first: snapshotter/image-cache report fidelity, native profiling adapters, and runtime diagnostic artifacts. Profile adapters now include host-agent file ingestion plus perf/eBPF exporter command hooks; continue deepening backend-specific collectors as real tooling is selected.
 2. Keep Kubernetes/containerd production hardening behind the non-Kubernetes P1 collector work. Existing containerd/Kubernetes paths remain available for validation, but they are not the next implementation focus.
 3. Keep production security, tenancy/RBAC, and full production hardening last until collector data quality and workflows stabilize.
 
