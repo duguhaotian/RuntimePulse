@@ -225,7 +225,11 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut docker_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut containerd_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
-    let mut diagnostic_report = DiagnosticReportPlugin::new(config.diagnostic_report_path.clone());
+    let mut diagnostic_report = DiagnosticReportPlugin::new(
+        config.diagnostic_report_path.clone(),
+        config.diagnostic_report_command.clone(),
+        config.diagnostic_report_command_timeout,
+    );
     let mut profile_report = ProfileReportPlugin::new(config.profile_report_path.clone());
     let mut perf = PerfProfilePlugin::new(
         config.perf_report_path.clone(),
@@ -2181,6 +2185,8 @@ mod tests {
             image_cache_report_path: None,
             profile_report_path: None,
             diagnostic_report_path: None,
+            diagnostic_report_command: None,
+            diagnostic_report_command_timeout: Duration::from_secs(1),
             perf_report_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,

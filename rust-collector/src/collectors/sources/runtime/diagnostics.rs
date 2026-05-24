@@ -11,10 +11,15 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::collectors::core::config::CollectorConfig;
-use crate::collectors::core::error::Result;
+use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::{EventRecord, MetricSample, PluginOutput, TraceSpan};
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::core::report::{metric, node_metric};
@@ -22,6 +27,8 @@ use crate::collectors::core::report::{metric, node_metric};
 #[derive(Default)]
 pub struct DiagnosticReportPlugin {
     path: Option<PathBuf>,
+    command: Option<String>,
+    timeout: Duration,
     seen_event_ids: HashSet<String>,
 }
 
@@ -96,9 +103,11 @@ struct DiagnosticArtifact {
 }
 
 impl DiagnosticReportPlugin {
-    pub fn new(path: Option<PathBuf>) -> Self {
+    pub fn new(path: Option<PathBuf>, command: Option<String>, timeout: Duration) -> Self {
         Self {
             path,
+            command,
+            timeout,
             seen_event_ids: HashSet::new(),
         }
     }
@@ -110,23 +119,58 @@ impl CollectorPlugin for DiagnosticReportPlugin {
     }
 
     fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
-        let Some(path) = self.path.clone() else {
-            return Ok(PluginOutput::default());
-        };
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(PluginOutput::default());
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let mut output = PluginOutput::default();
 
-        let mut output = output_from_diagnostic_content(&content, now, config)?;
+        if let Some(path) = self.path.clone() {
+            let content = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(error.into()),
+            };
+            if !content.trim().is_empty() {
+                merge_output(
+                    &mut output,
+                    output_from_diagnostic_content(&content, now, config)?,
+                );
+            }
+        }
+
+        if let Some(command) = self.command.clone() {
+            merge_output(
+                &mut output,
+                output_from_diagnostic_command(&command, self.timeout, now, config)?,
+            );
+        }
+
         output
             .events
             .retain(|event| self.seen_event_ids.insert(event.id.clone()));
         Ok(output)
     }
+}
+
+pub fn output_from_diagnostic_command(
+    command: &str,
+    timeout: Duration,
+    now: DateTime<Utc>,
+    config: &CollectorConfig,
+) -> Result<PluginOutput> {
+    let content = run_diagnostic_command(command, timeout)?;
+    if content.trim().is_empty() {
+        return Ok(PluginOutput::default());
+    }
+    output_from_diagnostic_content(&content, now, config)
+}
+
+fn merge_output(target: &mut PluginOutput, output: PluginOutput) {
+    target.metadata.clusters.extend(output.metadata.clusters);
+    target.metadata.nodes.extend(output.metadata.nodes);
+    target.metadata.images.extend(output.metadata.images);
+    target.metadata.sandboxes.extend(output.metadata.sandboxes);
+    target.metrics.extend(output.metrics);
+    target.events.extend(output.events);
+    target.traces.extend(output.traces);
+    target.profiles.extend(output.profiles);
 }
 
 pub fn output_from_diagnostic_content(
@@ -611,6 +655,66 @@ fn diagnostic_span(
     }
 }
 
+fn run_diagnostic_command(command: &str, timeout: Duration) -> Result<String> {
+    let mut child_command = Command::new("sh");
+    child_command
+        .arg("-lc")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    child_command.process_group(0);
+    let mut child = child_command.spawn()?;
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            if !output.status.success() {
+                return Err(CollectorError::Plugin {
+                    plugin: "diagnostic-report".to_string(),
+                    message: format!(
+                        "diagnostic command exited with status {:?}: {}",
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                });
+            }
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+
+        if started.elapsed() >= timeout {
+            kill_child_tree(&mut child);
+            let _ = child.wait();
+            return Err(CollectorError::Plugin {
+                plugin: "diagnostic-report".to_string(),
+                message: format!(
+                    "diagnostic command timed out after {} ms",
+                    timeout.as_millis()
+                ),
+            });
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn kill_child_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-TERM", &group]).status();
+        thread::sleep(Duration::from_millis(50));
+        let _ = Command::new("kill").args(["-KILL", &group]).status();
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    {
+        let _ = child.kill();
+    }
+}
+
 fn labels_value(labels: Option<&Map<String, Value>>) -> Value {
     Value::Object(labels.cloned().unwrap_or_default())
 }
@@ -705,6 +809,8 @@ mod tests {
             image_cache_report_path: None,
             profile_report_path: None,
             diagnostic_report_path: None,
+            diagnostic_report_command: None,
+            diagnostic_report_command_timeout: Duration::from_secs(1),
             perf_report_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,
@@ -714,6 +820,29 @@ mod tests {
             command_plugins: Vec::new(),
             http_plugins: Vec::new(),
         }
+    }
+
+    #[test]
+    fn diagnostic_plugin_collects_command_output() {
+        let mut plugin = DiagnosticReportPlugin::new(
+            None,
+            Some("printf '%s' '{\"id\":\"diag-command\",\"timestamp\":\"2026-05-23T00:00:00Z\",\"sandboxId\":\"docker-runtimepulse-demo\",\"runtimeType\":\"runc\",\"source\":\"docker-debug\",\"objectUri\":\"file:///tmp/diag.tgz\",\"sizeBytes\":512,\"durationMs\":50,\"summary\":{\"warnings\":0,\"errors\":0},\"issues\":[]}'".to_string()),
+            Duration::from_secs(1),
+        );
+
+        let output = plugin
+            .collect(
+                DateTime::parse_from_rfc3339("2026-05-23T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                &test_config(),
+            )
+            .unwrap();
+
+        assert_eq!(output.events.len(), 1);
+        assert_eq!(output.events[0].id, "diag-command-captured");
+        assert_eq!(output.metrics.len(), 5);
+        assert_eq!(output.traces.len(), 1);
     }
 
     #[test]

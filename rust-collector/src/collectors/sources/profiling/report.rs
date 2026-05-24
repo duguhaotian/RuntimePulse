@@ -630,6 +630,8 @@ mod tests {
             image_cache_report_path: None,
             profile_report_path: None,
             diagnostic_report_path: None,
+            diagnostic_report_command: None,
+            diagnostic_report_command_timeout: Duration::from_secs(1),
             perf_report_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,

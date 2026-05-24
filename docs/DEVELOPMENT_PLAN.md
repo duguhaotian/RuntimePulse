@@ -182,7 +182,7 @@ Implemented:
 - Host-agent can run optional `command` and `http` adapter sources, so third-party host tools that emit RuntimePulse partial output join the same queue, batching, spool, and outlet path.
 - Host-agent can run `image-cache`/`host-image-cache` to ingest real snapshotter/exporter JSON or JSONL reports for precise image stage spans and lazy block-cache hit curves.
 - Host-agent can run `profile-report`/`host-profile-report` to ingest real perf/eBPF/third-party JSON or JSONL profile artifact indexes through the same queue, batching, spool, and outlet path. Profile reports now preserve target process metadata and capture stats, emit profile observation events, and derive profile metric series for samples, duration, lost samples, sample rate, CPU time, and kernel/user sample splits.
-- Host-agent can run `diagnostic-report`/`host-diagnostic-report` to ingest runtime support-bundle/log/inspect artifact indexes and derive diagnostic events, issue metrics, and capture spans without storing raw bundles in the collector.
+- Host-agent can run `diagnostic-report`/`host-diagnostic-report` to ingest runtime support-bundle/log/inspect artifact indexes from files or configured exporter commands and derive diagnostic events, issue metrics, and capture spans without storing raw bundles in the collector.
 - Host-agent and local report ingestion preserve per-source attribution, so collector status can distinguish `host-procfs`, `host-docker`, `host-profile-report`, and other local sources instead of collapsing everything into one outlet source.
 - Node detail page consumes node-level metric series directly, so host-agent health and node pressure are visible without relying on sandbox-level series.
 
@@ -200,7 +200,7 @@ Collector candidates:
 - Kata collector.
 - Firecracker collector.
 - eBPF/profile collector. Generic profile artifact report ingestion is implemented with target/stats metadata, profile observation events, profile metric derivation, and perf/eBPF exporter command hooks; backend-specific native capture can be deepened when real tooling is selected.
-- Diagnostic artifact collector. Generic diagnostic report ingestion is implemented for support-bundle/log/inspect indexes; next work is wiring specific runtime diagnostic commands and UI artifact workflows.
+- Diagnostic artifact collector. Generic diagnostic report ingestion is implemented for support-bundle/log/inspect indexes, including host-agent file and command exporter hooks; next work is wiring specific runtime diagnostic exporters and UI artifact workflows.
 - gVisor collector. Defer until the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
 
 Collector output should map to the same domain concepts already used by the frontend:

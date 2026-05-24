@@ -288,7 +288,18 @@ RUNTIMEPULSE_DIAGNOSTIC_REPORT_PATH=/var/lib/runtimepulse/diagnostic-report.json
 runtimepulse-collector host-agent
 ```
 
-The report can be a JSON object, JSON array, or JSONL:
+A host-side diagnostic exporter can also be executed every collection interval.
+The command must write the same JSON/JSONL index to stdout; raw bundles should
+still be written to local or object storage and referenced by `objectUri`:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=diagnostic-report
+RUNTIMEPULSE_DIAGNOSTIC_REPORT_CMD='runtimepulse-docker-diagnostics --format runtimepulse-json'
+RUNTIMEPULSE_DIAGNOSTIC_REPORT_TIMEOUT_MS=10000
+runtimepulse-collector host-agent
+```
+
+The report file or command output can be a JSON object, JSON array, or JSONL:
 
 ```json
 {

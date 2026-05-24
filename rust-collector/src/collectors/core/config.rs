@@ -21,6 +21,8 @@ pub struct CollectorConfig {
     pub image_cache_report_path: Option<PathBuf>,
     pub profile_report_path: Option<PathBuf>,
     pub diagnostic_report_path: Option<PathBuf>,
+    pub diagnostic_report_command: Option<String>,
+    pub diagnostic_report_command_timeout: Duration,
     pub perf_report_path: Option<PathBuf>,
     pub ebpf_report_path: Option<PathBuf>,
     pub perf_profile_command: Option<String>,
@@ -97,6 +99,15 @@ impl CollectorConfig {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
+            diagnostic_report_command: env::var("RUNTIMEPULSE_DIAGNOSTIC_REPORT_CMD")
+                .or_else(|_| env::var("RUNTIMEPULSE_DIAGNOSTICS_REPORT_CMD"))
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            diagnostic_report_command_timeout: env_duration_ms(
+                "RUNTIMEPULSE_DIAGNOSTIC_REPORT_TIMEOUT_MS",
+            )
+            .or_else(|| env_duration_ms("RUNTIMEPULSE_DIAGNOSTICS_REPORT_TIMEOUT_MS"))
+            .unwrap_or_else(adapter_timeout),
             perf_report_path: env::var("RUNTIMEPULSE_PERF_REPORT_PATH")
                 .ok()
                 .filter(|value| !value.trim().is_empty())

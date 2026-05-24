@@ -553,9 +553,13 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             "profile-report" | "profiles" | "profiling-report" => plugins.push(Box::new(
                 ProfileReportPlugin::new(config.profile_report_path.clone()),
             )),
-            "diagnostic-report" | "diagnostics" => plugins.push(Box::new(
-                DiagnosticReportPlugin::new(config.diagnostic_report_path.clone()),
-            )),
+            "diagnostic-report" | "diagnostics" => {
+                plugins.push(Box::new(DiagnosticReportPlugin::new(
+                    config.diagnostic_report_path.clone(),
+                    config.diagnostic_report_command.clone(),
+                    config.diagnostic_report_command_timeout,
+                )))
+            }
             "command" => {
                 if config.command_plugins.is_empty() {
                     return Err(CollectorError::Config(
