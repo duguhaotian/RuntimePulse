@@ -200,7 +200,7 @@ Collector candidates:
 - Kata collector.
 - Firecracker collector.
 - eBPF/profile collector. Generic profile artifact report ingestion is implemented with target/stats metadata, profile observation events, profile metric derivation, and perf/eBPF exporter command hooks; backend-specific native capture can be deepened when real tooling is selected.
-- Diagnostic artifact collector. Generic diagnostic report ingestion is implemented for support-bundle/log/inspect indexes, including host-agent file and command exporter hooks; Docker and crictl diagnostics exporters are now available; next work is native containerd exporter depth and UI artifact workflows.
+- Diagnostic artifact collector. Generic diagnostic report ingestion is implemented for support-bundle/log/inspect indexes, including host-agent file and command exporter hooks; Docker, crictl, and native containerd diagnostics exporters are now available; next work is UI artifact workflows and backend-specific profiler depth.
 - gVisor collector. Defer until the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
 
 Collector output should map to the same domain concepts already used by the frontend:

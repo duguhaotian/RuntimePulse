@@ -300,7 +300,7 @@ runtimepulse-collector host-agent
 ```
 
 
-The built-in Docker and CRI diagnostic exporters write inspect/log artifact files
+The built-in Docker, CRI, and containerd diagnostic exporters write runtime metadata/artifact files
 and print a RuntimePulse diagnostic JSONL index to stdout. They can be used
 directly as the command hook above. Useful Docker settings:
 
@@ -321,11 +321,21 @@ Useful CRI/crictl settings for Kubernetes/containerd nodes:
 | `RUNTIMEPULSE_CRI_DIAGNOSTIC_INCLUDE_LOGS` | `true` | Set `false` to skip `crictl logs`. |
 | `RUNTIMEPULSE_CRI_DIAGNOSTIC_TAIL_LINES` | `200` | Number of log lines captured per container. |
 
+Useful native containerd settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RUNTIMEPULSE_CONTAINERD_SOCKET` | `/run/containerd/containerd.sock` | containerd gRPC socket. |
+| `RUNTIMEPULSE_CONTAINERD_NAMESPACES` | all namespaces | Comma-separated namespaces to inspect, for example `k8s.io`. |
+| `RUNTIMEPULSE_CONTAINERD_DIAGNOSTIC_CONTAINERS` | all containers | Comma-separated container ids, short ids, sandbox ids, or workload names to export. |
+| `RUNTIMEPULSE_CONTAINERD_DIAGNOSTIC_OUTPUT_DIR` | `/tmp/runtimepulse/diagnostics/containerd` | Directory for raw native containerd metadata artifacts. |
+
 For a one-shot local export without host-agent:
 
 ```bash
 runtimepulse-collector docker-diagnostics > /var/lib/runtimepulse/docker-diagnostic-report.jsonl
 runtimepulse-collector crictl-diagnostics > /var/lib/runtimepulse/cri-diagnostic-report.jsonl
+runtimepulse-collector containerd-diagnostics > /var/lib/runtimepulse/containerd-diagnostic-report.jsonl
 ```
 
 The report file or command output can be a JSON object, JSON array, or JSONL:

@@ -19,6 +19,7 @@ use collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets,
     output_from_runtime_event as containerd_output_from_event, stream_containerd_events,
 };
+use collectors::sources::runtime::containerd_diagnostics::emit_containerd_diagnostics;
 use collectors::sources::runtime::cri_diagnostics::emit_crictl_diagnostics;
 use collectors::sources::runtime::diagnostics::DiagnosticReportPlugin;
 use collectors::sources::runtime::docker::diagnostics::emit_docker_diagnostics;
@@ -54,6 +55,8 @@ fn main() {
         run_docker_diagnostics()
     } else if env::args().any(|arg| arg == "crictl-diagnostics" || arg == "cri-diagnostics") {
         run_crictl_diagnostics()
+    } else if env::args().any(|arg| arg == "containerd-diagnostics") {
+        run_containerd_diagnostics()
     } else if env::args().any(|arg| arg == "host-containerd") {
         run_host_containerd()
     } else if env::args().any(|arg| arg == "host-containerd-tasks") {
@@ -310,6 +313,12 @@ fn run_crictl_diagnostics() -> Result<()> {
     let mut config = CollectorConfig::from_env()?;
     config.collection_scope = "host".to_string();
     emit_crictl_diagnostics(&config)
+}
+
+fn run_containerd_diagnostics() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+    emit_containerd_diagnostics(&config)
 }
 
 fn run_host_containerd_tasks() -> Result<()> {

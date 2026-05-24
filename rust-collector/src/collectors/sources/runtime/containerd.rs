@@ -11,8 +11,9 @@ use containerd_client::events::{
     TaskPaused, TaskResumed, TaskStart,
 };
 use containerd_client::services::v1::{
-    Container, GetContainerRequest, Image, Info, ListContainersRequest, ListContentRequest,
-    ListImagesRequest, ListNamespacesRequest, ListTasksRequest, SubscribeRequest,
+    Container, GetContainerRequest, GetImageRequest, Image, Info, ListContainersRequest,
+    ListContentRequest, ListImagesRequest, ListNamespacesRequest, ListTasksRequest,
+    SubscribeRequest,
 };
 use containerd_client::tonic::{Code, Request};
 use containerd_client::types::v1::Status as ContainerdTaskStatus;
@@ -77,6 +78,30 @@ pub struct ContainerdSandboxIdentity {
 }
 
 #[derive(Clone, Debug)]
+pub struct ContainerdDiagnosticTarget {
+    pub container_id: String,
+    pub namespace: String,
+    pub sandbox_id: String,
+    pub workload_name: String,
+    pub image_ref: String,
+    pub image_digest: String,
+    pub runtime_name: String,
+    pub runtime_type: String,
+    pub snapshotter: String,
+    pub snapshot_key: String,
+    pub labels: HashMap<String, String>,
+    pub task_pid: u32,
+    pub task_status: String,
+    pub exit_status: u32,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub exited_at: Option<String>,
+    pub content_bytes: u64,
+    pub content_count: usize,
+    pub layer_count: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct ContainerdTaskTarget {
     pub container_id: String,
     pub namespace: String,
@@ -104,6 +129,14 @@ pub fn collect_containerd_task_targets() -> Result<Vec<ContainerdTaskTarget>> {
         .enable_io()
         .build()?;
     runtime.block_on(collect_containerd_task_targets_async(socket))
+}
+
+pub fn collect_containerd_diagnostic_targets() -> Result<Vec<ContainerdDiagnosticTarget>> {
+    let socket = containerd_socket_path();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+    runtime.block_on(collect_containerd_diagnostic_targets_async(socket))
 }
 
 pub fn stream_containerd_events<F>(config: &CollectorConfig, mut on_event: F) -> Result<()>
@@ -644,6 +677,56 @@ async fn collect_containerd_task_targets_async(
     Ok(targets)
 }
 
+async fn collect_containerd_diagnostic_targets_async(
+    socket: PathBuf,
+) -> Result<Vec<ContainerdDiagnosticTarget>> {
+    let client = Client::from_path(socket)
+        .await
+        .map_err(|error| CollectorError::Plugin {
+            plugin: "containerd".to_string(),
+            message: error.to_string(),
+        })?;
+    let namespaces = if let Some(namespaces) = namespace_filter() {
+        namespaces
+    } else {
+        async_list_namespaces(&client).await?
+    };
+    let mut targets = Vec::new();
+
+    for namespace in namespaces {
+        let containers = async_list_containers(&client, &namespace).await?;
+        let tasks_by_container_id = async_list_tasks(&client, &namespace)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|task| (containerd_task_container_id(&task), task))
+            .collect::<HashMap<_, _>>();
+        let content = async_list_content(&client, &namespace)
+            .await
+            .unwrap_or_default();
+
+        for container in containers {
+            let task = tasks_by_container_id.get(&container.id);
+            let image = if container.image.is_empty() {
+                None
+            } else {
+                async_get_image(&client, &namespace, &container.image)
+                    .await
+                    .unwrap_or(None)
+            };
+            targets.push(containerd_diagnostic_target_from_container(
+                &namespace,
+                &container,
+                image.as_ref(),
+                task,
+                &content,
+            ));
+        }
+    }
+
+    Ok(targets)
+}
+
 async fn stream_containerd_events_async<F>(
     _config: &CollectorConfig,
     socket: PathBuf,
@@ -1056,6 +1139,23 @@ async fn async_list_content(client: &Client, namespace: &str) -> Result<Vec<Info
     Ok(content)
 }
 
+async fn async_get_image(client: &Client, namespace: &str, name: &str) -> Result<Option<Image>> {
+    let response = client
+        .images()
+        .get(with_namespace!(
+            GetImageRequest {
+                name: name.to_string()
+            },
+            namespace
+        ))
+        .await;
+    match response {
+        Ok(response) => Ok(response.into_inner().image),
+        Err(status) if status.code() == Code::NotFound => Ok(None),
+        Err(status) => Err(containerd_status(status)),
+    }
+}
+
 async fn async_get_container(
     client: &Client,
     namespace: &str,
@@ -1109,6 +1209,69 @@ fn image_references_digest(image: &Image, digest: &str) -> bool {
             .target
             .as_ref()
             .is_some_and(|target| target.annotations.values().any(|value| value == digest))
+}
+
+fn containerd_diagnostic_target_from_container(
+    namespace: &str,
+    container: &Container,
+    image: Option<&Image>,
+    task: Option<&containerd_client::types::v1::Process>,
+    content: &[Info],
+) -> ContainerdDiagnosticTarget {
+    let identity = containerd_identity_from_labels(namespace, &container.id, &container.labels);
+    let image_ref = if container.image.is_empty() {
+        "containerd/unknown:latest".to_string()
+    } else {
+        container.image.clone()
+    };
+    let runtime_name =
+        runtime_name_from_containerd(container).unwrap_or_else(|| "containerd".to_string());
+    let runtime_type = runtime_type_from_name(&runtime_name);
+    let image_digest = image
+        .and_then(|image| image.target.as_ref())
+        .map(|target| target.digest.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| content_digest_for_image_ref(&image_ref, content))
+        .unwrap_or_else(|| "containerd:unknown".to_string());
+    let matching_content = image
+        .and_then(|image| image.target.as_ref())
+        .map(|target| content_refs_for_target(target, content))
+        .unwrap_or_else(|| content_refs_for_digest(&image_digest, content));
+    let layer_count = matching_content
+        .iter()
+        .filter(|item| is_containerd_layer_ref(&item.label))
+        .count();
+    let content_bytes = matching_content
+        .iter()
+        .map(|item| item.size_bytes)
+        .sum::<u64>();
+
+    ContainerdDiagnosticTarget {
+        container_id: container.id.clone(),
+        namespace: namespace.to_string(),
+        sandbox_id: identity.sandbox_id,
+        workload_name: identity.workload_name,
+        image_ref,
+        image_digest,
+        runtime_name,
+        runtime_type,
+        snapshotter: container.snapshotter.clone(),
+        snapshot_key: container.snapshot_key.clone(),
+        labels: container.labels.clone(),
+        task_pid: task.map(|task| task.pid).unwrap_or(0),
+        task_status: task
+            .map(|task| containerd_task_status_name(task.status).to_string())
+            .unwrap_or_else(|| "MISSING".to_string()),
+        exit_status: task.map(|task| task.exit_status).unwrap_or(0),
+        created_at: container.created_at.as_ref().and_then(timestamp_from_prost),
+        updated_at: container.updated_at.as_ref().and_then(timestamp_from_prost),
+        exited_at: task
+            .and_then(|task| task.exited_at.as_ref())
+            .and_then(timestamp_from_prost),
+        content_bytes,
+        content_count: matching_content.len(),
+        layer_count,
+    }
 }
 
 fn image_row_from_containerd(namespace: &str, image: &Image, content: &[Info]) -> Value {
@@ -1207,6 +1370,50 @@ fn content_refs_for_target(
             }
         })
         .collect()
+}
+
+fn content_refs_for_digest(digest: &str, content: &[Info]) -> Vec<ContainerdContentRef> {
+    let content_by_digest = content
+        .iter()
+        .map(|info| (info.digest.as_str(), info))
+        .collect::<HashMap<_, _>>();
+    let mut refs = BTreeMap::new();
+    if let Some(target_info) = content_by_digest.get(digest) {
+        refs.insert(digest.to_string(), "target".to_string());
+        for (label, child_digest) in target_info
+            .labels
+            .iter()
+            .filter(|(key, _)| is_content_ref_key(key))
+        {
+            refs.insert(child_digest.clone(), label.clone());
+        }
+    }
+
+    refs.into_iter()
+        .map(|(digest, label)| {
+            let size_bytes = content_by_digest
+                .get(digest.as_str())
+                .map(|info| info.size.max(0) as u64)
+                .unwrap_or(0);
+            ContainerdContentRef {
+                digest,
+                label,
+                size_bytes,
+            }
+        })
+        .collect()
+}
+
+fn content_digest_for_image_ref(image_ref: &str, content: &[Info]) -> Option<String> {
+    content
+        .iter()
+        .find(|info| {
+            info.labels
+                .get("containerd.io/gc.ref.content.config")
+                .is_some_and(|value| value == image_ref)
+                || info.labels.values().any(|value| value == image_ref)
+        })
+        .map(|info| info.digest.clone())
 }
 
 fn is_content_ref_key(key: &str) -> bool {
