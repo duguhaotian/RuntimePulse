@@ -10,6 +10,15 @@ Development is now collector-first and container-first.
 - Build and verify the app through Docker Compose.
 - Keep mock data available only as an optional validation profile.
 
+
+## Active Priority Order
+
+Current execution order has been adjusted for collector-first development:
+
+1. Complete non-Kubernetes P1 collector depth first: snapshotter/image-cache report fidelity, native profiling adapters, and runtime diagnostic artifacts.
+2. Keep Kubernetes/containerd production hardening behind the non-Kubernetes P1 collector work. Existing containerd/Kubernetes paths remain available for validation, but they are not the next implementation focus.
+3. Keep production security, tenancy/RBAC, and full production hardening last until collector data quality and workflows stabilize.
+
 ## Phase 1: Frontend Prototype
 
 Status: in progress.
@@ -186,7 +195,7 @@ Collector candidates:
 - Kubernetes metrics adapter. Prometheus vector queries for kubelet/cAdvisor container CPU, memory, network, and filesystem metrics are mapped into RuntimePulse sandbox metric series.
 - Docker event collector. Docker container lifecycle, Docker image event dispatch, and Docker startup trace spans are implemented and kept as the single-node/local validation path.
 - Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, lifecycle event streaming, and stopped-container cleanup are integrated into `host-agent`. Containerd/Kubernetes task-driven sampling is now available as `containerd-sandbox-cgroupfs`, using task event PIDs to resolve exact cgroup paths without broad scanning.
-- image metadata and cache collector. Docker image metadata/layer breakdown and containerd content-store image enrichment are implemented; Docker image pull/tag/delete and containerd content/snapshot timeline observations come from runtime event dispatch; precise pull sub-stage durations and lazy block-cache hit curves are ingested from real snapshotter/exporter JSON reports through `image-cache`.
+- image metadata and cache collector. Docker image metadata/layer breakdown and containerd content-store image enrichment are implemented; Docker image pull/tag/delete and containerd content/snapshot timeline observations come from runtime event dispatch; precise pull sub-stage durations and lazy block-cache hit curves are ingested from real snapshotter/exporter JSON reports through `image-cache`. Snapshotter reports now also accept layer-level cache counters and prefetch records, deriving aggregate lazy-layer and prefetch metrics plus image timeline spans.
 - Kata collector.
 - Firecracker collector.
 - eBPF/profile collector. Generic profile artifact report ingestion is implemented; native perf/eBPF capture sources still need to be added.

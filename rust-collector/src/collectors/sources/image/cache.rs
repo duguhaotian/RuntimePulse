@@ -36,6 +36,10 @@ struct SnapshotterReport {
     timestamp: Option<String>,
     snapshotter: Option<String>,
     cache: Option<CacheReport>,
+    #[serde(default)]
+    layers: Vec<LayerCacheReport>,
+    #[serde(default)]
+    prefetches: Vec<PrefetchReport>,
     download_timeline: Option<Vec<DownloadStepReport>>,
 }
 
@@ -50,6 +54,34 @@ struct CacheReport {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LayerCacheReport {
+    id: Option<String>,
+    digest: Option<String>,
+    media_type: Option<String>,
+    size_bytes: Option<u64>,
+    requested_blocks: Option<u64>,
+    hit_blocks: Option<u64>,
+    local_read_bytes: Option<u64>,
+    remote_read_bytes: Option<u64>,
+    block_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrefetchReport {
+    id: Option<String>,
+    name: Option<String>,
+    phase: Option<String>,
+    started_at: Option<String>,
+    duration_ms: Option<f64>,
+    bytes: Option<u64>,
+    hit_blocks: Option<u64>,
+    requested_blocks: Option<u64>,
+    detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadStepReport {
     id: Option<String>,
@@ -106,24 +138,42 @@ impl CollectorPlugin for ImageCachePlugin {
                 .clone()
                 .unwrap_or_else(|| docker_image_id_from_ref_or_digest(&image_ref, &image_digest));
             let snapshotter = report.snapshotter.as_deref().unwrap_or("snapshotter");
-            let timeline = report
-                .download_timeline
-                .as_deref()
-                .map(|steps| timeline_rows(&image_id, steps))
-                .unwrap_or_default();
+            let timeline_steps = normalized_timeline_steps(&report, timestamp);
+            let timeline = timeline_rows(&image_id, &timeline_steps);
+            let layers = layer_rows(&report.layers);
+            let layer_summary = layer_cache_summary(&report.layers);
+            let prefetch_summary = prefetch_summary(&report.prefetches);
+            let layer_count = report.layer_count.unwrap_or(layers.len() as u64);
+            let size_bytes = report.size_bytes.unwrap_or_else(|| {
+                report
+                    .layers
+                    .iter()
+                    .filter_map(|layer| layer.size_bytes)
+                    .sum()
+            });
 
             output.metadata.images.push(json!({
                 "id": image_id,
                 "ref": image_ref,
                 "digest": image_digest,
                 "loadingMode": report.loading_mode.unwrap_or_else(|| "lazy".to_string()),
-                "sizeBytes": report.size_bytes.unwrap_or(0),
-                "layerCount": report.layer_count.unwrap_or(0),
+                "sizeBytes": size_bytes,
+                "layerCount": layer_count,
+                "layers": layers,
                 "downloadTimeline": timeline,
                 "attributes": {
                     "collector.plugin": "image-cache",
                     "snapshotter": snapshotter,
                     "snapshotter.reportPath": path.display().to_string(),
+                    "snapshotter.prefetches": report.prefetches.len(),
+                    "snapshotter.layers": report.layers.len(),
+                    "snapshotter.layerRequestedBlocks": layer_summary.requested_blocks,
+                    "snapshotter.layerHitBlocks": layer_summary.hit_blocks,
+                    "snapshotter.layerRemoteReadBytes": layer_summary.remote_read_bytes,
+                    "snapshotter.layerLocalReadBytes": layer_summary.local_read_bytes,
+                    "snapshotter.prefetchBytes": prefetch_summary.bytes,
+                    "snapshotter.prefetchRequestedBlocks": prefetch_summary.requested_blocks,
+                    "snapshotter.prefetchHitBlocks": prefetch_summary.hit_blocks,
                 }
             }));
 
@@ -136,23 +186,41 @@ impl CollectorPlugin for ImageCachePlugin {
                     cache,
                 ));
             }
+            output.metrics.extend(layer_cache_metrics(
+                timestamp,
+                &config.node_id,
+                &image_id,
+                snapshotter,
+                &report.layers,
+            ));
+            output.metrics.extend(prefetch_metrics(
+                timestamp,
+                &config.node_id,
+                &image_id,
+                snapshotter,
+                &report.prefetches,
+            ));
 
-            if let Some(steps) = &report.download_timeline {
-                for span in timeline_spans(timestamp, &image_id, &image_ref, snapshotter, steps) {
-                    let event_id = format!("{}-event", span.span_id);
-                    if self.seen_event_ids.insert(event_id.clone()) {
-                        output.events.push(timeline_event(
-                            &event_id,
-                            timestamp,
-                            &config.node_id,
-                            &image_id,
-                            &image_ref,
-                            snapshotter,
-                            &span,
-                        ));
-                    }
-                    output.traces.push(span);
+            for span in timeline_spans(
+                timestamp,
+                &image_id,
+                &image_ref,
+                snapshotter,
+                &timeline_steps,
+            ) {
+                let event_id = format!("{}-event", span.span_id);
+                if self.seen_event_ids.insert(event_id.clone()) {
+                    output.events.push(timeline_event(
+                        &event_id,
+                        timestamp,
+                        &config.node_id,
+                        &image_id,
+                        &image_ref,
+                        snapshotter,
+                        &span,
+                    ));
                 }
+                output.traces.push(span);
             }
         }
 
@@ -177,6 +245,215 @@ impl CollectorPlugin for ImageCachePlugin {
 
         Ok(output)
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CacheSummary {
+    requested_blocks: u64,
+    hit_blocks: u64,
+    local_read_bytes: u64,
+    remote_read_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PrefetchSummary {
+    bytes: u64,
+    requested_blocks: u64,
+    hit_blocks: u64,
+}
+
+fn layer_cache_summary(layers: &[LayerCacheReport]) -> CacheSummary {
+    CacheSummary {
+        requested_blocks: layers
+            .iter()
+            .filter_map(|layer| layer.requested_blocks)
+            .sum(),
+        hit_blocks: layers.iter().filter_map(|layer| layer.hit_blocks).sum(),
+        local_read_bytes: layers
+            .iter()
+            .filter_map(|layer| layer.local_read_bytes)
+            .sum(),
+        remote_read_bytes: layers
+            .iter()
+            .filter_map(|layer| layer.remote_read_bytes)
+            .sum(),
+    }
+}
+
+fn prefetch_summary(prefetches: &[PrefetchReport]) -> PrefetchSummary {
+    PrefetchSummary {
+        bytes: prefetches
+            .iter()
+            .filter_map(|prefetch| prefetch.bytes)
+            .sum(),
+        requested_blocks: prefetches
+            .iter()
+            .filter_map(|prefetch| prefetch.requested_blocks)
+            .sum(),
+        hit_blocks: prefetches
+            .iter()
+            .filter_map(|prefetch| prefetch.hit_blocks)
+            .sum(),
+    }
+}
+
+fn normalized_timeline_steps(
+    report: &SnapshotterReport,
+    fallback_timestamp: &str,
+) -> Vec<DownloadStepReport> {
+    let mut steps = report.download_timeline.clone().unwrap_or_default();
+    steps.extend(
+        report
+            .prefetches
+            .iter()
+            .enumerate()
+            .map(|(index, prefetch)| {
+                let name = prefetch
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Prefetch {}", index + 1));
+                DownloadStepReport {
+                    id: prefetch
+                        .id
+                        .clone()
+                        .or_else(|| Some(format!("prefetch-{index}"))),
+                    name,
+                    phase: prefetch
+                        .phase
+                        .clone()
+                        .unwrap_or_else(|| "prefetch".to_string()),
+                    duration_ms: prefetch.duration_ms.unwrap_or(0.0),
+                    bytes: prefetch.bytes,
+                    timestamp: prefetch
+                        .started_at
+                        .clone()
+                        .or_else(|| Some(fallback_timestamp.to_string())),
+                    detail: prefetch.detail.clone(),
+                }
+            }),
+    );
+    steps
+}
+
+fn layer_rows(layers: &[LayerCacheReport]) -> Vec<Value> {
+    layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let digest = layer
+                .digest
+                .clone()
+                .unwrap_or_else(|| layer.id.clone().unwrap_or_else(|| format!("layer-{index}")));
+            json!({
+                "digest": digest,
+                "sizeBytes": layer.size_bytes.unwrap_or(0),
+                "command": layer.media_type.clone().unwrap_or_else(|| "snapshotter layer".to_string()),
+                "attributes": {
+                    "snapshotter.layerId": layer.id.clone().unwrap_or_else(|| format!("layer-{index}")),
+                    "snapshotter.mediaType": layer.media_type,
+                    "snapshotter.requestedBlocks": layer.requested_blocks.unwrap_or(0),
+                    "snapshotter.hitBlocks": layer.hit_blocks.unwrap_or(0),
+                    "snapshotter.localReadBytes": layer.local_read_bytes.unwrap_or(0),
+                    "snapshotter.remoteReadBytes": layer.remote_read_bytes.unwrap_or(0),
+                    "snapshotter.blockSizeBytes": layer.block_size_bytes.unwrap_or(0),
+                }
+            })
+        })
+        .collect()
+}
+
+fn layer_cache_metrics(
+    timestamp: &str,
+    node_id: &str,
+    image_id: &str,
+    snapshotter: &str,
+    layers: &[LayerCacheReport],
+) -> Vec<MetricSample> {
+    let summary = layer_cache_summary(layers);
+    let requested = summary.requested_blocks;
+    let hit = summary.hit_blocks;
+    let local_read = summary.local_read_bytes;
+    let remote_read = summary.remote_read_bytes;
+    if requested == 0 && hit == 0 && local_read == 0 && remote_read == 0 {
+        return Vec::new();
+    }
+    let hit_ratio = if requested == 0 {
+        0.0
+    } else {
+        hit as f64 / requested as f64
+    };
+    [
+        ("image.lazy.layer_cache_hit_ratio", hit_ratio, "ratio"),
+        (
+            "image.lazy.layer_remote_read_bytes",
+            remote_read as f64,
+            "bytes",
+        ),
+        (
+            "image.lazy.layer_local_read_bytes",
+            local_read as f64,
+            "bytes",
+        ),
+        (
+            "image.lazy.layer_requested_blocks",
+            requested as f64,
+            "blocks",
+        ),
+        ("image.lazy.layer_hit_blocks", hit as f64, "blocks"),
+    ]
+    .into_iter()
+    .map(|(name, value, unit)| {
+        let mut metric = image_metric(timestamp, name, value, unit, "io", node_id, image_id);
+        metric.attributes = Some(Map::from_iter([
+            ("collector.source".to_string(), json!("image-cache")),
+            ("snapshotter".to_string(), json!(snapshotter)),
+            ("snapshotter.metricScope".to_string(), json!("layers")),
+        ]));
+        metric
+    })
+    .collect()
+}
+
+fn prefetch_metrics(
+    timestamp: &str,
+    node_id: &str,
+    image_id: &str,
+    snapshotter: &str,
+    prefetches: &[PrefetchReport],
+) -> Vec<MetricSample> {
+    let summary = prefetch_summary(prefetches);
+    let bytes = summary.bytes;
+    let requested = summary.requested_blocks;
+    let hit = summary.hit_blocks;
+    if bytes == 0 && requested == 0 && hit == 0 {
+        return Vec::new();
+    }
+    let hit_ratio = if requested == 0 {
+        0.0
+    } else {
+        hit as f64 / requested as f64
+    };
+    [
+        ("image.lazy.prefetch_bytes", bytes as f64, "bytes"),
+        (
+            "image.lazy.prefetch_requested_blocks",
+            requested as f64,
+            "blocks",
+        ),
+        ("image.lazy.prefetch_hit_blocks", hit as f64, "blocks"),
+        ("image.lazy.prefetch_hit_ratio", hit_ratio, "ratio"),
+    ]
+    .into_iter()
+    .map(|(name, value, unit)| {
+        let mut metric = image_metric(timestamp, name, value, unit, "io", node_id, image_id);
+        metric.attributes = Some(Map::from_iter([
+            ("collector.source".to_string(), json!("image-cache")),
+            ("snapshotter".to_string(), json!(snapshotter)),
+            ("snapshotter.metricScope".to_string(), json!("prefetch")),
+        ]));
+        metric
+    })
+    .collect()
 }
 
 fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {

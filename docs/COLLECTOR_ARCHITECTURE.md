@@ -339,10 +339,12 @@ starting each source manually.
 
 ## Next Steps
 
-1. Complete the Kubernetes path on containerd: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
-2. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
-3. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place.
-4. Add Kata and Firecracker sandbox sources after the containerd/Kubernetes path is stable.
-5. Add native eBPF/perf profiling sources on top of the generic profile artifact ingestion path.
-6. Add gVisor-specific sources last, after the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
-7. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
+1. Deepen non-Kubernetes P1 collector data first: snapshotter/image-cache fidelity, native profiling adapter hooks, and diagnostic artifact workflows.
+2. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place and now accepts layer-level cache counters plus prefetch records.
+3. Add native eBPF/perf profiling sources on top of the generic profile artifact ingestion path.
+4. Complete the Kubernetes path on containerd after the non-Kubernetes P1 collector work: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
+5. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
+6. Add Kata and Firecracker sandbox sources after the containerd/Kubernetes path is stable.
+7. Add gVisor-specific sources last, after the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
+8. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
+9. Defer production security, tenancy/RBAC, and hardening until collector data quality and workflows stabilize.

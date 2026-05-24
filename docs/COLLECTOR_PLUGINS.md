@@ -233,6 +233,30 @@ image observation:
     "remoteReadBytes": 288358400,
     "blockSizeBytes": 131072
   },
+  "layers": [
+    {
+      "id": "bootstrap",
+      "digest": "sha256:bootstrap",
+      "sizeBytes": 104857600,
+      "requestedBlocks": 2400,
+      "hitBlocks": 2100,
+      "localReadBytes": 275251200,
+      "remoteReadBytes": 39321600,
+      "blockSizeBytes": 131072
+    }
+  ],
+  "prefetches": [
+    {
+      "id": "hot-blocks",
+      "name": "Prefetch hot blocks",
+      "phase": "prefetch",
+      "startedAt": "2026-05-21T00:00:00.084Z",
+      "durationMs": 1270,
+      "bytes": 104857600,
+      "requestedBlocks": 800,
+      "hitBlocks": 650
+    }
+  ],
   "downloadTimeline": [
     {
       "name": "Prefetch bootstrap",
