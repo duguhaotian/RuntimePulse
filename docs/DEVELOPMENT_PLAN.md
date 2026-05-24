@@ -181,7 +181,7 @@ Implemented:
 - Host-agent sender persists failed batches as local JSON spool files and replays them before later in-memory batches after the outlet recovers.
 - Host-agent can run optional `command` and `http` adapter sources, so third-party host tools that emit RuntimePulse partial output join the same queue, batching, spool, and outlet path.
 - Host-agent can run `image-cache`/`host-image-cache` to ingest real snapshotter/exporter JSON or JSONL reports for precise image stage spans and lazy block-cache hit curves.
-- Host-agent can run `profile-report`/`host-profile-report` to ingest real perf/eBPF/third-party JSON or JSONL profile artifact indexes through the same queue, batching, spool, and outlet path.
+- Host-agent can run `profile-report`/`host-profile-report` to ingest real perf/eBPF/third-party JSON or JSONL profile artifact indexes through the same queue, batching, spool, and outlet path. Profile reports now preserve target process metadata and capture stats, emit profile observation events, and derive profile metric series for samples, duration, lost samples, sample rate, CPU time, and kernel/user sample splits.
 - Host-agent and local report ingestion preserve per-source attribution, so collector status can distinguish `host-procfs`, `host-docker`, `host-profile-report`, and other local sources instead of collapsing everything into one outlet source.
 - Node detail page consumes node-level metric series directly, so host-agent health and node pressure are visible without relying on sandbox-level series.
 
@@ -198,7 +198,7 @@ Collector candidates:
 - image metadata and cache collector. Docker image metadata/layer breakdown and containerd content-store image enrichment are implemented; Docker image pull/tag/delete and containerd content/snapshot timeline observations come from runtime event dispatch; precise pull sub-stage durations and lazy block-cache hit curves are ingested from real snapshotter/exporter JSON reports through `image-cache`. Snapshotter reports now also accept layer-level cache counters and prefetch records, deriving aggregate lazy-layer and prefetch metrics plus image timeline spans.
 - Kata collector.
 - Firecracker collector.
-- eBPF/profile collector. Generic profile artifact report ingestion is implemented; native perf/eBPF capture sources still need to be added.
+- eBPF/profile collector. Generic profile artifact report ingestion is implemented with target/stats metadata, profile observation events, and profile metric derivation; native perf/eBPF capture sources still need to be added.
 - gVisor collector. Defer until the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
 
 Collector output should map to the same domain concepts already used by the frontend:

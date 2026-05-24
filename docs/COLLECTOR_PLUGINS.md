@@ -297,11 +297,28 @@ array, or JSONL. Lightweight rows only need the target sandbox and profiles:
       "processRole": "app",
       "durationMs": 10000,
       "sampleCount": 2451,
-      "objectUri": "file:///var/lib/runtimepulse/profiles/docker-0123456789ab/cpu.perf"
+      "objectUri": "file:///var/lib/runtimepulse/profiles/docker-0123456789ab/cpu.perf",
+      "target": {
+        "pid": 4242,
+        "command": "demo-app",
+        "runtimeProcess": "workload"
+      },
+      "stats": {
+        "sampleRateHz": 99.5,
+        "cpuTimeMs": 8120,
+        "lostSamples": 3,
+        "kernelSamples": 540,
+        "userSamples": 1911
+      },
+      "labels": {
+        "runtime": "runc"
+      }
     }
   ]
 }
 ```
+
+RuntimePulse preserves `target`, `stats`, `labels`, and custom `attributes` under profile metadata, emits profile observation events, and derives profile metric series such as `profile.samples_total`, `profile.duration_ms`, `profile.lost_samples_total`, `profile.sample_rate_hz`, `profile.cpu_time_ms`, `profile.kernel_samples_total`, and `profile.user_samples_total`.
 
 See `rust-collector/examples/profile-report.jsonl` for a complete JSONL example.
 
