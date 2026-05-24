@@ -8,9 +8,11 @@ export const runtimeColors: Record<RuntimeType, string> = {
 };
 
 export const severityColors: Record<Severity, string> = {
+  debug: '#94a3b8',
   info: '#38bdf8',
   warning: '#f59e0b',
   error: '#ef4444',
+  critical: '#dc2626',
 };
 
 export const chartPalette = ['#38bdf8', '#a78bfa', '#fb923c', '#f87171', '#34d399', '#facc15'];

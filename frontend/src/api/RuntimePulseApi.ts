@@ -8,6 +8,7 @@ import type {
   Node,
   ProfileArtifact,
   RuntimeCompareRow,
+  RuntimePulseArtifact,
   Sandbox,
   SandboxAnalysis,
   SandboxQuery,
@@ -35,6 +36,14 @@ export interface RuntimePulseApi {
   getSandboxProfiles(id: string): Promise<ProfileArtifact[]>;
   getSandboxAnalysis(id: string): Promise<SandboxAnalysis>;
   compareRuntimes(range?: TimeRange): Promise<RuntimeCompareRow[]>;
+  listArtifacts(query?: ArtifactQuery): Promise<RuntimePulseArtifact[]>;
   getIngestStatus(): Promise<IngestStatus>;
   getIngestRecent(): Promise<IngestRecent>;
 }
+
+export type ArtifactQuery = {
+  kind?: 'all' | 'profile' | 'diagnostic';
+  sandboxId?: string;
+  nodeId?: string;
+  text?: string;
+};

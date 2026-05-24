@@ -2,7 +2,7 @@ export type RuntimeType = 'runc' | 'gvisor' | 'kata' | 'firecracker';
 
 export type SandboxStatus = 'running' | 'stopped' | 'failed';
 
-export type Severity = 'info' | 'warning' | 'error';
+export type Severity = 'debug' | 'info' | 'warning' | 'error' | 'critical';
 
 export type TimeRange = {
   from: string;
@@ -178,6 +178,31 @@ export type SandboxQuery = {
   runtimeType?: RuntimeType | 'all';
   status?: SandboxStatus | 'all';
   text?: string;
+};
+
+
+export type ArtifactKind = 'profile' | 'diagnostic';
+
+export type RuntimePulseArtifact = {
+  kind: ArtifactKind;
+  id: string;
+  timestamp: string;
+  sandboxId?: string;
+  nodeId?: string;
+  runtimeType?: RuntimeType;
+  artifactType: string;
+  objectUri: string;
+  durationMs?: number;
+  sampleCount?: number;
+  processRole?: string;
+  sizeBytes?: number;
+  severity?: Severity;
+  status?: string;
+  reason?: string;
+  message?: string;
+  source?: string;
+  artifacts?: unknown[];
+  attributes?: Record<string, unknown>;
 };
 
 export type RuntimeCompareRow = {

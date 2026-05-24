@@ -8,13 +8,14 @@ import type {
   Node,
   ProfileArtifact,
   RuntimeCompareRow,
+  RuntimePulseArtifact,
   Sandbox,
   SandboxAnalysis,
   SandboxQuery,
   TimeRange,
   TraceSpan,
 } from '../domain/model';
-import type { RuntimePulseApi } from './RuntimePulseApi';
+import type { ArtifactQuery, RuntimePulseApi } from './RuntimePulseApi';
 
 type QueryValue = string | number | boolean | undefined;
 
@@ -79,6 +80,9 @@ export function createHttpRuntimePulseApi(baseUrl: string): RuntimePulseApi {
     compareRuntimes(range) {
       return request<RuntimeCompareRow[]>('/runtimes/compare', timeRangeParams(range));
     },
+    listArtifacts(query) {
+      return request<RuntimePulseArtifact[]>('/artifacts', artifactQueryParams(query));
+    },
     getIngestStatus() {
       return request<IngestStatus>('/ingest/status');
     },
@@ -123,6 +127,16 @@ function unwrapResponse<T>(payload: unknown): T {
   }
 
   return payload as T;
+}
+
+
+function artifactQueryParams(query?: ArtifactQuery): Record<string, QueryValue> {
+  return {
+    kind: query?.kind === 'all' ? undefined : query?.kind,
+    sandboxId: query?.sandboxId,
+    nodeId: query?.nodeId,
+    text: query?.text,
+  };
 }
 
 function sandboxQueryParams(query?: SandboxQuery): Record<string, QueryValue> {

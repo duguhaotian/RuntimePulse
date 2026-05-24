@@ -26,6 +26,7 @@ import {
   liveEventsForSandbox,
   liveEventsForImage,
   liveImages,
+  liveDiagnosticArtifacts,
   liveMetricsForImage,
   liveMetricsForNode,
   liveMetricsForSandbox,
@@ -82,6 +83,7 @@ async function handleRequest(request, response) {
   if (path === '/sandboxes') return sendData(response, filterSandboxRows(allSandboxes(), Object.fromEntries(url.searchParams)));
   if (path === '/sandboxes/history') return sendData(response, filterSandboxRows(allSandboxHistory(), Object.fromEntries(url.searchParams)));
   if (path === '/runtimes/compare') return sendData(response, runtimeComparisonRows());
+  if (path === '/artifacts') return sendData(response, artifactRows(Object.fromEntries(url.searchParams), timeRangeFromSearchParams(url.searchParams)));
 
   const match = path.match(/^\/(sandboxes|nodes|images)\/([^/]+)(?:\/([^/]+))?$/);
   if (!match) return sendJson(response, 404, { error: 'not_found' });
@@ -168,6 +170,43 @@ function sendImageResource(response, id, child, range) {
   if (child === 'trace') return sendData(response, filterTraceSpans(liveTraceForImage(liveStore, id), range));
 
   return sendJson(response, 404, { error: 'not_found' });
+}
+
+
+function artifactRows(query = {}, range = {}) {
+  const profiles = allSandboxes().flatMap((sandbox) => profilesForSandboxMerged(sandbox.id).map((profile) => ({
+    kind: 'profile',
+    id: profile.id,
+    timestamp: profile.timestamp,
+    sandboxId: profile.sandboxId,
+    nodeId: sandbox.nodeId,
+    runtimeType: sandbox.runtimeType,
+    artifactType: profile.profileType,
+    objectUri: profile.objectUri,
+    durationMs: profile.durationMs,
+    sampleCount: profile.sampleCount,
+    processRole: profile.processRole,
+    severity: profile.sampleCount === 0 ? 'warning' : 'info',
+    source: 'profile-artifact',
+  })));
+
+  const diagnostics = liveDiagnosticArtifacts(liveStore).map((artifact) => ({
+    kind: 'diagnostic',
+    ...artifact,
+  }));
+
+  return filterTimestamped([...profiles, ...diagnostics], range, 'timestamp')
+    .filter((row) => query.kind && query.kind !== 'all' ? row.kind === query.kind : true)
+    .filter((row) => query.sandboxId ? row.sandboxId === query.sandboxId : true)
+    .filter((row) => query.nodeId ? row.nodeId === query.nodeId : true)
+    .filter((row) => {
+      const text = String(query.text ?? '').trim().toLowerCase();
+      if (!text) return true;
+      return [row.id, row.sandboxId, row.nodeId, row.runtimeType, row.artifactType, row.objectUri, row.source, row.message]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(text));
+    })
+    .sort((left, right) => String(right.timestamp).localeCompare(String(left.timestamp)));
 }
 
 function allSandboxes() {

@@ -110,6 +110,30 @@ export const mockRuntimePulseApi: RuntimePulseApi = {
   async compareRuntimes() {
     return runtimeComparison;
   },
+  async listArtifacts(query) {
+    const rows = sandboxes.flatMap((sandbox) => profilesForSandbox(sandbox.id).map((profile) => ({
+      kind: 'profile' as const,
+      id: profile.id,
+      timestamp: profile.timestamp,
+      sandboxId: profile.sandboxId,
+      nodeId: sandbox.nodeId,
+      runtimeType: sandbox.runtimeType,
+      artifactType: profile.profileType,
+      objectUri: profile.objectUri,
+      durationMs: profile.durationMs,
+      sampleCount: profile.sampleCount,
+      processRole: profile.processRole,
+      severity: 'info' as const,
+      source: 'mock-profile',
+    })));
+    return rows.filter((row) => {
+      if (query?.kind && query.kind !== 'all' && row.kind !== query.kind) return false;
+      if (query?.sandboxId && row.sandboxId !== query.sandboxId) return false;
+      if (query?.nodeId && row.nodeId !== query.nodeId) return false;
+      const text = query?.text?.toLowerCase().trim();
+      return !text || [row.id, row.sandboxId, row.nodeId, row.artifactType, row.objectUri].some((value) => String(value).toLowerCase().includes(text));
+    });
+  },
   async getIngestStatus() {
     return mockIngestStatus;
   },

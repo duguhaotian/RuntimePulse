@@ -23,6 +23,8 @@ export function createLiveStore() {
     sourceByMetricSeries: new Map(),
     sourceByEvent: new Map(),
     sourceByProfile: new Map(),
+    diagnosticArtifactsByScope: new Map(),
+    sourceByDiagnosticArtifact: new Map(),
     snapshotScopeBySandbox: new Map(),
     lastUpdatedAt: undefined,
   };
@@ -36,6 +38,8 @@ export function recordLiveBatch(store, payload) {
   for (const event of array(payload.events)) rememberEvent(store, event, payload.source);
   for (const span of array(payload.traces)) rememberTraceSpan(store, span);
   for (const profile of array(payload.profiles)) rememberProfile(store, profile, payload.source);
+
+  rememberDiagnosticArtifacts(store, payload.events, payload.source);
 
   reconcileSnapshotEvents(store, payload.events);
   for (const sandbox of store.sandboxes.values()) refreshSandboxDerivedFields(store, sandbox);
@@ -114,6 +118,12 @@ export function liveTraceForImage(store, imageId) {
 
 export function liveProfilesForSandbox(store, sandboxId) {
   return store.profilesBySandbox.get(sandboxId) ?? [];
+}
+
+export function liveDiagnosticArtifacts(store) {
+  return Array.from(store.diagnosticArtifactsByScope.values())
+    .flat()
+    .sort((left, right) => String(right.timestamp).localeCompare(String(left.timestamp)));
 }
 
 export function liveStoreSnapshot(store) {
@@ -574,6 +584,40 @@ function rememberTraceSpan(store, span) {
   refreshSandboxFromTraceSpan(store, span);
 }
 
+
+function rememberDiagnosticArtifacts(store, events, source) {
+  for (const event of array(events)) {
+    const attributes = isObject(event.attributes) ? event.attributes : {};
+    const artifactId = stringValue(attributes['diagnostic.id']);
+    const objectUri = stringValue(attributes['diagnostic.objectUri']);
+    if (event.eventType !== 'diagnostic' || !artifactId || !objectUri) continue;
+
+    const scopeId = stringValue(event.sandboxId) ?? stringValue(event.nodeId) ?? 'node';
+    const row = {
+      id: artifactId,
+      timestamp: event.timestamp,
+      scope: event.sandboxId ? 'sandbox' : 'node',
+      sandboxId: event.sandboxId,
+      nodeId: event.nodeId,
+      runtimeType: event.runtimeType,
+      artifactType: stringValue(attributes['diagnostic.artifactType']) ?? 'diagnostic_bundle',
+      objectUri,
+      sizeBytes: numberOr(attributes['diagnostic.sizeBytes'], 0),
+      durationMs: numberOr(attributes['diagnostic.durationMs'], 0),
+      severity: event.severity,
+      status: stringValue(attributes['diagnostic.status']) ?? 'captured',
+      reason: event.reason ?? stringValue(attributes['diagnostic.reason']),
+      message: event.message,
+      source: source ?? event.source,
+      artifacts: Array.isArray(attributes['diagnostic.artifacts']) ? attributes['diagnostic.artifacts'] : [],
+      attributes,
+    };
+
+    rememberRow(store.diagnosticArtifactsByScope, scopeId, row, rowLimit('events'));
+    if (source) store.sourceByDiagnosticArtifact.set(row.id, source);
+  }
+}
+
 function rememberProfile(store, profile, source) {
   rememberRow(store.profilesBySandbox, profile.sandboxId, profile, rowLimit('profiles'));
   if (source && profile?.id) store.sourceByProfile.set(profileKey(profile), source);
@@ -594,6 +638,7 @@ function rememberEvent(store, event, source) {
   if (imageId && imageRemovalEvent(event)) removeLiveImage(store, imageId);
   rememberRow(store.eventsByImage, imageId, { ...event, imageId }, rowLimit('events'));
 }
+
 
 function addProfileCountsBySource(bySource, store) {
   for (const profiles of store.profilesBySandbox.values()) {
