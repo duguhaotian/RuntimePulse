@@ -20,6 +20,7 @@ use collectors::sources::runtime::containerd::{
     output_from_runtime_event as containerd_output_from_event, stream_containerd_events,
 };
 use collectors::sources::runtime::diagnostics::DiagnosticReportPlugin;
+use collectors::sources::runtime::docker::diagnostics::emit_docker_diagnostics;
 use collectors::sources::runtime::docker::events::{
     collect_recent_docker_events, empty_output, merge_output, stream_docker_events, DockerEvent,
 };
@@ -48,6 +49,8 @@ fn main() {
         run_host_cgroupfs()
     } else if env::args().any(|arg| arg == "host-docker") {
         run_host_docker()
+    } else if env::args().any(|arg| arg == "docker-diagnostics") {
+        run_docker_diagnostics()
     } else if env::args().any(|arg| arg == "host-containerd") {
         run_host_containerd()
     } else if env::args().any(|arg| arg == "host-containerd-tasks") {
@@ -292,6 +295,12 @@ fn run_host_docker() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_docker_diagnostics() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+    emit_docker_diagnostics(&config)
 }
 
 fn run_host_containerd_tasks() -> Result<()> {

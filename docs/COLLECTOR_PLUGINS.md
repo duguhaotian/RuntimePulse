@@ -294,9 +294,27 @@ still be written to local or object storage and referenced by `objectUri`:
 
 ```bash
 RUNTIMEPULSE_HOST_AGENT_SOURCES=diagnostic-report
-RUNTIMEPULSE_DIAGNOSTIC_REPORT_CMD='runtimepulse-docker-diagnostics --format runtimepulse-json'
+RUNTIMEPULSE_DIAGNOSTIC_REPORT_CMD='runtimepulse-collector docker-diagnostics'
 RUNTIMEPULSE_DIAGNOSTIC_REPORT_TIMEOUT_MS=10000
 runtimepulse-collector host-agent
+```
+
+
+The built-in Docker diagnostic exporter writes Docker inspect/log artifact files
+and prints a RuntimePulse diagnostic JSONL index to stdout. It can be used
+directly as the command hook above. Useful settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RUNTIMEPULSE_DOCKER_DIAGNOSTIC_CONTAINERS` | all containers | Comma-separated Docker container ids/names to export. |
+| `RUNTIMEPULSE_DOCKER_DIAGNOSTIC_OUTPUT_DIR` | `/tmp/runtimepulse/diagnostics/docker` | Directory for raw inspect/log artifacts. |
+| `RUNTIMEPULSE_DOCKER_DIAGNOSTIC_INCLUDE_LOGS` | `true` | Set `false` to skip `docker logs`. |
+| `RUNTIMEPULSE_DOCKER_DIAGNOSTIC_TAIL_LINES` | `200` | Number of log lines captured per container. |
+
+For a one-shot local export without host-agent:
+
+```bash
+runtimepulse-collector docker-diagnostics > /var/lib/runtimepulse/diagnostic-report.jsonl
 ```
 
 The report file or command output can be a JSON object, JSON array, or JSONL:
