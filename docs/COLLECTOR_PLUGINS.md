@@ -396,6 +396,31 @@ The command timeout defaults to `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` or 3000 ms.
 Timed-out profiler command process groups are terminated before the next
 collection interval.
 
+For a lightweight native perf path, `runtimepulse-collector perf-folded` converts
+folded stack files into RuntimePulse profile artifacts with inline flamegraph
+trees. It is useful when hosts already run `perf script | stackcollapse-perf.pl`
+or an equivalent exporter. Useful settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RUNTIMEPULSE_PERF_FOLDED_PATH` | unset | Single folded stack file to convert. |
+| `RUNTIMEPULSE_PERF_FOLDED_SANDBOX_ID` | `host-perf-folded` | Sandbox id for the single-file mode. |
+| `RUNTIMEPULSE_PERF_FOLDED_OBJECT_URI` | generated `file://` URI | Optional URI for the raw folded stack artifact. |
+| `RUNTIMEPULSE_PERF_FOLDED_PROFILE_TYPE` | `cpu` | Profile type, for example `cpu` or `off_cpu`. |
+| `RUNTIMEPULSE_PERF_FOLDED_PROCESS_ROLE` | `app` | Process role attached to the profile artifact. |
+| `RUNTIMEPULSE_PERF_FOLDED_DURATION_MS` | `0` | Capture window used to derive sample rate. |
+| `RUNTIMEPULSE_PERF_FOLDED_TARGETS` | unset | Semicolon-separated multi-target specs such as `sandbox=s1,path=/tmp/a.folded,role=runtime`. |
+| `RUNTIMEPULSE_PERF_FOLDED_OUTPUT_DIR` | `/tmp/runtimepulse/profiles/perf-folded` | Directory for copied folded stack artifacts when no object URI is supplied. |
+
+It can also be used through the existing perf command hook because `perf-folded`
+prints a RuntimePulse-compatible `PluginOutput`:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=perf
+RUNTIMEPULSE_PERF_PROFILE_CMD='runtimepulse-collector perf-folded'
+runtimepulse-collector host-agent
+```
+
 The file or command output can be a RuntimePulse `PluginOutput`, a lightweight
 JSON object, a JSON array, or JSONL. Lightweight rows only need the target
 sandbox and profiles:

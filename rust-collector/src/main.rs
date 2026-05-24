@@ -14,6 +14,7 @@ use collectors::sources::image::cache::ImageCachePlugin;
 use collectors::sources::image::download::output_from_event as image_output_from_event;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
+use collectors::sources::profiling::perf_folded::emit_perf_folded_profiles;
 use collectors::sources::profiling::report::ProfileReportPlugin;
 use collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets,
@@ -57,6 +58,8 @@ fn main() {
         run_crictl_diagnostics()
     } else if env::args().any(|arg| arg == "containerd-diagnostics") {
         run_containerd_diagnostics()
+    } else if env::args().any(|arg| arg == "perf-folded" || arg == "perf-folded-profiles") {
+        run_perf_folded_profiles()
     } else if env::args().any(|arg| arg == "host-containerd") {
         run_host_containerd()
     } else if env::args().any(|arg| arg == "host-containerd-tasks") {
@@ -319,6 +322,12 @@ fn run_containerd_diagnostics() -> Result<()> {
     let mut config = CollectorConfig::from_env()?;
     config.collection_scope = "host".to_string();
     emit_containerd_diagnostics(&config)
+}
+
+fn run_perf_folded_profiles() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+    emit_perf_folded_profiles(&config)
 }
 
 fn run_host_containerd_tasks() -> Result<()> {
