@@ -40,6 +40,7 @@ use crate::collectors::sources::runtime::containerd::{
     sandbox_identity_from_containerd_event, stream_containerd_events, ContainerdEvent,
     ContainerdRuntimeEvent,
 };
+use crate::collectors::sources::runtime::diagnostics::DiagnosticReportPlugin;
 use crate::collectors::sources::runtime::docker::events::{
     merge_output, stream_docker_events, DockerEvent,
 };
@@ -88,6 +89,7 @@ struct HostAgentSources {
     docker_sandbox_cgroupfs: bool,
     containerd_sandbox_cgroupfs: bool,
     image_cache: bool,
+    diagnostic_report: bool,
     profile_report: bool,
     perf: bool,
     ebpf: bool,
@@ -223,6 +225,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut docker_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut containerd_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
+    let mut diagnostic_report = DiagnosticReportPlugin::new(config.diagnostic_report_path.clone());
     let mut profile_report = ProfileReportPlugin::new(config.profile_report_path.clone());
     let mut perf = PerfProfilePlugin::new(
         config.perf_report_path.clone(),
@@ -257,6 +260,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut docker_cgroupfs,
             &mut containerd_cgroupfs,
             &mut image_cache,
+            &mut diagnostic_report,
             &mut profile_report,
             &mut perf,
             &mut ebpf,
@@ -317,6 +321,7 @@ fn collect_periodic(
     docker_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     containerd_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     image_cache: &mut ImageCachePlugin,
+    diagnostic_report: &mut DiagnosticReportPlugin,
     profile_report: &mut ProfileReportPlugin,
     perf: &mut PerfProfilePlugin,
     ebpf: &mut EbpfProfilePlugin,
@@ -375,6 +380,11 @@ fn collect_periodic(
     if sources.image_cache {
         collect_source("host-image-cache", tx, stats, || {
             image_cache.collect(now, config)
+        });
+    }
+    if sources.diagnostic_report {
+        collect_source("host-diagnostic-report", tx, stats, || {
+            diagnostic_report.collect(now, config)
         });
     }
     if sources.profile_report {
@@ -1987,6 +1997,7 @@ impl HostAgentSources {
             docker_sandbox_cgroupfs: false,
             containerd_sandbox_cgroupfs: false,
             image_cache: false,
+            diagnostic_report: false,
             profile_report: false,
             perf: false,
             ebpf: false,
@@ -2023,6 +2034,9 @@ impl HostAgentSources {
                 }
                 "image-cache" | "host-image-cache" | "snapshotter-cache" => {
                     sources.image_cache = true;
+                }
+                "diagnostic-report" | "host-diagnostic-report" | "diagnostics" => {
+                    sources.diagnostic_report = true;
                 }
                 "profile-report" | "host-profile-report" | "profiles" | "profiling-report" => {
                     sources.profile_report = true;
@@ -2087,6 +2101,9 @@ impl HostAgentSources {
         }
         if self.image_cache {
             names.push("image-cache");
+        }
+        if self.diagnostic_report {
+            names.push("diagnostic-report");
         }
         if self.profile_report {
             names.push("profile-report");
@@ -2163,6 +2180,7 @@ mod tests {
             cgroup_max_entries: 200,
             image_cache_report_path: None,
             profile_report_path: None,
+            diagnostic_report_path: None,
             perf_report_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,
@@ -2272,6 +2290,7 @@ mod tests {
             docker_sandbox_cgroupfs: true,
             containerd_sandbox_cgroupfs: true,
             image_cache: false,
+            diagnostic_report: false,
             profile_report: false,
             perf: false,
             ebpf: false,

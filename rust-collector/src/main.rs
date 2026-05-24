@@ -19,6 +19,7 @@ use collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets,
     output_from_runtime_event as containerd_output_from_event, stream_containerd_events,
 };
+use collectors::sources::runtime::diagnostics::DiagnosticReportPlugin;
 use collectors::sources::runtime::docker::events::{
     collect_recent_docker_events, empty_output, merge_output, stream_docker_events, DockerEvent,
 };
@@ -551,6 +552,9 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             ))),
             "profile-report" | "profiles" | "profiling-report" => plugins.push(Box::new(
                 ProfileReportPlugin::new(config.profile_report_path.clone()),
+            )),
+            "diagnostic-report" | "diagnostics" => plugins.push(Box::new(
+                DiagnosticReportPlugin::new(config.diagnostic_report_path.clone()),
             )),
             "command" => {
                 if config.command_plugins.is_empty() {

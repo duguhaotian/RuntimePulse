@@ -4,5 +4,6 @@
 //! metadata. They may need host runtime sockets or APIs.
 
 pub mod containerd;
+pub mod diagnostics;
 pub mod docker;
 pub mod kubelet;

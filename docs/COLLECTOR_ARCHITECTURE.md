@@ -326,6 +326,7 @@ First implementation can keep `collector-outlet`, `host-agent`, and sandbox samp
 | Docker image events | `sources/image/download.rs` converts Docker image events to image pull/tag/delete output |
 | Snapshotter/image cache reports | `sources/image/cache.rs` converts real exporter JSON/JSONL into image stage spans and lazy block-cache curves |
 | Profile artifact reports | `sources/profiling/report.rs` converts perf/eBPF/third-party JSON/JSONL profile indexes into `ProfileArtifact` rows |
+| Runtime diagnostic reports | `sources/runtime/diagnostics.rs` converts support-bundle/log/inspect artifact indexes into diagnostic events, metrics, and capture spans |
 | `host-docker-events` | unified Docker event collection plus semantic dispatch |
 | `host-docker-cgroupfs` | `sources/sandbox/cgroupfs.rs` using Docker PID cgroup resolution |
 | `host-docker-sandbox-agent` | Debug command for `sources/sandbox/manager.rs`; the same active-set helpers are now reused by `host-agent` |
@@ -339,7 +340,7 @@ starting each source manually.
 
 ## Next Steps
 
-1. Deepen non-Kubernetes P1 collector data first: snapshotter/image-cache fidelity, native profiling adapter hooks, and diagnostic artifact workflows.
+1. Deepen non-Kubernetes P1 collector data first: snapshotter/image-cache fidelity, native profiling adapter hooks, and diagnostic artifact workflows. Generic diagnostic-report ingestion is now in place for support-bundle/log/inspect artifact indexes.
 2. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place and now accepts layer-level cache counters plus prefetch records.
 3. Expand native eBPF/perf profiling sources beyond the generic profile artifact ingestion path and current host-agent file/command exporter hooks when real profiler backends are selected.
 4. Complete the Kubernetes path on containerd after the non-Kubernetes P1 collector work: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.

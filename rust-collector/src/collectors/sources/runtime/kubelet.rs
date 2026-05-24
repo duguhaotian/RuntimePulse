@@ -520,6 +520,7 @@ mod tests {
             cgroup_max_entries: 200,
             image_cache_report_path: None,
             profile_report_path: None,
+            diagnostic_report_path: None,
             perf_report_path: None,
             ebpf_report_path: None,
             perf_profile_command: None,

@@ -37,6 +37,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet for single-node Docker scenarios.
 - `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, network, and process metrics without scanning the whole cgroup tree.
 - `host-image-cache`: runs on the host, reads a RuntimePulse JSON/JSONL report emitted by a real snapshotter or image-cache exporter, and reports lazy block-cache metrics plus precise image stage spans.
+- `host-diagnostic-report`: runs on the host, reads runtime diagnostic bundle indexes and emits diagnostic events, issue metrics, and capture spans while keeping raw bundles in external storage.
 - `host-perf`: runs on the host, reads a perf profile artifact report or executes a configured perf exporter command that writes RuntimePulse-compatible JSON to stdout.
 - `host-ebpf`: runs on the host, reads an eBPF profile artifact report or executes a configured eBPF exporter command that writes RuntimePulse-compatible JSON to stdout.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
@@ -272,6 +273,47 @@ image observation:
 ```
 
 See `rust-collector/examples/image-cache-report.json` for a complete example.
+
+
+## Runtime Diagnostic Reports
+
+Use `diagnostic-report` when a host-side tool creates a runtime support bundle,
+log archive, inspect dump, or other diagnostic artifact. RuntimePulse records a
+small index with the bundle URI, summary counters, issue events, metrics, and an
+optional capture span; the raw bundle remains in local/object storage.
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=diagnostic-report
+RUNTIMEPULSE_DIAGNOSTIC_REPORT_PATH=/var/lib/runtimepulse/diagnostic-report.jsonl
+runtimepulse-collector host-agent
+```
+
+The report can be a JSON object, JSON array, or JSONL:
+
+```json
+{
+  "id": "diag-docker-runtimepulse-demo-001",
+  "timestamp": "2026-05-23T00:00:00.000Z",
+  "sandboxId": "docker-runtimepulse-demo",
+  "runtimeType": "runc",
+  "source": "docker-debug",
+  "objectUri": "file:///var/lib/runtimepulse/diagnostics/docker-runtimepulse-demo/bundle.tar.zst",
+  "sizeBytes": 7340032,
+  "durationMs": 1850,
+  "artifactType": "support_bundle",
+  "summary": {"files": 42, "logs": 6, "warnings": 2, "errors": 0, "checks": 12, "failedChecks": 1},
+  "issues": [{"severity": "warning", "category": "io", "message": "Container logs show delayed writes during startup."}]
+}
+```
+
+Derived series include `diagnostic.artifact_size_bytes`,
+`diagnostic.capture_duration_ms`, `diagnostic.issues_total`,
+`diagnostic.files_total`, `diagnostic.logs_total`, `diagnostic.warnings_total`,
+`diagnostic.errors_total`, and `diagnostic.failed_checks_total`. Issue rows are
+emitted as `diagnostic.issue.<category>` events and capture duration is emitted
+as a `diagnostic.<artifact_type>.capture` span.
+
+See `rust-collector/examples/diagnostic-report.jsonl` for a complete example.
 
 ## Profile Artifact Reports
 

@@ -20,6 +20,7 @@ pub struct CollectorConfig {
     pub cgroup_max_entries: usize,
     pub image_cache_report_path: Option<PathBuf>,
     pub profile_report_path: Option<PathBuf>,
+    pub diagnostic_report_path: Option<PathBuf>,
     pub perf_report_path: Option<PathBuf>,
     pub ebpf_report_path: Option<PathBuf>,
     pub perf_profile_command: Option<String>,
@@ -88,6 +89,11 @@ impl CollectorConfig {
                 .map(PathBuf::from),
             profile_report_path: env::var("RUNTIMEPULSE_PROFILE_REPORT_PATH")
                 .or_else(|_| env::var("RUNTIMEPULSE_PROFILING_REPORT_PATH"))
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
+            diagnostic_report_path: env::var("RUNTIMEPULSE_DIAGNOSTIC_REPORT_PATH")
+                .or_else(|_| env::var("RUNTIMEPULSE_DIAGNOSTICS_REPORT_PATH"))
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
