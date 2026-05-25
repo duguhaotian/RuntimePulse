@@ -32,22 +32,48 @@ pub struct DiagnosticReportPlugin {
     seen_event_ids: HashSet<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticReport {
     id: Option<String>,
     timestamp: Option<String>,
+    #[serde(
+        alias = "sandbox_id",
+        alias = "sandbox",
+        alias = "containerId",
+        alias = "container_id"
+    )]
     sandbox_id: Option<String>,
+    #[serde(alias = "node_id", alias = "host", alias = "hostname")]
     node_id: Option<String>,
+    #[serde(
+        alias = "runtime_type",
+        alias = "runtime",
+        alias = "runtimeName",
+        alias = "runtime_name"
+    )]
     runtime_type: Option<String>,
     source: Option<String>,
     severity: Option<String>,
     reason: Option<String>,
     status: Option<String>,
     message: Option<String>,
+    #[serde(
+        alias = "object_uri",
+        alias = "uri",
+        alias = "path",
+        alias = "file",
+        alias = "bundleUri",
+        alias = "bundle_uri",
+        alias = "artifactUri",
+        alias = "artifact_uri"
+    )]
     object_uri: String,
+    #[serde(alias = "size_bytes", alias = "bytes", alias = "size")]
     size_bytes: Option<u64>,
+    #[serde(alias = "duration_ms", alias = "duration")]
     duration_ms: Option<f64>,
+    #[serde(alias = "artifact_type", alias = "type", alias = "kind")]
     artifact_type: Option<String>,
     target: Option<DiagnosticTarget>,
     summary: Option<DiagnosticSummary>,
@@ -59,18 +85,43 @@ struct DiagnosticReport {
     attributes: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticTarget {
+    #[serde(alias = "node_id", alias = "host", alias = "hostname")]
     node_id: Option<String>,
+    #[serde(
+        alias = "sandbox_id",
+        alias = "sandbox",
+        alias = "containerId",
+        alias = "container_id"
+    )]
     sandbox_id: Option<String>,
+    #[serde(
+        alias = "image_id",
+        alias = "image",
+        alias = "imageRef",
+        alias = "image_ref"
+    )]
     image_id: Option<String>,
+    #[serde(
+        alias = "runtime_type",
+        alias = "runtime",
+        alias = "runtimeName",
+        alias = "runtime_name"
+    )]
     runtime_type: Option<String>,
+    #[serde(
+        alias = "workload_name",
+        alias = "workload",
+        alias = "containerName",
+        alias = "container_name"
+    )]
     workload_name: Option<String>,
     namespace: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticSummary {
     files: Option<u64>,
@@ -78,27 +129,33 @@ struct DiagnosticSummary {
     warnings: Option<u64>,
     errors: Option<u64>,
     checks: Option<u64>,
+    #[serde(alias = "failed_checks", alias = "failures")]
     failed_checks: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticIssue {
     id: Option<String>,
     severity: Option<String>,
+    #[serde(alias = "type", alias = "kind")]
     category: Option<String>,
     title: Option<String>,
     message: Option<String>,
+    #[serde(alias = "occurrences")]
     count: Option<u64>,
     attributes: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DiagnosticArtifact {
     name: Option<String>,
+    #[serde(alias = "artifact_type", alias = "type", alias = "kind")]
     artifact_type: Option<String>,
+    #[serde(alias = "object_uri", alias = "uri", alias = "path", alias = "file")]
     object_uri: Option<String>,
+    #[serde(alias = "size_bytes", alias = "bytes", alias = "size")]
     size_bytes: Option<u64>,
 }
 
@@ -349,10 +406,20 @@ fn parse_reports(content: &str) -> Result<Vec<DiagnosticReport>> {
         return Ok(Vec::new());
     }
     if trimmed.starts_with('[') {
-        return Ok(serde_json::from_str(trimmed)?);
+        if let Ok(reports) = serde_json::from_str::<Vec<DiagnosticReport>>(trimmed) {
+            return Ok(reports);
+        }
+        return Ok(parse_generic_diagnostic_value(serde_json::from_str(
+            trimmed,
+        )?));
     }
     if trimmed.starts_with('{') {
-        return Ok(vec![serde_json::from_str(trimmed)?]);
+        if let Ok(report) = serde_json::from_str::<DiagnosticReport>(trimmed) {
+            return Ok(vec![report]);
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            return Ok(parse_generic_diagnostic_value(value));
+        }
     }
 
     let mut reports = Vec::new();
@@ -361,9 +428,480 @@ fn parse_reports(content: &str) -> Result<Vec<DiagnosticReport>> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        reports.push(serde_json::from_str(line)?);
+        if let Ok(report) = serde_json::from_str::<DiagnosticReport>(line) {
+            reports.push(report);
+            continue;
+        }
+        reports.extend(parse_generic_diagnostic_value(serde_json::from_str(line)?));
     }
     Ok(reports)
+}
+
+fn parse_generic_diagnostic_value(value: Value) -> Vec<DiagnosticReport> {
+    match value {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(generic_diagnostic_report_from_value)
+            .collect(),
+        Value::Object(mut object) => {
+            let defaults = GenericDiagnosticDefaults::from_object(&object);
+            for key in [
+                "reports",
+                "diagnostics",
+                "artifacts",
+                "files",
+                "items",
+                "records",
+            ] {
+                if let Some(Value::Array(items)) = object.remove(key) {
+                    return items
+                        .into_iter()
+                        .filter_map(|value| {
+                            generic_diagnostic_report_from_value_with_defaults(value, &defaults)
+                        })
+                        .collect();
+                }
+            }
+            generic_diagnostic_report_from_object_with_defaults(object, &defaults)
+                .into_iter()
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct GenericDiagnosticDefaults {
+    timestamp: Option<String>,
+    node_id: Option<String>,
+    sandbox_id: Option<String>,
+    runtime_type: Option<String>,
+    source: Option<String>,
+    target: Option<DiagnosticTarget>,
+    labels: Option<Map<String, Value>>,
+}
+
+impl GenericDiagnosticDefaults {
+    fn from_object(object: &Map<String, Value>) -> Self {
+        let target = object
+            .get("target")
+            .and_then(|value| value.as_object())
+            .map(diagnostic_target_from_map);
+        Self {
+            timestamp: value_string_from_keys(
+                object,
+                &[
+                    "timestamp",
+                    "observedAt",
+                    "observed_at",
+                    "capturedAt",
+                    "captured_at",
+                ],
+            ),
+            node_id: value_string_from_keys(object, &["nodeId", "node_id", "host", "hostname"])
+                .or_else(|| target.as_ref().and_then(|target| target.node_id.clone())),
+            sandbox_id: value_string_from_keys(
+                object,
+                &[
+                    "sandboxId",
+                    "sandbox_id",
+                    "sandbox",
+                    "containerId",
+                    "container_id",
+                ],
+            )
+            .or_else(|| target.as_ref().and_then(|target| target.sandbox_id.clone())),
+            runtime_type: value_string_from_keys(
+                object,
+                &[
+                    "runtimeType",
+                    "runtime_type",
+                    "runtime",
+                    "runtimeName",
+                    "runtime_name",
+                ],
+            )
+            .or_else(|| {
+                target
+                    .as_ref()
+                    .and_then(|target| target.runtime_type.clone())
+            }),
+            source: value_string_from_keys(object, &["source", "collector", "exporter", "tool"]),
+            target,
+            labels: object
+                .get("labels")
+                .and_then(|value| value.as_object())
+                .cloned(),
+        }
+    }
+}
+
+fn generic_diagnostic_report_from_value(value: Value) -> Option<DiagnosticReport> {
+    generic_diagnostic_report_from_value_with_defaults(value, &GenericDiagnosticDefaults::default())
+}
+
+fn generic_diagnostic_report_from_value_with_defaults(
+    value: Value,
+    defaults: &GenericDiagnosticDefaults,
+) -> Option<DiagnosticReport> {
+    match value {
+        Value::Object(object) => {
+            generic_diagnostic_report_from_object_with_defaults(object, defaults)
+        }
+        _ => None,
+    }
+}
+
+fn generic_diagnostic_report_from_object_with_defaults(
+    mut object: Map<String, Value>,
+    defaults: &GenericDiagnosticDefaults,
+) -> Option<DiagnosticReport> {
+    let nested_target = take_object(&mut object, &["target"]);
+    let nested_summary = take_object(&mut object, &["summary", "stats", "statistics"]);
+    let issue_values = take_array(
+        &mut object,
+        &["issues", "problems", "findings", "warnings", "errors"],
+    )
+    .unwrap_or_default();
+    let artifact_values =
+        take_array(&mut object, &["artifacts", "files", "attachments"]).unwrap_or_default();
+    let labels = take_object(&mut object, &["labels", "tags"]).or_else(|| defaults.labels.clone());
+    let mut attributes = take_object(&mut object, &["attributes", "metadata"]);
+
+    let object_uri = take_string(
+        &mut object,
+        &[
+            "objectUri",
+            "object_uri",
+            "uri",
+            "path",
+            "file",
+            "bundleUri",
+            "bundle_uri",
+            "artifactUri",
+            "artifact_uri",
+            "archive",
+            "location",
+        ],
+    )?;
+    let artifact_type = take_string(
+        &mut object,
+        &["artifactType", "artifact_type", "type", "kind", "category"],
+    )
+    .or_else(|| Some(infer_diagnostic_artifact_type(&object_uri)));
+    let target = nested_target
+        .as_ref()
+        .map(diagnostic_target_from_map)
+        .or_else(|| diagnostic_target_from_flat_object(&object))
+        .or_else(|| defaults.target.clone());
+    let sandbox_id = take_string(
+        &mut object,
+        &[
+            "sandboxId",
+            "sandbox_id",
+            "sandbox",
+            "containerId",
+            "container_id",
+        ],
+    )
+    .or_else(|| target.as_ref().and_then(|target| target.sandbox_id.clone()))
+    .or_else(|| defaults.sandbox_id.clone());
+    let node_id = take_string(&mut object, &["nodeId", "node_id", "host", "hostname"])
+        .or_else(|| target.as_ref().and_then(|target| target.node_id.clone()))
+        .or_else(|| defaults.node_id.clone());
+    let runtime_type = take_string(
+        &mut object,
+        &[
+            "runtimeType",
+            "runtime_type",
+            "runtime",
+            "runtimeName",
+            "runtime_name",
+        ],
+    )
+    .or_else(|| {
+        target
+            .as_ref()
+            .and_then(|target| target.runtime_type.clone())
+    })
+    .or_else(|| defaults.runtime_type.clone());
+    let summary = nested_summary
+        .as_ref()
+        .map(diagnostic_summary_from_map)
+        .or_else(|| Some(diagnostic_summary_from_map(&object)))
+        .filter(diagnostic_summary_has_payload);
+    let issues = issue_values
+        .into_iter()
+        .filter_map(diagnostic_issue_from_value)
+        .collect::<Vec<_>>();
+    let artifacts = artifact_values
+        .into_iter()
+        .filter_map(diagnostic_artifact_from_value)
+        .collect::<Vec<_>>();
+
+    if attributes.is_none() && !object.is_empty() {
+        let mut metadata = Map::new();
+        for (key, value) in object.iter() {
+            if !matches!(value, Value::Null) {
+                metadata.insert(format!("diagnostic.raw.{key}"), value.clone());
+            }
+        }
+        if !metadata.is_empty() {
+            attributes = Some(metadata);
+        }
+    }
+
+    Some(DiagnosticReport {
+        id: take_string(&mut object, &["id", "name"]),
+        timestamp: take_string(
+            &mut object,
+            &[
+                "timestamp",
+                "observedAt",
+                "observed_at",
+                "capturedAt",
+                "captured_at",
+            ],
+        )
+        .or_else(|| defaults.timestamp.clone()),
+        sandbox_id,
+        node_id,
+        runtime_type,
+        source: take_string(&mut object, &["source", "collector", "exporter", "tool"])
+            .or_else(|| defaults.source.clone())
+            .or_else(|| Some("diagnostic-index".to_string())),
+        severity: take_string(&mut object, &["severity", "level"]),
+        reason: take_string(&mut object, &["reason", "trigger", "cause"]),
+        status: take_string(&mut object, &["status", "state"]),
+        message: take_string(
+            &mut object,
+            &["message", "msg", "description", "summaryText"],
+        ),
+        object_uri,
+        size_bytes: take_u64(&mut object, &["sizeBytes", "size_bytes", "bytes", "size"]),
+        duration_ms: take_f64(&mut object, &["durationMs", "duration_ms", "duration"]),
+        artifact_type,
+        target,
+        summary,
+        issues,
+        artifacts,
+        labels,
+        attributes,
+    })
+}
+
+fn diagnostic_target_from_map(object: &Map<String, Value>) -> DiagnosticTarget {
+    DiagnosticTarget {
+        node_id: value_string_from_keys(object, &["nodeId", "node_id", "host", "hostname"]),
+        sandbox_id: value_string_from_keys(
+            object,
+            &[
+                "sandboxId",
+                "sandbox_id",
+                "sandbox",
+                "containerId",
+                "container_id",
+            ],
+        ),
+        image_id: value_string_from_keys(
+            object,
+            &["imageId", "image_id", "image", "imageRef", "image_ref"],
+        ),
+        runtime_type: value_string_from_keys(
+            object,
+            &[
+                "runtimeType",
+                "runtime_type",
+                "runtime",
+                "runtimeName",
+                "runtime_name",
+            ],
+        ),
+        workload_name: value_string_from_keys(
+            object,
+            &[
+                "workloadName",
+                "workload_name",
+                "workload",
+                "containerName",
+                "container_name",
+                "name",
+            ],
+        ),
+        namespace: value_string_from_keys(object, &["namespace", "ns"]),
+    }
+}
+
+fn diagnostic_target_from_flat_object(object: &Map<String, Value>) -> Option<DiagnosticTarget> {
+    let target = diagnostic_target_from_map(object);
+    if target.node_id.is_some()
+        || target.sandbox_id.is_some()
+        || target.image_id.is_some()
+        || target.runtime_type.is_some()
+        || target.workload_name.is_some()
+        || target.namespace.is_some()
+    {
+        Some(target)
+    } else {
+        None
+    }
+}
+
+fn diagnostic_summary_from_map(object: &Map<String, Value>) -> DiagnosticSummary {
+    DiagnosticSummary {
+        files: value_u64_from_keys(object, &["files", "fileCount", "file_count"]),
+        logs: value_u64_from_keys(object, &["logs", "logCount", "log_count"]),
+        warnings: value_u64_from_keys(object, &["warnings", "warningCount", "warning_count"]),
+        errors: value_u64_from_keys(object, &["errors", "errorCount", "error_count"]),
+        checks: value_u64_from_keys(object, &["checks", "checkCount", "check_count"]),
+        failed_checks: value_u64_from_keys(
+            object,
+            &["failedChecks", "failed_checks", "failures", "failed"],
+        ),
+    }
+}
+
+fn diagnostic_summary_has_payload(summary: &DiagnosticSummary) -> bool {
+    summary.files.is_some()
+        || summary.logs.is_some()
+        || summary.warnings.is_some()
+        || summary.errors.is_some()
+        || summary.checks.is_some()
+        || summary.failed_checks.is_some()
+}
+
+fn diagnostic_issue_from_value(value: Value) -> Option<DiagnosticIssue> {
+    match value {
+        Value::String(message) if !message.is_empty() => Some(DiagnosticIssue {
+            id: None,
+            severity: None,
+            category: None,
+            title: None,
+            message: Some(message),
+            count: None,
+            attributes: None,
+        }),
+        Value::Object(mut object) => {
+            let attributes = take_object(&mut object, &["attributes", "metadata"]);
+            Some(DiagnosticIssue {
+                id: take_string(&mut object, &["id", "name"]),
+                severity: take_string(&mut object, &["severity", "level"]),
+                category: take_string(&mut object, &["category", "type", "kind"]),
+                title: take_string(&mut object, &["title", "name"]),
+                message: take_string(&mut object, &["message", "msg", "description"]),
+                count: take_u64(&mut object, &["count", "occurrences"]),
+                attributes,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn diagnostic_artifact_from_value(value: Value) -> Option<DiagnosticArtifact> {
+    match value {
+        Value::String(uri) if !uri.is_empty() => Some(DiagnosticArtifact {
+            name: None,
+            artifact_type: None,
+            object_uri: Some(uri),
+            size_bytes: None,
+        }),
+        Value::Object(mut object) => Some(DiagnosticArtifact {
+            name: take_string(&mut object, &["name", "filename", "fileName", "file_name"]),
+            artifact_type: take_string(
+                &mut object,
+                &["artifactType", "artifact_type", "type", "kind"],
+            ),
+            object_uri: take_string(
+                &mut object,
+                &["objectUri", "object_uri", "uri", "path", "file", "location"],
+            ),
+            size_bytes: take_u64(&mut object, &["sizeBytes", "size_bytes", "bytes", "size"]),
+        }),
+        _ => None,
+    }
+}
+
+fn infer_diagnostic_artifact_type(object_uri: &str) -> String {
+    let lower = object_uri.to_ascii_lowercase();
+    if lower.contains("inspect") || lower.contains("metadata") {
+        "metadata".to_string()
+    } else if lower.contains("log") {
+        "log".to_string()
+    } else if lower.ends_with(".tar")
+        || lower.ends_with(".tgz")
+        || lower.ends_with(".tar.gz")
+        || lower.ends_with(".tar.zst")
+        || lower.ends_with(".zip")
+    {
+        "support_bundle".to_string()
+    } else {
+        "diagnostic_bundle".to_string()
+    }
+}
+
+fn take_array(object: &mut Map<String, Value>, keys: &[&str]) -> Option<Vec<Value>> {
+    keys.iter().find_map(|key| match object.remove(*key) {
+        Some(Value::Array(value)) => Some(value),
+        _ => None,
+    })
+}
+
+fn take_object(object: &mut Map<String, Value>, keys: &[&str]) -> Option<Map<String, Value>> {
+    keys.iter().find_map(|key| match object.remove(*key) {
+        Some(Value::Object(value)) => Some(value),
+        _ => None,
+    })
+}
+
+fn take_string(object: &mut Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(value_to_string))
+}
+
+fn take_u64(object: &mut Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(|value| value_to_u64(&value)))
+}
+
+fn take_f64(object: &mut Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(|value| value_to_f64(&value)))
+}
+
+fn value_string_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).cloned().and_then(value_to_string))
+}
+
+fn value_u64_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_u64))
+}
+
+fn value_to_string(value: Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn value_to_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_f64().map(|value| value.max(0.0).round() as u64)),
+        Value::String(value) => value.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(value) => value.parse::<f64>().ok(),
+        _ => None,
+    }
 }
 
 fn diagnostic_attributes(
@@ -850,6 +1388,51 @@ mod tests {
         assert_eq!(output.events[0].id, "diag-command-captured");
         assert_eq!(output.metrics.len(), 5);
         assert_eq!(output.traces.len(), 1);
+    }
+
+    #[test]
+    fn parses_generic_diagnostic_index_json() {
+        let output = output_from_diagnostic_content(
+            r#"{
+              "sandbox_id":"docker-runtimepulse-demo",
+              "source":"support-index",
+              "timestamp":"2026-05-25T00:00:00Z",
+              "target":{"node_id":"node-b","runtime":"runc","workload":"runtimepulse-demo"},
+              "labels":{"collector":"support-bundle"},
+              "artifacts":[{
+                "path":"file:///var/lib/runtimepulse/diagnostics/docker-runtimepulse-demo/bundle.tar.zst",
+                "type":"support_bundle",
+                "bytes":2048,
+                "duration_ms":75,
+                "stats":{"files":4,"warnings":1,"errors":0,"failed_checks":1},
+                "findings":[{"level":"warning","type":"logs","msg":"Container logs show delayed writes","occurrences":2}],
+                "attachments":[{"path":"file:///var/lib/runtimepulse/diagnostics/docker-runtimepulse-demo/inspect.json","type":"metadata","bytes":512}]
+              }]
+            }"#,
+            DateTime::parse_from_rfc3339("2026-05-25T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            &test_config(),
+        )
+        .unwrap();
+
+        assert_eq!(output.events.len(), 2);
+        assert_eq!(
+            output.events[0].event_name,
+            "diagnostic.support_bundle.captured"
+        );
+        assert_eq!(output.events[1].event_name, "diagnostic.issue.logs");
+        assert_eq!(output.metrics.len(), 7);
+        assert_eq!(output.traces.len(), 1);
+        assert_eq!(
+            output.metadata.sandboxes[0]["id"],
+            "docker-runtimepulse-demo"
+        );
+        assert_eq!(output.metadata.sandboxes[0]["nodeId"], "node-b");
+        assert_eq!(
+            output.events[0].attributes["diagnostic.artifacts"][0]["objectUri"],
+            "file:///var/lib/runtimepulse/diagnostics/docker-runtimepulse-demo/inspect.json"
+        );
     }
 
     #[test]

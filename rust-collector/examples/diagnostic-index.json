@@ -1,0 +1,48 @@
+{
+  "sandbox_id": "docker-runtimepulse-demo",
+  "source": "support-index",
+  "timestamp": "2026-05-25T00:00:00.000Z",
+  "target": {
+    "node_id": "rust-node-a",
+    "runtime": "runc",
+    "workload": "runtimepulse-demo"
+  },
+  "labels": {
+    "collector": "support-bundle"
+  },
+  "artifacts": [
+    {
+      "path": "file:///var/lib/runtimepulse/diagnostics/docker-runtimepulse-demo/bundle.tar.zst",
+      "type": "support_bundle",
+      "bytes": 7340032,
+      "duration_ms": 1850,
+      "stats": {
+        "files": 42,
+        "logs": 6,
+        "warnings": 2,
+        "errors": 0,
+        "failed_checks": 1
+      },
+      "findings": [
+        {
+          "level": "warning",
+          "type": "io",
+          "msg": "Container logs show delayed writes during startup.",
+          "occurrences": 2
+        }
+      ],
+      "attachments": [
+        {
+          "path": "file:///var/lib/runtimepulse/diagnostics/docker-runtimepulse-demo/docker-inspect.json",
+          "type": "metadata",
+          "bytes": 16384
+        },
+        {
+          "path": "file:///var/lib/runtimepulse/diagnostics/docker-runtimepulse-demo/container.log",
+          "type": "log",
+          "bytes": 1048576
+        }
+      ]
+    }
+  ]
+}

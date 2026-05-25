@@ -433,7 +433,7 @@ runtimepulse-collector crictl-diagnostics > /var/lib/runtimepulse/cri-diagnostic
 runtimepulse-collector containerd-diagnostics > /var/lib/runtimepulse/containerd-diagnostic-report.jsonl
 ```
 
-The report file or command output can be a JSON object, JSON array, or JSONL:
+The report file or command output can be a RuntimePulse-shaped JSON object, JSON array, JSONL, or a common diagnostic artifact index with `reports` / `diagnostics` / `artifacts` / `files` / `items` rows. Artifact-index rows may use aliases such as `path`, `uri`, `type`, `bytes`, `duration_ms`, `sandbox_id`, nested `target` / `stats`, `findings`, and `attachments`:
 
 ```json
 {
@@ -458,7 +458,7 @@ Derived series include `diagnostic.artifact_size_bytes`,
 emitted as `diagnostic.issue.<category>` events and capture duration is emitted
 as a `diagnostic.<artifact_type>.capture` span.
 
-See `rust-collector/examples/diagnostic-report.jsonl` for a complete example.
+See `rust-collector/examples/diagnostic-report.jsonl` for a RuntimePulse-shaped JSONL example and `rust-collector/examples/diagnostic-index.json` for a generic diagnostic artifact index example.
 
 ## Profile Artifact Reports
 
