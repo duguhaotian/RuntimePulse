@@ -43,6 +43,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-sandbox-reconcile`: runs on the host, reads a real runtime snapshot report from `RUNTIMEPULSE_SANDBOX_RECONCILE_REPORT_PATH`, and emits snapshot metadata used by the Query API to remove stale live sandboxes for a runtime scope.
 - `host-diagnostic-report`: runs on the host, reads runtime diagnostic bundle indexes and emits diagnostic events, issue metrics, and capture spans while keeping raw bundles in external storage.
 - `host-perf`: runs on the host, reads a perf profile artifact report or executes a configured perf exporter command that writes RuntimePulse-compatible JSON to stdout.
+- `host-perf-script`: runs on the host, converts plain `perf script` text from a file or command into RuntimePulse profile artifacts with inline flamegraph trees.
 - `host-ebpf`: runs on the host, reads an eBPF profile artifact report or executes a configured eBPF exporter command that writes RuntimePulse-compatible JSON to stdout.
 - `command`: runs an external binary or shell command and parses JSON from stdout.
 - `http`: calls an HTTP API and parses JSON from the response body.
@@ -484,8 +485,37 @@ The command timeout defaults to `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` or 3000 ms.
 Timed-out profiler command process groups are terminated before the next
 collection interval.
 
-For a lightweight native perf path, enable the `perf-folded` source or run
-`runtimepulse-collector perf-folded`; it converts folded stack files into
+For a native `perf script` path, enable `perf-script` or run
+`runtimepulse-collector perf-script`. It reads plain `perf script` text from a
+file or command, groups identical call stacks, and emits RuntimePulse profile
+artifacts with inline flamegraph trees:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=perf-script
+RUNTIMEPULSE_PERF_SCRIPT_PATH=/var/lib/runtimepulse/profiles/demo.perf-script
+RUNTIMEPULSE_PERF_SCRIPT_SANDBOX_ID=docker-0123456789ab
+runtimepulse-collector host-agent
+```
+
+Useful settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RUNTIMEPULSE_PERF_SCRIPT_PATH` | unset | Single `perf script` text file to convert. |
+| `RUNTIMEPULSE_PERF_SCRIPT_CMD` | unset | Command that prints `perf script` text to stdout. |
+| `RUNTIMEPULSE_PERF_SCRIPT_TIMEOUT_MS` | adapter timeout | Timeout for `RUNTIMEPULSE_PERF_SCRIPT_CMD`. |
+| `RUNTIMEPULSE_PERF_SCRIPT_SANDBOX_ID` | `host-perf-script` | Sandbox id for single-source mode. |
+| `RUNTIMEPULSE_PERF_SCRIPT_OBJECT_URI` | generated `file://` URI | Optional URI for the raw `perf script` artifact. |
+| `RUNTIMEPULSE_PERF_SCRIPT_PROFILE_TYPE` | `cpu` | Profile type. |
+| `RUNTIMEPULSE_PERF_SCRIPT_PROCESS_ROLE` | `app` | Process role attached to the profile artifact. |
+| `RUNTIMEPULSE_PERF_SCRIPT_DURATION_MS` | `0` | Capture window used to derive sample rate. |
+| `RUNTIMEPULSE_PERF_SCRIPT_TARGETS` | unset | Semicolon-separated multi-target specs such as `sandbox=s1,path=/tmp/a.perf-script,role=app`. |
+| `RUNTIMEPULSE_PERF_SCRIPT_OUTPUT_DIR` | `/tmp/runtimepulse/profiles/perf-script` | Directory for copied raw script artifacts when no object URI is supplied. |
+
+See `rust-collector/examples/perf-script.txt` for a small input example.
+
+For a lightweight native folded-stack perf path, enable the `perf-folded` source
+or run `runtimepulse-collector perf-folded`; it converts folded stack files into
 RuntimePulse profile artifacts with inline flamegraph trees. It is useful when hosts already run `perf script | stackcollapse-perf.pl`
 or an equivalent exporter. Useful settings:
 

@@ -20,6 +20,9 @@ use collectors::sources::profiling::ebpf_folded::{
 use collectors::sources::profiling::perf_folded::{
     emit_perf_folded_profiles, PerfFoldedProfilePlugin,
 };
+use collectors::sources::profiling::perf_script::{
+    emit_perf_script_profiles, PerfScriptProfilePlugin,
+};
 use collectors::sources::profiling::report::ProfileReportPlugin;
 use collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets,
@@ -67,6 +70,8 @@ fn main() {
         run_crictl_diagnostics()
     } else if env::args().any(|arg| arg == "containerd-diagnostics") {
         run_containerd_diagnostics()
+    } else if env::args().any(|arg| arg == "perf-script" || arg == "perf-script-profiles") {
+        run_perf_script_profiles()
     } else if env::args().any(|arg| arg == "perf-folded" || arg == "perf-folded-profiles") {
         run_perf_folded_profiles()
     } else if env::args()
@@ -335,6 +340,12 @@ fn run_containerd_diagnostics() -> Result<()> {
     let mut config = CollectorConfig::from_env()?;
     config.collection_scope = "host".to_string();
     emit_containerd_diagnostics(&config)
+}
+
+fn run_perf_script_profiles() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+    emit_perf_script_profiles(&config)
 }
 
 fn run_perf_folded_profiles() -> Result<()> {
@@ -610,6 +621,13 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             "profile-report" | "profiles" | "profiling-report" => plugins.push(Box::new(
                 ProfileReportPlugin::new(config.profile_report_path.clone()),
             )),
+            "perf-script" | "perf-script-report" => {
+                plugins.push(Box::new(PerfScriptProfilePlugin::new(
+                    config.perf_script_path.clone(),
+                    config.perf_script_command.clone(),
+                    config.perf_script_command_timeout,
+                )))
+            }
             "perf-folded" | "perf-folded-report" => plugins.push(Box::new(
                 PerfFoldedProfilePlugin::new(config.perf_folded_path.clone()),
             )),

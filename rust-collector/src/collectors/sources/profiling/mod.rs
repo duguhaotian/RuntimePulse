@@ -7,4 +7,5 @@ pub mod ebpf;
 pub mod ebpf_folded;
 pub mod perf;
 pub mod perf_folded;
+pub mod perf_script;
 pub mod report;

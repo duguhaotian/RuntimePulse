@@ -35,6 +35,7 @@ use crate::collectors::sources::profiling::ebpf::EbpfProfilePlugin;
 use crate::collectors::sources::profiling::ebpf_folded::EbpfFoldedProfilePlugin;
 use crate::collectors::sources::profiling::perf::PerfProfilePlugin;
 use crate::collectors::sources::profiling::perf_folded::PerfFoldedProfilePlugin;
+use crate::collectors::sources::profiling::perf_script::PerfScriptProfilePlugin;
 use crate::collectors::sources::profiling::report::ProfileReportPlugin;
 use crate::collectors::sources::runtime::containerd::{
     collect_containerd_inventory, collect_containerd_task_targets, containerd_image_id_from_ref,
@@ -102,6 +103,7 @@ struct HostAgentSources {
     diagnostic_report: bool,
     profile_report: bool,
     perf: bool,
+    perf_script: bool,
     perf_folded: bool,
     ebpf: bool,
     ebpf_folded: bool,
@@ -256,6 +258,11 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         config.perf_profile_command.clone(),
         config.profile_command_timeout,
     );
+    let mut perf_script = PerfScriptProfilePlugin::new(
+        config.perf_script_path.clone(),
+        config.perf_script_command.clone(),
+        config.perf_script_command_timeout,
+    );
     let mut perf_folded = PerfFoldedProfilePlugin::new(config.perf_folded_path.clone());
     let mut ebpf = EbpfProfilePlugin::new(
         config.ebpf_report_path.clone(),
@@ -293,6 +300,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut diagnostic_report,
             &mut profile_report,
             &mut perf,
+            &mut perf_script,
             &mut perf_folded,
             &mut ebpf,
             &mut ebpf_folded,
@@ -360,6 +368,7 @@ fn collect_periodic(
     diagnostic_report: &mut DiagnosticReportPlugin,
     profile_report: &mut ProfileReportPlugin,
     perf: &mut PerfProfilePlugin,
+    perf_script: &mut PerfScriptProfilePlugin,
     perf_folded: &mut PerfFoldedProfilePlugin,
     ebpf: &mut EbpfProfilePlugin,
     ebpf_folded: &mut EbpfFoldedProfilePlugin,
@@ -448,6 +457,11 @@ fn collect_periodic(
     }
     if sources.perf {
         collect_source("host-perf", tx, stats, || perf.collect(now, config));
+    }
+    if sources.perf_script {
+        collect_source("host-perf-script", tx, stats, || {
+            perf_script.collect(now, config)
+        });
     }
     if sources.perf_folded {
         collect_source("host-perf-folded", tx, stats, || {
@@ -2068,6 +2082,7 @@ impl HostAgentSources {
             diagnostic_report: false,
             profile_report: false,
             perf: false,
+            perf_script: false,
             perf_folded: false,
             ebpf: false,
             ebpf_folded: false,
@@ -2129,6 +2144,9 @@ impl HostAgentSources {
                 }
                 "perf" | "host-perf" | "perf-report" | "host-perf-report" => {
                     sources.perf = true;
+                }
+                "perf-script" | "host-perf-script" | "perf-script-report" => {
+                    sources.perf_script = true;
                 }
                 "perf-folded" | "host-perf-folded" | "perf-folded-report" => {
                     sources.perf_folded = true;
@@ -2215,6 +2233,9 @@ impl HostAgentSources {
         if self.perf {
             names.push("perf");
         }
+        if self.perf_script {
+            names.push("perf-script");
+        }
         if self.perf_folded {
             names.push("perf-folded");
         }
@@ -2296,6 +2317,9 @@ mod tests {
             diagnostic_report_command: None,
             diagnostic_report_command_timeout: Duration::from_secs(1),
             perf_report_path: None,
+            perf_script_path: None,
+            perf_script_command: None,
+            perf_script_command_timeout: Duration::from_secs(1),
             perf_folded_path: None,
             ebpf_report_path: None,
             ebpf_folded_path: None,
@@ -2413,6 +2437,7 @@ mod tests {
             diagnostic_report: false,
             profile_report: false,
             perf: false,
+            perf_script: false,
             perf_folded: false,
             ebpf: false,
             ebpf_folded: false,
