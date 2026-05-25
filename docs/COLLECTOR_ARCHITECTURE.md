@@ -340,12 +340,10 @@ starting each source manually.
 
 ## Next Steps
 
-1. Deepen non-Kubernetes P1 collector data first: snapshotter/image-cache fidelity, native profiling adapter hooks, and diagnostic artifact workflows. A perf folded-stack converter is available as `runtimepulse-collector perf-folded`. Generic diagnostic-report ingestion is now in place for support-bundle/log/inspect artifact indexes from files or host-agent exporter commands; Docker diagnostics can be exported with `runtimepulse-collector docker-diagnostics`; CRI and native containerd diagnostics are available through `crictl-diagnostics` and `containerd-diagnostics`.
-2. Add native parsers for specific snapshotters once their local report formats are known; the generic `image-cache` report ingestion path is in place and now accepts layer-level cache counters plus prefetch records.
-3. Expand native eBPF/perf profiling sources beyond the generic profile artifact ingestion path and current host-agent file/command exporter hooks when real profiler backends are selected.
+1. Keep the non-Kubernetes P1 path first. Kata, Firecracker, and gVisor now have baseline host-agent/outlet report sources, and `sandbox-reconcile` can remove stale live sandboxes for report-only runtimes via `snapshot.scope`/`snapshot.sandboxIds`.
+2. Deepen snapshotter/image-cache fidelity next. The generic `image-cache` report path accepts file reports and exporter commands, layer-level cache counters, prefetch records, and timeline spans; add native parsers for nydus, stargz, overlaybd, or other snapshotters once their real local formats are selected.
+3. Deepen runtime diagnostic and profile artifact workflows without moving eBPF-specific work forward yet. Generic diagnostic-report ingestion supports files and exporter commands, Docker diagnostics can be exported with `runtimepulse-collector docker-diagnostics`, and CRI/containerd diagnostics are available through `crictl-diagnostics` and `containerd-diagnostics`. Generic profile reports and perf folded-stack conversion are available; eBPF backend deepening remains deferred.
 4. Complete the Kubernetes path on containerd after the non-Kubernetes P1 collector work: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
 5. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
-6. Add Kata and Firecracker sandbox sources after the containerd/Kubernetes path is stable.
-7. Add gVisor-specific sources last, after the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
-8. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
-9. Defer production security, tenancy/RBAC, and hardening until collector data quality and workflows stabilize.
+6. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
+7. Keep production security, tenancy/RBAC, and full hardening last until collector data quality and workflows stabilize.
