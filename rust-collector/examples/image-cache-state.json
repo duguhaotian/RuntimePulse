@@ -1,0 +1,36 @@
+{
+  "snapshotter": "overlaybd",
+  "images": [
+    {
+      "name": "registry.example/app:v1",
+      "digest": "sha256:state-demo",
+      "size": 7340032,
+      "blockCache": {
+        "requests": 128,
+        "hits": 101,
+        "remoteBytes": 1572864,
+        "localBytes": 5767168,
+        "blockSize": 131072
+      },
+      "layers": [
+        {
+          "digest": "sha256:layer-a",
+          "size": 4194304,
+          "cache": {"requests": 80, "hits": 66, "remoteBytes": 1048576}
+        },
+        {
+          "digest": "sha256:layer-b",
+          "size": 3145728,
+          "cache": {"requests": 48, "hits": 35, "remoteBytes": 524288}
+        }
+      ],
+      "prefetch": [
+        {"name": "hot files", "durationMs": 18, "bytes": 786432, "requests": 12, "hits": 10}
+      ],
+      "stages": [
+        {"stage": "resolve", "durationMs": 5},
+        {"stage": "mount", "durationMs": 11}
+      ]
+    }
+  ]
+}

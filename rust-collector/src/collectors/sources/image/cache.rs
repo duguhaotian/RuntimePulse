@@ -566,10 +566,24 @@ fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
         return Ok(Vec::new());
     }
     if trimmed.starts_with('[') {
-        return Ok(serde_json::from_str(trimmed)?);
+        if let Ok(reports) = serde_json::from_str::<Vec<SnapshotterReport>>(trimmed) {
+            if reports.iter().any(snapshotter_report_has_payload) {
+                return Ok(reports);
+            }
+        }
+        return Ok(parse_snapshotter_state_value(serde_json::from_str(
+            trimmed,
+        )?));
     }
     if trimmed.starts_with('{') {
-        return Ok(vec![serde_json::from_str(trimmed)?]);
+        if let Ok(report) = serde_json::from_str::<SnapshotterReport>(trimmed) {
+            if snapshotter_report_has_payload(&report) {
+                return Ok(vec![report]);
+            }
+        }
+        return Ok(parse_snapshotter_state_value(serde_json::from_str(
+            trimmed,
+        )?));
     }
     if looks_like_prometheus_text(trimmed) {
         return Ok(parse_prometheus_reports(trimmed));
@@ -584,6 +598,437 @@ fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
         reports.push(serde_json::from_str(line)?);
     }
     Ok(reports)
+}
+
+fn snapshotter_report_has_payload(report: &SnapshotterReport) -> bool {
+    report.image_id.is_some()
+        || report.image_ref.is_some()
+        || report.image_digest.is_some()
+        || report.cache.is_some()
+        || !report.layers.is_empty()
+        || !report.prefetches.is_empty()
+        || report
+            .download_timeline
+            .as_ref()
+            .is_some_and(|timeline| !timeline.is_empty())
+}
+
+fn parse_snapshotter_state_value(value: Value) -> Vec<SnapshotterReport> {
+    match value {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(snapshotter_state_report_from_value)
+            .collect(),
+        Value::Object(mut object) => {
+            let root_defaults = SnapshotterStateDefaults::from_object(&object);
+            for key in ["images", "snapshots", "entries", "records", "items"] {
+                if let Some(Value::Array(items)) = object.remove(key) {
+                    return items
+                        .into_iter()
+                        .filter_map(|value| {
+                            snapshotter_state_report_from_value_with_defaults(value, &root_defaults)
+                        })
+                        .collect();
+                }
+            }
+            snapshotter_state_report_from_object(object)
+                .into_iter()
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SnapshotterStateDefaults {
+    snapshotter: Option<String>,
+    timestamp: Option<String>,
+}
+
+impl SnapshotterStateDefaults {
+    fn from_object(object: &Map<String, Value>) -> Self {
+        Self {
+            snapshotter: value_string_from_keys(
+                object,
+                &[
+                    "snapshotter",
+                    "remoteSnapshotter",
+                    "remote_snapshotter",
+                    "driver",
+                ],
+            ),
+            timestamp: value_string_from_keys(object, &["timestamp", "observedAt", "observed_at"]),
+        }
+    }
+}
+
+fn snapshotter_state_report_from_value(value: Value) -> Option<SnapshotterReport> {
+    snapshotter_state_report_from_value_with_defaults(value, &SnapshotterStateDefaults::default())
+}
+
+fn snapshotter_state_report_from_value_with_defaults(
+    value: Value,
+    defaults: &SnapshotterStateDefaults,
+) -> Option<SnapshotterReport> {
+    match value {
+        Value::Object(object) => {
+            let mut report = snapshotter_state_report_from_object(object)?;
+            if report.snapshotter.is_none() {
+                report.snapshotter = defaults.snapshotter.clone();
+            }
+            if report.timestamp.is_none() {
+                report.timestamp = defaults.timestamp.clone();
+            }
+            Some(report)
+        }
+        _ => None,
+    }
+}
+
+fn snapshotter_state_report_from_object(
+    mut object: Map<String, Value>,
+) -> Option<SnapshotterReport> {
+    let image_ref = take_string(
+        &mut object,
+        &[
+            "imageRef",
+            "image_ref",
+            "reference",
+            "ref",
+            "name",
+            "targetRef",
+        ],
+    );
+    let image_id = take_string(&mut object, &["imageId", "image_id", "id", "target"]);
+    let image_digest = take_string(
+        &mut object,
+        &["imageDigest", "image_digest", "digest", "targetDigest"],
+    );
+    let snapshotter = take_string(
+        &mut object,
+        &[
+            "snapshotter",
+            "remoteSnapshotter",
+            "remote_snapshotter",
+            "driver",
+        ],
+    )
+    .or_else(|| infer_snapshotter_from_object(&object));
+    let loading_mode = take_string(&mut object, &["loadingMode", "loading_mode", "mode"]);
+    let size_bytes = take_u64(&mut object, &["sizeBytes", "size_bytes", "size"]);
+    let layer_count = take_u64(&mut object, &["layerCount", "layer_count"]);
+    let timestamp = take_string(&mut object, &["timestamp", "observedAt", "observed_at"]);
+
+    let cache = cache_from_state_object(&mut object);
+    let layers = take_array(&mut object, &["layers", "blobs", "chunks", "files"])
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(layer_from_state_value)
+        .collect::<Vec<_>>();
+    let prefetches = take_array(&mut object, &["prefetches", "prefetch", "warmups"])
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(prefetch_from_state_value)
+        .collect::<Vec<_>>();
+    let timeline = take_array(
+        &mut object,
+        &[
+            "downloadTimeline",
+            "download_timeline",
+            "timeline",
+            "stages",
+            "events",
+        ],
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(timeline_from_state_value)
+    .collect::<Vec<_>>();
+
+    if image_ref.is_none()
+        && image_id.is_none()
+        && image_digest.is_none()
+        && cache.is_none()
+        && layers.is_empty()
+        && prefetches.is_empty()
+        && timeline.is_empty()
+    {
+        return None;
+    }
+
+    Some(SnapshotterReport {
+        image_id,
+        image_ref,
+        image_digest,
+        loading_mode,
+        size_bytes,
+        layer_count,
+        timestamp,
+        snapshotter,
+        cache,
+        layers,
+        prefetches,
+        download_timeline: Some(timeline),
+    })
+}
+
+fn cache_from_state_object(object: &mut Map<String, Value>) -> Option<CacheReport> {
+    let nested = take_object(
+        object,
+        &["cache", "blockCache", "block_cache", "stats", "metrics"],
+    );
+    let mut values = nested.unwrap_or_else(Map::new);
+    for (key, value) in object.iter() {
+        if key.contains("cache")
+            || key.contains("blocks")
+            || key.contains("Bytes")
+            || key.contains("bytes")
+            || key.contains("block")
+        {
+            values.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    let cache = CacheReport {
+        requested_blocks: value_u64_from_keys(
+            &values,
+            &[
+                "requestedBlocks",
+                "requested_blocks",
+                "requests",
+                "blockRequests",
+                "block_requests",
+            ],
+        ),
+        hit_blocks: value_u64_from_keys(
+            &values,
+            &["hitBlocks", "hit_blocks", "hits", "cacheHits", "cache_hits"],
+        ),
+        local_read_bytes: value_u64_from_keys(
+            &values,
+            &[
+                "localReadBytes",
+                "local_read_bytes",
+                "localBytes",
+                "local_bytes",
+            ],
+        ),
+        remote_read_bytes: value_u64_from_keys(
+            &values,
+            &[
+                "remoteReadBytes",
+                "remote_read_bytes",
+                "remoteBytes",
+                "remote_bytes",
+                "fetchedBytes",
+                "fetched_bytes",
+            ],
+        ),
+        block_size_bytes: value_u64_from_keys(
+            &values,
+            &[
+                "blockSizeBytes",
+                "block_size_bytes",
+                "blockSize",
+                "block_size",
+                "chunkSize",
+                "chunk_size",
+            ],
+        ),
+    };
+    if cache.requested_blocks.is_none()
+        && cache.hit_blocks.is_none()
+        && cache.local_read_bytes.is_none()
+        && cache.remote_read_bytes.is_none()
+        && cache.block_size_bytes.is_none()
+    {
+        None
+    } else {
+        Some(cache)
+    }
+}
+
+fn layer_from_state_value(value: Value) -> Option<LayerCacheReport> {
+    let Value::Object(mut object) = value else {
+        return None;
+    };
+    let cache = cache_from_state_object(&mut object);
+    Some(LayerCacheReport {
+        id: take_string(&mut object, &["id", "layerId", "layer_id", "name"]),
+        digest: take_string(
+            &mut object,
+            &["digest", "layerDigest", "layer_digest", "blob"],
+        ),
+        media_type: take_string(&mut object, &["mediaType", "media_type", "type"]),
+        size_bytes: take_u64(&mut object, &["sizeBytes", "size_bytes", "size", "bytes"]),
+        requested_blocks: take_u64(
+            &mut object,
+            &["requestedBlocks", "requested_blocks", "requests"],
+        )
+        .or_else(|| cache.as_ref().and_then(|cache| cache.requested_blocks)),
+        hit_blocks: take_u64(&mut object, &["hitBlocks", "hit_blocks", "hits"])
+            .or_else(|| cache.as_ref().and_then(|cache| cache.hit_blocks)),
+        local_read_bytes: take_u64(&mut object, &["localReadBytes", "local_read_bytes"])
+            .or_else(|| cache.as_ref().and_then(|cache| cache.local_read_bytes)),
+        remote_read_bytes: take_u64(
+            &mut object,
+            &[
+                "remoteReadBytes",
+                "remote_read_bytes",
+                "fetchedBytes",
+                "fetched_bytes",
+            ],
+        )
+        .or_else(|| cache.as_ref().and_then(|cache| cache.remote_read_bytes)),
+        block_size_bytes: take_u64(
+            &mut object,
+            &[
+                "blockSizeBytes",
+                "block_size_bytes",
+                "blockSize",
+                "block_size",
+                "chunkSize",
+                "chunk_size",
+            ],
+        )
+        .or_else(|| cache.as_ref().and_then(|cache| cache.block_size_bytes)),
+    })
+}
+
+fn prefetch_from_state_value(value: Value) -> Option<PrefetchReport> {
+    let Value::Object(mut object) = value else {
+        return None;
+    };
+    Some(PrefetchReport {
+        id: take_string(&mut object, &["id", "name"]),
+        name: take_string(&mut object, &["name", "path", "pattern"]),
+        phase: take_string(&mut object, &["phase", "stage"])
+            .or_else(|| Some("prefetch".to_string())),
+        started_at: take_string(
+            &mut object,
+            &[
+                "startedAt",
+                "started_at",
+                "startTime",
+                "start_time",
+                "timestamp",
+            ],
+        ),
+        duration_ms: take_f64(&mut object, &["durationMs", "duration_ms", "duration"]),
+        bytes: take_u64(&mut object, &["bytes", "sizeBytes", "size_bytes", "size"]),
+        hit_blocks: take_u64(&mut object, &["hitBlocks", "hit_blocks", "hits"]),
+        requested_blocks: take_u64(
+            &mut object,
+            &["requestedBlocks", "requested_blocks", "requests"],
+        ),
+        detail: take_string(&mut object, &["detail", "message"]),
+    })
+}
+
+fn timeline_from_state_value(value: Value) -> Option<DownloadStepReport> {
+    let Value::Object(mut object) = value else {
+        return None;
+    };
+    let phase = take_string(&mut object, &["phase", "stage", "operation", "op"])
+        .unwrap_or_else(|| "snapshotter".to_string());
+    Some(DownloadStepReport {
+        id: take_string(&mut object, &["id"]),
+        name: take_string(&mut object, &["name", "title"]).unwrap_or_else(|| title_case(&phase)),
+        phase,
+        duration_ms: take_f64(&mut object, &["durationMs", "duration_ms", "duration"])
+            .unwrap_or(0.0),
+        bytes: take_u64(&mut object, &["bytes", "sizeBytes", "size_bytes"]),
+        timestamp: take_string(
+            &mut object,
+            &[
+                "timestamp",
+                "startedAt",
+                "started_at",
+                "startTime",
+                "start_time",
+            ],
+        ),
+        detail: take_string(&mut object, &["detail", "message"]),
+    })
+}
+
+fn take_array(object: &mut Map<String, Value>, keys: &[&str]) -> Option<Vec<Value>> {
+    keys.iter().find_map(|key| match object.remove(*key) {
+        Some(Value::Array(values)) => Some(values),
+        _ => None,
+    })
+}
+
+fn take_object(object: &mut Map<String, Value>, keys: &[&str]) -> Option<Map<String, Value>> {
+    keys.iter().find_map(|key| match object.remove(*key) {
+        Some(Value::Object(value)) => Some(value),
+        _ => None,
+    })
+}
+
+fn take_string(object: &mut Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(value_to_string))
+}
+
+fn take_u64(object: &mut Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(|value| value_to_u64(&value)))
+}
+
+fn take_f64(object: &mut Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(|value| value_to_f64(&value)))
+}
+
+fn value_string_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).cloned().and_then(value_to_string))
+}
+
+fn value_u64_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_u64))
+}
+
+fn value_to_string(value: Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn value_to_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_f64().map(|value| value.max(0.0).round() as u64)),
+        Value::String(value) => value.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(value) => value.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn infer_snapshotter_from_object(object: &Map<String, Value>) -> Option<String> {
+    for value in object.values() {
+        let text = match value {
+            Value::String(value) => value.to_ascii_lowercase(),
+            _ => continue,
+        };
+        for snapshotter in ["nydus", "stargz", "overlaybd"] {
+            if text.contains(snapshotter) {
+                return Some(snapshotter.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1423,5 +1868,49 @@ image_cache_stage_duration_seconds{image_ref="registry.example/prom:v1",snapshot
             .unwrap()
             .iter()
             .any(|step| step.phase == "mount" && step.duration_ms == 40.0));
+    }
+    #[test]
+    fn parses_snapshotter_state_json() {
+        let content = r#"{
+            "snapshotter":"overlaybd",
+            "images":[{
+                "name":"registry.example/state:v1",
+                "digest":"sha256:state",
+                "size":4096,
+                "blockCache":{
+                    "requests":32,
+                    "hits":24,
+                    "remoteBytes":1024,
+                    "localBytes":2048,
+                    "blockSize":131072
+                },
+                "layers":[{
+                    "digest":"sha256:layer-state",
+                    "size":4096,
+                    "cache":{"requests":16,"hits":12,"remoteBytes":512}
+                }],
+                "prefetch":[{"name":"hot files","durationMs":12,"bytes":256,"requests":4,"hits":3}],
+                "stages":[{"stage":"mount","durationMs":7,"bytes":128}]
+            }]
+        }"#;
+
+        let reports = parse_reports(content).unwrap();
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(
+            report.image_ref.as_deref(),
+            Some("registry.example/state:v1")
+        );
+        assert_eq!(report.snapshotter.as_deref(), Some("overlaybd"));
+        assert_eq!(report.cache.as_ref().unwrap().requested_blocks, Some(32));
+        assert_eq!(report.cache.as_ref().unwrap().hit_blocks, Some(24));
+        assert_eq!(report.layers[0].remote_read_bytes, Some(512));
+        assert_eq!(report.prefetches[0].requested_blocks, Some(4));
+        assert!(report
+            .download_timeline
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|step| step.phase == "mount" && step.duration_ms == 7.0));
     }
 }

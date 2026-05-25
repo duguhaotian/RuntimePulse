@@ -305,7 +305,7 @@ RUNTIMEPULSE_IMAGE_CACHE_REPORT_TIMEOUT_MS=5000 \
 runtimepulse-collector host-agent
 ```
 
-The file or command output can be a JSON object, a JSON array, JSONL, or a
+The file or command output can be RuntimePulse JSON, common snapshotter state/index JSON, JSONL, or a
 Prometheus text exposition from a snapshotter/cache exporter. JSON fields may use
 either RuntimePulse camelCase names or common exporter-style snake_case aliases
 such as `image_ref`, `requested_blocks`, `hit_blocks`, `duration_ms`, and
@@ -313,7 +313,7 @@ such as `image_ref`, `requested_blocks`, `hit_blocks`, `duration_ms`, and
 `image_ref`, `image`, `digest`, `snapshotter`, `layer`, `phase`, or `stage`;
 metrics with names containing `image_cache`, `snapshotter`, `nydus`, `stargz`,
 or `overlaybd` are normalized into the same cache metrics, layer counters,
-prefetch records, and timeline spans. Each JSON row describes one image
+prefetch records, and timeline spans. RuntimePulse-shaped JSON rows describe one image
 observation:
 
 ```json
@@ -367,7 +367,7 @@ observation:
 }
 ```
 
-See `rust-collector/examples/image-cache-report.json` for a complete JSON example and `rust-collector/examples/image-cache-prometheus.prom` for Prometheus text input.
+See `rust-collector/examples/image-cache-report.json` for a complete RuntimePulse JSON example, `rust-collector/examples/image-cache-state.json` for common snapshotter state/index JSON, and `rust-collector/examples/image-cache-prometheus.prom` for Prometheus text input.
 
 
 ## Runtime Diagnostic Reports
