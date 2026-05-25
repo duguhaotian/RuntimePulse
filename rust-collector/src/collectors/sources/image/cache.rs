@@ -34,11 +34,17 @@ pub struct ImageCachePlugin {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotterReport {
+    #[serde(alias = "image_id")]
     image_id: Option<String>,
+    #[serde(alias = "image_ref", alias = "reference", alias = "ref")]
     image_ref: Option<String>,
+    #[serde(alias = "image_digest", alias = "digest")]
     image_digest: Option<String>,
+    #[serde(alias = "loading_mode")]
     loading_mode: Option<String>,
+    #[serde(alias = "size_bytes", alias = "size")]
     size_bytes: Option<u64>,
+    #[serde(alias = "layer_count")]
     layer_count: Option<u64>,
     timestamp: Option<String>,
     snapshotter: Option<String>,
@@ -47,16 +53,22 @@ struct SnapshotterReport {
     layers: Vec<LayerCacheReport>,
     #[serde(default)]
     prefetches: Vec<PrefetchReport>,
+    #[serde(alias = "download_timeline", alias = "timeline", alias = "stages")]
     download_timeline: Option<Vec<DownloadStepReport>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CacheReport {
+    #[serde(alias = "requested_blocks", alias = "requests")]
     requested_blocks: Option<u64>,
+    #[serde(alias = "hit_blocks", alias = "hits")]
     hit_blocks: Option<u64>,
+    #[serde(alias = "local_read_bytes")]
     local_read_bytes: Option<u64>,
+    #[serde(alias = "remote_read_bytes")]
     remote_read_bytes: Option<u64>,
+    #[serde(alias = "block_size_bytes", alias = "block_size")]
     block_size_bytes: Option<u64>,
 }
 
@@ -65,12 +77,19 @@ struct CacheReport {
 struct LayerCacheReport {
     id: Option<String>,
     digest: Option<String>,
+    #[serde(alias = "media_type")]
     media_type: Option<String>,
+    #[serde(alias = "size_bytes", alias = "size")]
     size_bytes: Option<u64>,
+    #[serde(alias = "requested_blocks", alias = "requests")]
     requested_blocks: Option<u64>,
+    #[serde(alias = "hit_blocks", alias = "hits")]
     hit_blocks: Option<u64>,
+    #[serde(alias = "local_read_bytes")]
     local_read_bytes: Option<u64>,
+    #[serde(alias = "remote_read_bytes")]
     remote_read_bytes: Option<u64>,
+    #[serde(alias = "block_size_bytes", alias = "block_size")]
     block_size_bytes: Option<u64>,
 }
 
@@ -80,10 +99,14 @@ struct PrefetchReport {
     id: Option<String>,
     name: Option<String>,
     phase: Option<String>,
+    #[serde(alias = "started_at", alias = "start_time", alias = "startTime")]
     started_at: Option<String>,
+    #[serde(alias = "duration_ms", alias = "duration")]
     duration_ms: Option<f64>,
     bytes: Option<u64>,
+    #[serde(alias = "hit_blocks", alias = "hits")]
     hit_blocks: Option<u64>,
+    #[serde(alias = "requested_blocks", alias = "requests")]
     requested_blocks: Option<u64>,
     detail: Option<String>,
 }
@@ -94,6 +117,7 @@ struct DownloadStepReport {
     id: Option<String>,
     name: String,
     phase: String,
+    #[serde(alias = "duration_ms", alias = "duration", default)]
     duration_ms: f64,
     bytes: Option<u64>,
     timestamp: Option<String>,
@@ -787,5 +811,58 @@ JSON"#;
             .traces
             .iter()
             .any(|span| span.span_name == "image.prefetch"));
+    }
+
+    #[test]
+    fn accepts_snake_case_snapshotter_fields() {
+        let content = r#"{
+            "image_id":"img-native",
+            "image_ref":"registry.example/native:v1",
+            "image_digest":"sha256:native",
+            "loading_mode":"lazy",
+            "size_bytes":2048,
+            "layer_count":1,
+            "timestamp":"2026-05-25T00:00:00.000Z",
+            "snapshotter":"stargz",
+            "cache":{
+                "requested_blocks":20,
+                "hit_blocks":15,
+                "local_read_bytes":1024,
+                "remote_read_bytes":512,
+                "block_size":131072
+            },
+            "layers":[{
+                "id":"layer-a",
+                "media_type":"application/vnd.oci.image.layer.v1.tar+gzip",
+                "size":2048,
+                "requested_blocks":20,
+                "hit_blocks":15
+            }],
+            "prefetches":[{
+                "name":"Warm hot files",
+                "phase":"prefetch",
+                "started_at":"2026-05-25T00:00:00.010Z",
+                "duration_ms":33,
+                "bytes":512,
+                "requested_blocks":5,
+                "hit_blocks":4
+            }],
+            "download_timeline":[{
+                "name":"Resolve",
+                "phase":"resolve",
+                "duration_ms":10
+            }]
+        }"#;
+
+        let reports = parse_reports(content).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].image_id.as_deref(), Some("img-native"));
+        assert_eq!(reports[0].cache.as_ref().unwrap().hit_blocks, Some(15));
+        assert_eq!(reports[0].layers[0].size_bytes, Some(2048));
+        assert_eq!(reports[0].prefetches[0].duration_ms, Some(33.0));
+        assert_eq!(
+            reports[0].download_timeline.as_ref().unwrap()[0].duration_ms,
+            10.0
+        );
     }
 }

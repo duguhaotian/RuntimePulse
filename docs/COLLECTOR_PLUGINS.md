@@ -304,8 +304,10 @@ RUNTIMEPULSE_IMAGE_CACHE_REPORT_TIMEOUT_MS=5000 \
 runtimepulse-collector host-agent
 ```
 
-The file can be a JSON object, a JSON array, or JSONL. Each row describes one
-image observation:
+The file can be a JSON object, a JSON array, or JSONL. Fields may use either
+RuntimePulse camelCase names or common exporter-style snake_case aliases such as
+`image_ref`, `requested_blocks`, `hit_blocks`, `duration_ms`, and
+`download_timeline`. Each row describes one image observation:
 
 ```json
 {
