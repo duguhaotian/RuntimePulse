@@ -493,7 +493,7 @@ collection interval.
 
 For a native `perf script` path, enable `perf-script` or run
 `runtimepulse-collector perf-script`. It reads plain `perf script` text from a
-file or command, groups identical call stacks, and emits RuntimePulse profile
+file or command, groups identical call stacks, infers target command/PID and capture window from sample headers when available, and emits RuntimePulse profile
 artifacts with inline flamegraph trees:
 
 ```bash

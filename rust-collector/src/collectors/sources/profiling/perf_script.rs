@@ -132,9 +132,14 @@ pub fn lightweight_report_from_perf_script(
     config: &CollectorConfig,
 ) -> Result<String> {
     let timestamp = timestamp(now);
-    let folded = folded_stacks_from_perf_script(script);
-    let (sample_count, flamegraph) = flamegraph_from_folded_stacks(&folded);
-    let duration_ms = perf_script_duration_ms();
+    let summary = summarize_perf_script(script);
+    let (sample_count, flamegraph) = flamegraph_from_folded_stacks(&summary.folded);
+    let configured_duration_ms = perf_script_duration_ms();
+    let duration_ms = if configured_duration_ms > 0.0 {
+        configured_duration_ms
+    } else {
+        summary.duration_ms.unwrap_or(0.0)
+    };
     let object_uri = persist_perf_script(script, target, &timestamp)?;
     let id = format!(
         "perf-script-{}-{}-{}",
@@ -145,8 +150,11 @@ pub fn lightweight_report_from_perf_script(
     let mut target_json = json!({
         "runtimeProcess": target.process_role,
     });
-    if let Some(pid) = target.pid {
+    if let Some(pid) = target.pid.or(summary.pid) {
         target_json["pid"] = json!(pid);
+    }
+    if let Some(command) = &summary.command {
+        target_json["command"] = json!(command);
     }
     Ok(json!({
         "sandboxId": target.sandbox_id,
@@ -172,17 +180,48 @@ pub fn lightweight_report_from_perf_script(
             "attributes": {
                 "profile.perfScript": true,
                 "profile.sourcePath": target.script_path,
-                "profile.foldedStacks": folded.lines().count(),
+                "profile.foldedStacks": summary.folded.lines().count(),
+                "profile.perfScriptSamples": summary.sample_headers,
+                "profile.perfScriptStartSeconds": summary.start_seconds,
+                "profile.perfScriptEndSeconds": summary.end_seconds,
             }
         }]
     })
     .to_string())
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PerfScriptSummary {
+    pub folded: String,
+    pub command: Option<String>,
+    pub pid: Option<u64>,
+    pub start_seconds: Option<f64>,
+    pub end_seconds: Option<f64>,
+    pub duration_ms: Option<f64>,
+    pub sample_headers: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PerfSampleHeader {
+    command: String,
+    pid: Option<u64>,
+    timestamp_seconds: Option<f64>,
+}
+
+#[allow(dead_code)]
 pub fn folded_stacks_from_perf_script(script: &str) -> String {
+    summarize_perf_script(script).folded
+}
+
+pub fn summarize_perf_script(script: &str) -> PerfScriptSummary {
     let mut samples: BTreeMap<String, u64> = BTreeMap::new();
     let mut current = Vec::new();
     let mut saw_header = false;
+    let mut command = None;
+    let mut pid = None;
+    let mut start_seconds: Option<f64> = None;
+    let mut end_seconds: Option<f64> = None;
+    let mut sample_headers = 0_u64;
 
     for line in script.lines() {
         let trimmed = line.trim();
@@ -194,8 +233,19 @@ pub fn folded_stacks_from_perf_script(script: &str) -> String {
         if trimmed.starts_with('#') {
             continue;
         }
-        if is_perf_sample_header(trimmed) {
+        if let Some(header) = parse_perf_sample_header(trimmed) {
             flush_perf_sample(&mut samples, &mut current);
+            if command.is_none() && !header.command.is_empty() {
+                command = Some(header.command);
+            }
+            if pid.is_none() {
+                pid = header.pid;
+            }
+            if let Some(seconds) = header.timestamp_seconds {
+                start_seconds = Some(start_seconds.map_or(seconds, |value| value.min(seconds)));
+                end_seconds = Some(end_seconds.map_or(seconds, |value| value.max(seconds)));
+            }
+            sample_headers = sample_headers.saturating_add(1);
             saw_header = true;
             continue;
         }
@@ -208,11 +258,24 @@ pub fn folded_stacks_from_perf_script(script: &str) -> String {
 
     flush_perf_sample(&mut samples, &mut current);
 
-    samples
+    let folded = samples
         .into_iter()
         .map(|(stack, count)| format!("{stack} {count}"))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    let duration_ms = start_seconds
+        .zip(end_seconds)
+        .map(|(start, end)| ((end - start) * 1000.0).max(0.0));
+
+    PerfScriptSummary {
+        folded,
+        command,
+        pid,
+        start_seconds,
+        end_seconds,
+        duration_ms,
+        sample_headers,
+    }
 }
 
 fn flush_perf_sample(samples: &mut BTreeMap<String, u64>, frames: &mut Vec<String>) {
@@ -233,21 +296,29 @@ fn flush_perf_sample(samples: &mut BTreeMap<String, u64>, frames: &mut Vec<Strin
     *samples.entry(stack).or_insert(0) += 1;
 }
 
-fn is_perf_sample_header(line: &str) -> bool {
+fn parse_perf_sample_header(line: &str) -> Option<PerfSampleHeader> {
     let mut parts = line.split_whitespace();
-    let Some(_command) = parts.next() else {
-        return false;
-    };
-    let Some(pid_token) = parts.next() else {
-        return false;
-    };
+    let command = parts.next()?.to_string();
+    let pid_token = parts.next()?;
     if !pid_token
         .chars()
         .all(|char| char.is_ascii_digit() || char == '/')
     {
-        return false;
+        return None;
     }
-    parts.any(|part| part.ends_with(':') && part.trim_end_matches(':').parse::<f64>().is_ok())
+    let pid = pid_token
+        .split('/')
+        .next()
+        .and_then(|value| value.parse::<u64>().ok());
+    let timestamp_seconds = parts.find_map(|part| {
+        part.strip_suffix(':')
+            .and_then(|value| value.parse::<f64>().ok())
+    })?;
+    Some(PerfSampleHeader {
+        command,
+        pid,
+        timestamp_seconds: Some(timestamp_seconds),
+    })
 }
 
 fn perf_frame_name(line: &str) -> Option<String> {
@@ -535,6 +606,26 @@ mod tests {
     }
 
     #[test]
+    fn summarizes_perf_script_target_metadata_and_duration() {
+        let summary = summarize_perf_script(
+            "demo 123/123 100.000: cycles:
+        ffffffff8101 start_kernel ([kernel.kallsyms])
+        000000000040 work (/usr/bin/demo)
+
+demo 123/123 101.250: cycles:
+        ffffffff8102 finish_task_switch ([kernel.kallsyms])
+        000000000041 wait (/usr/bin/demo)
+",
+        );
+
+        assert_eq!(summary.command.as_deref(), Some("demo"));
+        assert_eq!(summary.pid, Some(123));
+        assert_eq!(summary.sample_headers, 2);
+        assert_eq!(summary.duration_ms, Some(1250.0));
+        assert_eq!(summary.folded.lines().count(), 2);
+    }
+
+    #[test]
     fn converts_perf_script_to_profile_output() {
         let target = PerfScriptTarget {
             sandbox_id: "sandbox-a".to_string(),
@@ -567,6 +658,14 @@ mod tests {
         assert_eq!(output.profiles.len(), 1);
         assert_eq!(output.profiles[0].sample_count, 1);
         assert_eq!(output.profiles[0].process_role, "app");
+        assert_eq!(
+            output.events[0].attributes["profile.metadata"]["target.command"],
+            "demo"
+        );
+        assert_eq!(
+            output.events[0].attributes["profile.metadata"]["target.pid"],
+            123
+        );
         assert!(output
             .metrics
             .iter()
