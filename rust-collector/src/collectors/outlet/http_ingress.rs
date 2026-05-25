@@ -7,6 +7,7 @@ use std::thread;
 
 use serde_json::json;
 
+use crate::collectors::adapters::local_push::accept_local_push_json;
 use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::PluginOutput;
 
@@ -77,34 +78,8 @@ fn handle_local_report_connection(mut stream: TcpStream, sender: Sender<PluginOu
                 return;
             }
 
-            match serde_json::from_slice::<PluginOutput>(&request.body) {
-                Ok(output) => match sender.send(output) {
-                    Ok(()) => {
-                        let _ = write_http_response(
-                            &mut stream,
-                            202,
-                            "Accepted",
-                            r#"{"status":"accepted"}"#,
-                        );
-                    }
-                    Err(error) => {
-                        let _ = write_http_response(
-                            &mut stream,
-                            503,
-                            "Service Unavailable",
-                            &json!({ "error": error.to_string() }).to_string(),
-                        );
-                    }
-                },
-                Err(error) => {
-                    let _ = write_http_response(
-                        &mut stream,
-                        400,
-                        "Bad Request",
-                        &json!({ "error": error.to_string() }).to_string(),
-                    );
-                }
-            }
+            let ack = accept_local_push_json(&request.body, &sender);
+            let _ = write_http_response(&mut stream, ack.status, ack.reason, &ack.body);
         }
         Err(error) => {
             let _ = write_http_response(
