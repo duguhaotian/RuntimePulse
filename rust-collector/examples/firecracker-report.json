@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-05-25T00:00:00.000Z",
+  "source": "firecracker-exporter",
+  "sandboxes": [
+    {
+      "id": "firecracker-demo",
+      "workloadName": "demo/firecracker-job",
+      "namespace": "default",
+      "imageRef": "registry.example/runtimepulse/firecracker-demo:v1",
+      "status": "running",
+      "runtimeVersion": "firecracker-1.7.0",
+      "vmId": "fc-vm-1",
+      "machineId": "machine-1",
+      "jailerPid": 3456,
+      "apiSocket": "/run/firecracker/machine-1.socket",
+      "vcpus": 1,
+      "memoryBytes": 268435456,
+      "bootTimeMs": 321,
+      "guestReadyMs": 456,
+      "labels": {
+        "app": "firecracker-demo"
+      }
+    }
+  ]
+}

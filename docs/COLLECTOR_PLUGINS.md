@@ -248,6 +248,12 @@ A lightweight report can be an object with a `sandboxes` array, a JSON array of 
 
 Firecracker rows accept the same common fields plus `machineId`, `jailerPid`, `apiSocket`, `guestReadyMs`, `exitCode`, and `reason`. gVisor rows accept common fields plus `platform`, `sandboxPid`, `goferPid`, `sentryPid`, `bootTimeMs`, `syscallCount`, `syscallLatencyMs`, `goferIoBytes`, and `faults`. The collectors also accept full RuntimePulse partial ingest JSON, so a richer exporter can bypass lightweight normalization while still using the same host-agent queue/spool/outlet path.
 
+Example reports are available at:
+
+- `rust-collector/examples/kata-report.json`
+- `rust-collector/examples/firecracker-report.json`
+- `rust-collector/examples/gvisor-report.json`
+
 ## Sandbox Reconcile Reports
 
 Use `sandbox-reconcile`/`host-sandbox-reconcile` when a report-only runtime exporter can list the currently live sandbox ids. This closes the lifecycle gap for runtimes that do not have an event stream wired yet: the Query API removes stale live sandboxes in the same `snapshot.scope` for the same node.
@@ -272,7 +278,7 @@ Lightweight snapshot example:
 }
 ```
 
-If `scope` is omitted it defaults to `<runtimeType>-running`. The same report may use `sandboxes: [{ "id": "..." }]` instead of `sandboxIds`.
+If `scope` is omitted it defaults to `<runtimeType>-running`. The same report may use `sandboxes: [{ "id": "..." }]` instead of `sandboxIds`. See `rust-collector/examples/sandbox-reconcile-report.json` for a complete example.
 
 ## Image Cache and Snapshotter Reports
 

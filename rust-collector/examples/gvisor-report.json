@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-05-25T00:00:00.000Z",
+  "source": "runsc-exporter",
+  "sandboxes": [
+    {
+      "id": "gvisor-demo",
+      "workloadName": "demo/gvisor-app",
+      "namespace": "default",
+      "imageRef": "registry.example/runtimepulse/gvisor-demo:v1",
+      "status": "running",
+      "runtimeVersion": "runsc-20260520",
+      "platform": "ptrace",
+      "sandboxPid": 4567,
+      "goferPid": 4568,
+      "sentryPid": 4569,
+      "bootTimeMs": 222,
+      "syscallCount": 1200,
+      "syscallLatencyMs": 3.5,
+      "goferIoBytes": 4096,
+      "faults": 2,
+      "labels": {
+        "app": "gvisor-demo"
+      }
+    }
+  ]
+}

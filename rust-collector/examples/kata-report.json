@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-05-25T00:00:00.000Z",
+  "source": "kata-exporter",
+  "sandboxes": [
+    {
+      "id": "kata-demo",
+      "workloadName": "demo/kata-app",
+      "namespace": "default",
+      "imageRef": "registry.example/runtimepulse/kata-demo:v1",
+      "status": "running",
+      "runtimeVersion": "kata-3.3.0",
+      "vmId": "kata-vm-1",
+      "hypervisor": "qemu",
+      "pid": 2345,
+      "vcpus": 2,
+      "memoryBytes": 536870912,
+      "bootTimeMs": 1234,
+      "labels": {
+        "app": "kata-demo"
+      },
+      "attributes": {
+        "kata.configPath": "/opt/kata/share/defaults/kata-containers/configuration.toml"
+      }
+    }
+  ]
+}
