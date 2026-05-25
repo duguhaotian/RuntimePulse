@@ -1,0 +1,33 @@
+{
+  "sandbox_id": "docker-runtimepulse-demo",
+  "source": "perf-index",
+  "timestamp": "2026-05-25T00:00:00.000Z",
+  "target": {
+    "pid": 4242,
+    "command": "demo-app",
+    "runtime_process": "app"
+  },
+  "artifacts": [
+    {
+      "path": "file:///var/lib/runtimepulse/profiles/docker-runtimepulse-demo/cpu.pprof",
+      "type": "cpu",
+      "samples": 2451,
+      "duration_ms": 10000,
+      "stats": {
+        "sample_rate_hz": 99.5,
+        "lost_samples": 3,
+        "kernel_samples": 540,
+        "user_samples": 1911
+      },
+      "labels": {
+        "runtime": "runc"
+      }
+    },
+    {
+      "uri": "file:///var/lib/runtimepulse/profiles/docker-runtimepulse-demo/block-io.pprof",
+      "artifact_type": "block_io",
+      "sample_count": 130,
+      "process_role": "runtime"
+    }
+  ]
+}

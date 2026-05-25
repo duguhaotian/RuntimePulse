@@ -30,22 +30,34 @@ pub struct ProfileReportPlugin {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileReport {
+    #[serde(alias = "sandbox_id")]
     sandbox_id: Option<String>,
     timestamp: Option<String>,
     source: Option<String>,
     profiles: Vec<ProfileArtifactReport>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileArtifactReport {
     id: Option<String>,
     timestamp: Option<String>,
+    #[serde(alias = "sandbox_id")]
     sandbox_id: Option<String>,
+    #[serde(
+        alias = "profile_type",
+        alias = "type",
+        alias = "artifactType",
+        alias = "artifact_type"
+    )]
     profile_type: String,
+    #[serde(alias = "process_role", alias = "role")]
     process_role: Option<String>,
+    #[serde(alias = "duration_ms", alias = "duration")]
     duration_ms: Option<f64>,
+    #[serde(alias = "sample_count", alias = "samples")]
     sample_count: Option<u64>,
+    #[serde(alias = "object_uri", alias = "uri", alias = "path", alias = "file")]
     object_uri: String,
     flamegraph: Option<Value>,
     target: Option<ProfileTargetReport>,
@@ -54,23 +66,31 @@ struct ProfileArtifactReport {
     attributes: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileTargetReport {
     pid: Option<u64>,
     command: Option<String>,
+    #[serde(alias = "thread_id", alias = "tid", alias = "thread")]
     thread_id: Option<u64>,
+    #[serde(alias = "runtime_process", alias = "process")]
     runtime_process: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileStatsReport {
+    #[serde(alias = "lost_samples")]
     lost_samples: Option<u64>,
+    #[serde(alias = "sample_rate_hz")]
     sample_rate_hz: Option<f64>,
+    #[serde(alias = "cpu_time_ms")]
     cpu_time_ms: Option<f64>,
+    #[serde(alias = "wall_time_ms")]
     wall_time_ms: Option<f64>,
+    #[serde(alias = "kernel_samples")]
     kernel_samples: Option<u64>,
+    #[serde(alias = "user_samples")]
     user_samples: Option<u64>,
 }
 
@@ -186,7 +206,13 @@ fn parse_profile_reports(content: &str) -> Result<Vec<ParsedProfileReport>> {
     }
 
     if trimmed.starts_with('[') {
-        return Ok(serde_json::from_str::<Vec<ProfileReport>>(trimmed)?
+        if let Ok(reports) = serde_json::from_str::<Vec<ProfileReport>>(trimmed) {
+            return Ok(reports
+                .into_iter()
+                .map(ParsedProfileReport::Lightweight)
+                .collect());
+        }
+        return Ok(parse_generic_profile_value(serde_json::from_str(trimmed)?)
             .into_iter()
             .map(ParsedProfileReport::Lightweight)
             .collect());
@@ -200,6 +226,12 @@ fn parse_profile_reports(content: &str) -> Result<Vec<ParsedProfileReport>> {
         }
         if let Ok(report) = serde_json::from_str::<ProfileReport>(trimmed) {
             return Ok(vec![ParsedProfileReport::Lightweight(report)]);
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            return Ok(parse_generic_profile_value(value)
+                .into_iter()
+                .map(ParsedProfileReport::Lightweight)
+                .collect());
         }
     }
 
@@ -215,12 +247,355 @@ fn parse_profile_reports(content: &str) -> Result<Vec<ParsedProfileReport>> {
                 continue;
             }
         }
-        reports.push(ParsedProfileReport::Lightweight(serde_json::from_str(
-            line,
-        )?));
+        if let Ok(report) = serde_json::from_str::<ProfileReport>(line) {
+            reports.push(ParsedProfileReport::Lightweight(report));
+            continue;
+        }
+        reports.extend(
+            parse_generic_profile_value(serde_json::from_str(line)?)
+                .into_iter()
+                .map(ParsedProfileReport::Lightweight),
+        );
     }
 
     Ok(reports)
+}
+
+fn parse_generic_profile_value(value: Value) -> Vec<ProfileReport> {
+    match value {
+        Value::Array(items) => items
+            .into_iter()
+            .filter_map(generic_profile_artifact_from_value)
+            .map(|profile| ProfileReport {
+                sandbox_id: profile.sandbox_id.clone(),
+                timestamp: profile.timestamp.clone(),
+                source: Some("profile-index".to_string()),
+                profiles: vec![profile],
+            })
+            .collect(),
+        Value::Object(mut object) => {
+            let defaults = GenericProfileDefaults::from_object(&object);
+            for key in ["profiles", "artifacts", "files", "items", "records"] {
+                if let Some(Value::Array(items)) = object.remove(key) {
+                    let profiles = items
+                        .into_iter()
+                        .filter_map(|value| {
+                            generic_profile_artifact_from_value_with_defaults(value, &defaults)
+                        })
+                        .collect::<Vec<_>>();
+                    if profiles.is_empty() {
+                        return Vec::new();
+                    }
+                    return vec![ProfileReport {
+                        sandbox_id: defaults.sandbox_id,
+                        timestamp: defaults.timestamp,
+                        source: defaults
+                            .source
+                            .or_else(|| Some("profile-index".to_string())),
+                        profiles,
+                    }];
+                }
+            }
+            generic_profile_artifact_from_object_with_defaults(object, &defaults)
+                .map(|profile| ProfileReport {
+                    sandbox_id: profile.sandbox_id.clone().or(defaults.sandbox_id),
+                    timestamp: profile.timestamp.clone().or(defaults.timestamp),
+                    source: defaults
+                        .source
+                        .or_else(|| Some("profile-index".to_string())),
+                    profiles: vec![profile],
+                })
+                .into_iter()
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct GenericProfileDefaults {
+    sandbox_id: Option<String>,
+    timestamp: Option<String>,
+    source: Option<String>,
+    target: Option<ProfileTargetReport>,
+    labels: Option<Map<String, Value>>,
+}
+
+impl GenericProfileDefaults {
+    fn from_object(object: &Map<String, Value>) -> Self {
+        let target = object
+            .get("target")
+            .and_then(|value| value.as_object())
+            .map(profile_target_from_map);
+        Self {
+            sandbox_id: value_string_from_keys(
+                object,
+                &[
+                    "sandboxId",
+                    "sandbox_id",
+                    "sandbox",
+                    "containerId",
+                    "container_id",
+                ],
+            )
+            .or_else(|| {
+                target
+                    .as_ref()
+                    .and_then(|target| target.runtime_process.clone())
+            }),
+            timestamp: value_string_from_keys(object, &["timestamp", "observedAt", "observed_at"]),
+            source: value_string_from_keys(object, &["source", "collector", "profiler"]),
+            target,
+            labels: object
+                .get("labels")
+                .and_then(|value| value.as_object())
+                .cloned(),
+        }
+    }
+}
+
+fn generic_profile_artifact_from_value(value: Value) -> Option<ProfileArtifactReport> {
+    generic_profile_artifact_from_value_with_defaults(value, &GenericProfileDefaults::default())
+}
+
+fn generic_profile_artifact_from_value_with_defaults(
+    value: Value,
+    defaults: &GenericProfileDefaults,
+) -> Option<ProfileArtifactReport> {
+    match value {
+        Value::Object(object) => {
+            generic_profile_artifact_from_object_with_defaults(object, defaults)
+        }
+        _ => None,
+    }
+}
+
+fn generic_profile_artifact_from_object_with_defaults(
+    mut object: Map<String, Value>,
+    defaults: &GenericProfileDefaults,
+) -> Option<ProfileArtifactReport> {
+    let nested_target = take_object(&mut object, &["target"]);
+    let nested_stats = take_object(&mut object, &["stats", "statistics"]);
+    let labels = take_object(&mut object, &["labels", "tags"]).or_else(|| defaults.labels.clone());
+    let mut attributes = take_object(&mut object, &["attributes", "metadata"]);
+
+    let object_uri = take_string(
+        &mut object,
+        &[
+            "objectUri",
+            "object_uri",
+            "uri",
+            "path",
+            "file",
+            "profilePath",
+            "profile_path",
+            "pprof",
+            "flamegraphUri",
+            "flamegraph_uri",
+        ],
+    )?;
+    let profile_type = take_string(
+        &mut object,
+        &[
+            "profileType",
+            "profile_type",
+            "type",
+            "artifactType",
+            "artifact_type",
+            "kind",
+        ],
+    )
+    .unwrap_or_else(|| infer_profile_type(&object_uri));
+    let sandbox_id = take_string(
+        &mut object,
+        &[
+            "sandboxId",
+            "sandbox_id",
+            "sandbox",
+            "containerId",
+            "container_id",
+        ],
+    )
+    .or_else(|| defaults.sandbox_id.clone())?;
+    let target = nested_target
+        .as_ref()
+        .map(profile_target_from_map)
+        .or_else(|| profile_target_from_flat_object(&object))
+        .or_else(|| defaults.target.clone());
+    let stats = nested_stats
+        .as_ref()
+        .map(profile_stats_from_map)
+        .or_else(|| Some(profile_stats_from_map(&object)))
+        .filter(profile_stats_has_payload);
+
+    if attributes.is_none() && !object.is_empty() {
+        let mut metadata = Map::new();
+        for (key, value) in object.iter() {
+            if !matches!(value, Value::Null) {
+                metadata.insert(format!("profile.raw.{key}"), value.clone());
+            }
+        }
+        if !metadata.is_empty() {
+            attributes = Some(metadata);
+        }
+    }
+
+    Some(ProfileArtifactReport {
+        id: take_string(&mut object, &["id", "name"]),
+        timestamp: take_string(&mut object, &["timestamp", "observedAt", "observed_at"])
+            .or_else(|| defaults.timestamp.clone()),
+        sandbox_id: Some(sandbox_id),
+        profile_type,
+        process_role: take_string(&mut object, &["processRole", "process_role", "role"]).or_else(
+            || {
+                target
+                    .as_ref()
+                    .and_then(|target| target.runtime_process.clone())
+            },
+        ),
+        duration_ms: take_f64(&mut object, &["durationMs", "duration_ms", "duration"]),
+        sample_count: take_u64(
+            &mut object,
+            &["sampleCount", "sample_count", "samples", "count"],
+        ),
+        object_uri,
+        flamegraph: take_value(&mut object, &["flamegraph", "profile", "tree"]),
+        target,
+        stats,
+        labels,
+        attributes,
+    })
+}
+
+fn profile_target_from_map(object: &Map<String, Value>) -> ProfileTargetReport {
+    ProfileTargetReport {
+        pid: value_u64_from_keys(object, &["pid", "processId", "process_id"]),
+        command: value_string_from_keys(
+            object,
+            &["command", "cmd", "comm", "processName", "process_name"],
+        ),
+        thread_id: value_u64_from_keys(object, &["threadId", "thread_id", "tid", "thread"]),
+        runtime_process: value_string_from_keys(
+            object,
+            &["runtimeProcess", "runtime_process", "process", "role"],
+        ),
+    }
+}
+
+fn profile_target_from_flat_object(object: &Map<String, Value>) -> Option<ProfileTargetReport> {
+    let target = profile_target_from_map(object);
+    if target.pid.is_some()
+        || target.command.is_some()
+        || target.thread_id.is_some()
+        || target.runtime_process.is_some()
+    {
+        Some(target)
+    } else {
+        None
+    }
+}
+
+fn profile_stats_from_map(object: &Map<String, Value>) -> ProfileStatsReport {
+    ProfileStatsReport {
+        lost_samples: value_u64_from_keys(object, &["lostSamples", "lost_samples"]),
+        sample_rate_hz: value_f64_from_keys(
+            object,
+            &["sampleRateHz", "sample_rate_hz", "rateHz", "rate_hz"],
+        ),
+        cpu_time_ms: value_f64_from_keys(object, &["cpuTimeMs", "cpu_time_ms"]),
+        wall_time_ms: value_f64_from_keys(object, &["wallTimeMs", "wall_time_ms"]),
+        kernel_samples: value_u64_from_keys(object, &["kernelSamples", "kernel_samples"]),
+        user_samples: value_u64_from_keys(object, &["userSamples", "user_samples"]),
+    }
+}
+
+fn profile_stats_has_payload(stats: &ProfileStatsReport) -> bool {
+    stats.lost_samples.is_some()
+        || stats.sample_rate_hz.is_some()
+        || stats.cpu_time_ms.is_some()
+        || stats.wall_time_ms.is_some()
+        || stats.kernel_samples.is_some()
+        || stats.user_samples.is_some()
+}
+
+fn infer_profile_type(object_uri: &str) -> String {
+    let lower = object_uri.to_ascii_lowercase();
+    if lower.contains("offcpu") || lower.contains("off-cpu") {
+        "off_cpu".to_string()
+    } else if lower.contains("mem") || lower.contains("alloc") {
+        "memory".to_string()
+    } else if lower.contains("block") || lower.contains("io") {
+        "block_io".to_string()
+    } else {
+        "cpu".to_string()
+    }
+}
+
+fn take_value(object: &mut Map<String, Value>, keys: &[&str]) -> Option<Value> {
+    keys.iter().find_map(|key| object.remove(*key))
+}
+
+fn take_object(object: &mut Map<String, Value>, keys: &[&str]) -> Option<Map<String, Value>> {
+    keys.iter().find_map(|key| match object.remove(*key) {
+        Some(Value::Object(value)) => Some(value),
+        _ => None,
+    })
+}
+
+fn take_string(object: &mut Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(value_to_string))
+}
+
+fn take_u64(object: &mut Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(|value| value_to_u64(&value)))
+}
+
+fn take_f64(object: &mut Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| object.remove(*key).and_then(|value| value_to_f64(&value)))
+}
+
+fn value_string_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).cloned().and_then(value_to_string))
+}
+
+fn value_u64_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_u64))
+}
+
+fn value_f64_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(value_to_f64))
+}
+
+fn value_to_string(value: Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.is_empty() => Some(value),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn value_to_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .or_else(|| number.as_f64().map(|value| value.max(0.0).round() as u64)),
+        Value::String(value) => value.parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
+fn value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(value) => value.parse::<f64>().ok(),
+        _ => None,
+    }
 }
 
 fn output_from_lightweight_report(report: ProfileReport, fallback_timestamp: &str) -> PluginOutput {
@@ -755,5 +1130,49 @@ mod tests {
 
         assert_eq!(output.profiles.len(), 1);
         assert_eq!(output.profiles[0].id, "profile-1");
+    }
+    #[test]
+    fn parses_generic_profile_index_json() {
+        let content = r#"{
+          "sandbox_id": "sandbox-index",
+          "source": "perf-index",
+          "timestamp": "2026-05-25T00:00:00Z",
+          "target": {"pid": 4321, "command": "demo", "runtime_process": "app"},
+          "artifacts": [
+            {
+              "path": "file:///tmp/sandbox-index/cpu.pprof",
+              "type": "cpu",
+              "samples": 88,
+              "duration_ms": 1200,
+              "stats": {"sample_rate_hz": 73.3, "lost_samples": 1},
+              "labels": {"runtime": "runc"}
+            }
+          ]
+        }"#;
+
+        let output = profile_output_from_content(
+            content,
+            DateTime::parse_from_rfc3339("2026-05-25T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            &test_config(),
+        )
+        .unwrap();
+
+        assert_eq!(output.profiles.len(), 1);
+        assert_eq!(output.profiles[0].sandbox_id, "sandbox-index");
+        assert_eq!(output.profiles[0].profile_type, "cpu");
+        assert_eq!(output.profiles[0].sample_count, 88);
+        let metadata = output.profiles[0]
+            .flamegraph
+            .as_ref()
+            .and_then(|value| value.get("metadata"))
+            .unwrap();
+        assert_eq!(metadata["target.pid"], 4321);
+        assert_eq!(metadata["stats.lostSamples"], 1);
+        assert!(output
+            .metrics
+            .iter()
+            .any(|metric| metric.name == "profile.sample_rate_hz" && metric.value == 73.3));
     }
 }

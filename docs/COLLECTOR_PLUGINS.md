@@ -568,8 +568,11 @@ runtimepulse-collector host-agent
 ```
 
 The file or command output can be a RuntimePulse `PluginOutput`, a lightweight
-JSON object, a JSON array, or JSONL. Lightweight rows only need the target
-sandbox and profiles:
+RuntimePulse profile JSON object, a JSON array, JSONL, or a common artifact index
+with `artifacts` / `files` / `items` rows. Artifact-index rows may use aliases
+such as `path`, `uri`, `type`, `artifact_type`, `samples`, `sample_count`,
+`duration_ms`, `sandbox_id`, and nested `target` / `stats` maps. Lightweight
+RuntimePulse-shaped rows only need the target sandbox and profiles:
 
 ```json
 {
@@ -605,7 +608,7 @@ sandbox and profiles:
 
 RuntimePulse preserves `target`, `stats`, `labels`, and custom `attributes` under profile metadata, emits profile observation events, and derives profile metric series such as `profile.samples_total`, `profile.duration_ms`, `profile.lost_samples_total`, `profile.sample_rate_hz`, `profile.cpu_time_ms`, `profile.kernel_samples_total`, and `profile.user_samples_total`.
 
-See `rust-collector/examples/profile-report.jsonl` for a complete JSONL example.
+See `rust-collector/examples/profile-report.jsonl` for a RuntimePulse-shaped JSONL example and `rust-collector/examples/profile-index.json` for a generic artifact index example.
 
 ## Container Cgroup Collection
 
