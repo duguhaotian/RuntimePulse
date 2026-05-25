@@ -20,7 +20,7 @@ use crate::collectors::sources::profiling::report::{
     merge_profile_output, profile_output_from_content_with_plugin,
 };
 
-const DEFAULT_OUTPUT_DIR: &str = "/tmp/runtimepulse/profiles/perf-folded";
+pub const DEFAULT_OUTPUT_DIR: &str = "/tmp/runtimepulse/profiles/perf-folded";
 
 #[derive(Debug, Default)]
 struct FlameNode {
@@ -29,12 +29,12 @@ struct FlameNode {
 }
 
 #[derive(Debug)]
-struct FoldedProfileTarget {
-    sandbox_id: String,
-    folded_path: PathBuf,
-    object_uri: String,
-    profile_type: String,
-    process_role: String,
+pub struct FoldedProfileTarget {
+    pub sandbox_id: String,
+    pub folded_path: PathBuf,
+    pub object_uri: String,
+    pub profile_type: String,
+    pub process_role: String,
 }
 
 pub struct PerfFoldedProfilePlugin {
@@ -70,7 +70,7 @@ pub fn collect_perf_folded_profiles(
     collect_perf_folded_profiles_with_path(now, config, config.perf_folded_path.clone())
 }
 
-fn collect_perf_folded_profiles_with_path(
+pub fn collect_perf_folded_profiles_with_path(
     now: DateTime<Utc>,
     config: &CollectorConfig,
     fallback_path: Option<PathBuf>,
@@ -97,7 +97,7 @@ fn collect_perf_folded_profiles_with_path(
     Ok(output)
 }
 
-fn lightweight_report_from_folded(
+pub fn lightweight_report_from_folded(
     folded: &str,
     target: &FoldedProfileTarget,
     now: DateTime<Utc>,
@@ -195,7 +195,7 @@ fn perf_folded_targets(fallback_path: Option<PathBuf>) -> Vec<FoldedProfileTarge
     }]
 }
 
-fn parse_folded_target(value: &str) -> Option<FoldedProfileTarget> {
+pub fn parse_folded_target(value: &str) -> Option<FoldedProfileTarget> {
     let mut sandbox_id = None;
     let mut path = None;
     let mut object_uri = String::new();
@@ -229,7 +229,7 @@ fn parse_folded_target(value: &str) -> Option<FoldedProfileTarget> {
     })
 }
 
-fn flamegraph_from_folded_stacks(content: &str) -> (u64, Value) {
+pub fn flamegraph_from_folded_stacks(content: &str) -> (u64, Value) {
     let mut root = FlameNode::default();
     for line in content
         .lines()
@@ -294,7 +294,7 @@ fn perf_folded_output_dir() -> PathBuf {
     )
 }
 
-fn perf_folded_duration_ms() -> f64 {
+pub fn perf_folded_duration_ms() -> f64 {
     env::var("RUNTIMEPULSE_PERF_FOLDED_DURATION_MS")
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
@@ -302,11 +302,11 @@ fn perf_folded_duration_ms() -> f64 {
         .max(0.0)
 }
 
-fn file_uri(path: &Path) -> String {
+pub fn file_uri(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 
-fn sanitize_id(value: &str) -> String {
+pub fn sanitize_id(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|char| {
@@ -326,7 +326,7 @@ fn sanitize_id(value: &str) -> String {
     }
 }
 
-fn timestamp(time: DateTime<Utc>) -> String {
+pub fn timestamp(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
@@ -355,6 +355,7 @@ mod tests {
             perf_report_path: None,
             perf_folded_path: None,
             ebpf_report_path: None,
+            ebpf_folded_path: None,
             perf_profile_command: None,
             ebpf_profile_command: None,
             profile_command_timeout: Duration::from_secs(1),

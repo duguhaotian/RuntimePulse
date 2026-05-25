@@ -26,6 +26,7 @@ pub struct CollectorConfig {
     pub perf_report_path: Option<PathBuf>,
     pub perf_folded_path: Option<PathBuf>,
     pub ebpf_report_path: Option<PathBuf>,
+    pub ebpf_folded_path: Option<PathBuf>,
     pub perf_profile_command: Option<String>,
     pub ebpf_profile_command: Option<String>,
     pub profile_command_timeout: Duration,
@@ -118,6 +119,10 @@ impl CollectorConfig {
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
             ebpf_report_path: env::var("RUNTIMEPULSE_EBPF_REPORT_PATH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
+            ebpf_folded_path: env::var("RUNTIMEPULSE_EBPF_FOLDED_PATH")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),

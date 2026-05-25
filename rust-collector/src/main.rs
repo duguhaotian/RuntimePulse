@@ -14,6 +14,9 @@ use collectors::sources::image::cache::ImageCachePlugin;
 use collectors::sources::image::download::output_from_event as image_output_from_event;
 use collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use collectors::sources::node::procfs::ProcfsPlugin;
+use collectors::sources::profiling::ebpf_folded::{
+    emit_ebpf_folded_profiles, EbpfFoldedProfilePlugin,
+};
 use collectors::sources::profiling::perf_folded::{
     emit_perf_folded_profiles, PerfFoldedProfilePlugin,
 };
@@ -62,6 +65,10 @@ fn main() {
         run_containerd_diagnostics()
     } else if env::args().any(|arg| arg == "perf-folded" || arg == "perf-folded-profiles") {
         run_perf_folded_profiles()
+    } else if env::args()
+        .any(|arg| arg == "ebpf-folded" || arg == "ebpf-folded-profiles" || arg == "off-cpu-folded")
+    {
+        run_ebpf_folded_profiles()
     } else if env::args().any(|arg| arg == "host-containerd") {
         run_host_containerd()
     } else if env::args().any(|arg| arg == "host-containerd-tasks") {
@@ -332,6 +339,12 @@ fn run_perf_folded_profiles() -> Result<()> {
     emit_perf_folded_profiles(&config)
 }
 
+fn run_ebpf_folded_profiles() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+    emit_ebpf_folded_profiles(&config)
+}
+
 fn run_host_containerd_tasks() -> Result<()> {
     for target in collect_containerd_task_targets()? {
         println!(
@@ -593,6 +606,9 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             )),
             "perf-folded" | "perf-folded-report" => plugins.push(Box::new(
                 PerfFoldedProfilePlugin::new(config.perf_folded_path.clone()),
+            )),
+            "ebpf-folded" | "ebpf-folded-report" | "off-cpu-folded" => plugins.push(Box::new(
+                EbpfFoldedProfilePlugin::new(config.ebpf_folded_path.clone()),
             )),
             "diagnostic-report" | "diagnostics" => {
                 plugins.push(Box::new(DiagnosticReportPlugin::new(

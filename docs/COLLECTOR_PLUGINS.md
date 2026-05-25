@@ -421,6 +421,19 @@ RUNTIMEPULSE_PERF_FOLDED_SANDBOX_ID=docker-0123456789ab
 runtimepulse-collector host-agent
 ```
 
+For eBPF profilers that export folded off-CPU/runtime stacks, use `ebpf-folded`
+(or command `runtimepulse-collector ebpf-folded`). It uses the same folded-stack
+format and defaults to `off_cpu` / `runtime` metadata:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=ebpf-folded
+RUNTIMEPULSE_EBPF_FOLDED_PATH=/var/lib/runtimepulse/profiles/demo-offcpu.folded
+RUNTIMEPULSE_EBPF_FOLDED_SANDBOX_ID=docker-0123456789ab
+runtimepulse-collector host-agent
+```
+
+Additional eBPF folded settings mirror the perf names with `RUNTIMEPULSE_EBPF_FOLDED_*`, including `TARGETS`, `OBJECT_URI`, `PROFILE_TYPE`, `PROCESS_ROLE`, `DURATION_MS`, and `OUTPUT_DIR`.
+
 It can also be used through the existing perf command hook because `perf-folded`
 prints a RuntimePulse-compatible `PluginOutput`:
 

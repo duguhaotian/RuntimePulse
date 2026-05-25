@@ -490,6 +490,7 @@ mod tests {
             perf_report_path: None,
             perf_folded_path: None,
             ebpf_report_path: None,
+            ebpf_folded_path: None,
             perf_profile_command: None,
             ebpf_profile_command: None,
             profile_command_timeout: Duration::from_secs(1),

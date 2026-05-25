@@ -32,6 +32,7 @@ use crate::collectors::sources::node::cgroupfs::CgroupfsPlugin;
 use crate::collectors::sources::node::procfs::ProcfsPlugin;
 use crate::collectors::sources::node::psi::PsiPlugin;
 use crate::collectors::sources::profiling::ebpf::EbpfProfilePlugin;
+use crate::collectors::sources::profiling::ebpf_folded::EbpfFoldedProfilePlugin;
 use crate::collectors::sources::profiling::perf::PerfProfilePlugin;
 use crate::collectors::sources::profiling::perf_folded::PerfFoldedProfilePlugin;
 use crate::collectors::sources::profiling::report::ProfileReportPlugin;
@@ -95,6 +96,7 @@ struct HostAgentSources {
     perf: bool,
     perf_folded: bool,
     ebpf: bool,
+    ebpf_folded: bool,
     command: bool,
     http: bool,
 }
@@ -244,6 +246,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         config.ebpf_profile_command.clone(),
         config.profile_command_timeout,
     );
+    let mut ebpf_folded = EbpfFoldedProfilePlugin::new(config.ebpf_folded_path.clone());
     let mut kubernetes_metrics = if sources.kubernetes_metrics {
         Some(KubernetesMetricsPlugin::from_env().ok_or_else(|| {
             CollectorError::Config(
@@ -272,6 +275,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut perf,
             &mut perf_folded,
             &mut ebpf,
+            &mut ebpf_folded,
             kubernetes_metrics.as_mut(),
             &mut adapter_plugins,
             active_docker_ids.as_ref(),
@@ -334,6 +338,7 @@ fn collect_periodic(
     perf: &mut PerfProfilePlugin,
     perf_folded: &mut PerfFoldedProfilePlugin,
     ebpf: &mut EbpfProfilePlugin,
+    ebpf_folded: &mut EbpfFoldedProfilePlugin,
     kubernetes_metrics: Option<&mut KubernetesMetricsPlugin>,
     adapter_plugins: &mut [Box<dyn CollectorPlugin>],
     active_docker_ids: Option<&ActiveDockerIds>,
@@ -411,6 +416,11 @@ fn collect_periodic(
     }
     if sources.ebpf {
         collect_source("host-ebpf", tx, stats, || ebpf.collect(now, config));
+    }
+    if sources.ebpf_folded {
+        collect_source("host-ebpf-folded", tx, stats, || {
+            ebpf_folded.collect(now, config)
+        });
     }
     if let Some(kubernetes_metrics) = kubernetes_metrics {
         collect_source("host-kubernetes-metrics", tx, stats, || {
@@ -2016,6 +2026,7 @@ impl HostAgentSources {
             perf: false,
             perf_folded: false,
             ebpf: false,
+            ebpf_folded: false,
             command: false,
             http: false,
         };
@@ -2064,6 +2075,9 @@ impl HostAgentSources {
                 }
                 "ebpf" | "eBPF" | "host-ebpf" | "ebpf-report" | "host-ebpf-report" => {
                     sources.ebpf = true;
+                }
+                "ebpf-folded" | "host-ebpf-folded" | "ebpf-folded-report" | "off-cpu-folded" => {
+                    sources.ebpf_folded = true;
                 }
                 "command" | "host-command" | "adapter-command" => sources.command = true,
                 "http" | "host-http" | "adapter-http" => sources.http = true,
@@ -2134,6 +2148,9 @@ impl HostAgentSources {
         }
         if self.ebpf {
             names.push("ebpf");
+        }
+        if self.ebpf_folded {
+            names.push("ebpf-folded");
         }
         if self.command {
             names.push("command");
@@ -2207,6 +2224,7 @@ mod tests {
             perf_report_path: None,
             perf_folded_path: None,
             ebpf_report_path: None,
+            ebpf_folded_path: None,
             perf_profile_command: None,
             ebpf_profile_command: None,
             profile_command_timeout: Duration::from_secs(1),
@@ -2319,6 +2337,7 @@ mod tests {
             perf: false,
             perf_folded: false,
             ebpf: false,
+            ebpf_folded: false,
             command: false,
             http: false,
         };
