@@ -40,6 +40,7 @@ use collectors::sources::sandbox::firecracker::FirecrackerSandboxPlugin;
 use collectors::sources::sandbox::gvisor::GvisorSandboxPlugin;
 use collectors::sources::sandbox::kata::KataSandboxPlugin;
 use collectors::sources::sandbox::manager::run_docker_sandbox_agent;
+use collectors::sources::sandbox::reconcile::SandboxReconcilePlugin;
 use reqwest::blocking::Client;
 use serde_json::json;
 use std::env;
@@ -621,6 +622,9 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             }
             "gvisor" | "gvisor-report" | "gvisor-sandbox" | "runsc" => {
                 plugins.push(Box::new(GvisorSandboxPlugin::from_env()))
+            }
+            "sandbox-reconcile" | "reconcile" => {
+                plugins.push(Box::new(SandboxReconcilePlugin::from_env()))
             }
             "diagnostic-report" | "diagnostics" => {
                 plugins.push(Box::new(DiagnosticReportPlugin::new(

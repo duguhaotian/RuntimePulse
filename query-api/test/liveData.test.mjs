@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createLiveStore, liveMetricsForSandbox, liveStoreSnapshot, recordLiveBatch } from '../src/liveData.mjs';
+import { createLiveStore, liveMetricsForSandbox, liveSandboxes, liveStoreSnapshot, recordLiveBatch } from '../src/liveData.mjs';
 
 test('attaches pod scoped network metrics to matching k8s container sandbox', () => {
   const store = createLiveStore();
@@ -302,6 +302,67 @@ test('empty containerd running snapshot removes stale live sandboxes', () => {
 
   const snapshot = liveStoreSnapshot(store);
   assert.equal(snapshot.sandboxes, 0);
+});
+
+
+test('reconciles generic sandbox running snapshots by runtime type', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'host-kata',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [
+        {
+          id: 'kata-live',
+          nodeId: 'node-a',
+          imageRef: 'image-a:latest',
+          runtimeType: 'kata',
+        },
+        {
+          id: 'kata-gone',
+          nodeId: 'node-a',
+          imageRef: 'image-a:latest',
+          runtimeType: 'kata',
+        },
+        {
+          id: 'firecracker-keep',
+          nodeId: 'node-a',
+          imageRef: 'image-b:latest',
+          runtimeType: 'firecracker',
+        },
+      ],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'host-sandbox-reconcile',
+    metadata: {
+      clusters: [],
+      nodes: [{
+        id: 'node-a',
+        attributes: {
+          'snapshot.scope': 'kata-running',
+          'snapshot.nodeId': 'node-a',
+          'snapshot.sandboxIds': ['kata-live'],
+        },
+      }],
+      images: [],
+      sandboxes: [],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  const sandboxes = liveSandboxes(store).map((sandbox) => sandbox.id).sort();
+  assert.deepEqual(sandboxes, ['firecracker-keep', 'kata-live']);
 });
 
 test('keeps event source attribution when node metadata is refreshed by another source', () => {

@@ -61,6 +61,7 @@ use crate::collectors::sources::sandbox::manager::{
     active_docker_ids_snapshot, apply_lifecycle_output, docker_active_ids_from_inventory,
     ActiveDockerIds,
 };
+use crate::collectors::sources::sandbox::reconcile::SandboxReconcilePlugin;
 
 type ActiveContainerdTargets = Arc<Mutex<HashMap<String, ContainerdSandboxCgroupTarget>>>;
 
@@ -96,6 +97,7 @@ struct HostAgentSources {
     kata: bool,
     firecracker: bool,
     gvisor: bool,
+    sandbox_reconcile: bool,
     image_cache: bool,
     diagnostic_report: bool,
     profile_report: bool,
@@ -237,6 +239,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut kata = KataSandboxPlugin::from_env();
     let mut firecracker = FirecrackerSandboxPlugin::from_env();
     let mut gvisor = GvisorSandboxPlugin::from_env();
+    let mut sandbox_reconcile = SandboxReconcilePlugin::from_env();
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
     let mut diagnostic_report = DiagnosticReportPlugin::new(
         config.diagnostic_report_path.clone(),
@@ -281,6 +284,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut kata,
             &mut firecracker,
             &mut gvisor,
+            &mut sandbox_reconcile,
             &mut image_cache,
             &mut diagnostic_report,
             &mut profile_report,
@@ -347,6 +351,7 @@ fn collect_periodic(
     kata: &mut KataSandboxPlugin,
     firecracker: &mut FirecrackerSandboxPlugin,
     gvisor: &mut GvisorSandboxPlugin,
+    sandbox_reconcile: &mut SandboxReconcilePlugin,
     image_cache: &mut ImageCachePlugin,
     diagnostic_report: &mut DiagnosticReportPlugin,
     profile_report: &mut ProfileReportPlugin,
@@ -416,6 +421,11 @@ fn collect_periodic(
     }
     if sources.gvisor {
         collect_source("host-gvisor", tx, stats, || gvisor.collect(now, config));
+    }
+    if sources.sandbox_reconcile {
+        collect_source("host-sandbox-reconcile", tx, stats, || {
+            sandbox_reconcile.collect(now, config)
+        });
     }
     if sources.image_cache {
         collect_source("host-image-cache", tx, stats, || {
@@ -2049,6 +2059,7 @@ impl HostAgentSources {
             kata: false,
             firecracker: false,
             gvisor: false,
+            sandbox_reconcile: false,
             image_cache: false,
             diagnostic_report: false,
             profile_report: false,
@@ -2099,6 +2110,9 @@ impl HostAgentSources {
                 }
                 "gvisor" | "host-gvisor" | "gvisor-report" | "gvisor-sandbox" | "runsc" => {
                     sources.gvisor = true;
+                }
+                "sandbox-reconcile" | "host-sandbox-reconcile" | "reconcile" => {
+                    sources.sandbox_reconcile = true;
                 }
                 "image-cache" | "host-image-cache" | "snapshotter-cache" => {
                     sources.image_cache = true;
@@ -2181,6 +2195,9 @@ impl HostAgentSources {
         }
         if self.gvisor {
             names.push("gvisor");
+        }
+        if self.sandbox_reconcile {
+            names.push("sandbox-reconcile");
         }
         if self.image_cache {
             names.push("image-cache");
@@ -2385,6 +2402,7 @@ mod tests {
             kata: false,
             firecracker: false,
             gvisor: false,
+            sandbox_reconcile: false,
             image_cache: false,
             diagnostic_report: false,
             profile_report: false,

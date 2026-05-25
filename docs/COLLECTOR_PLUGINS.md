@@ -40,6 +40,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-kata`: runs on the host, reads a real Kata exporter JSON/JSONL report from `RUNTIMEPULSE_KATA_REPORT_PATH`, and reports Kata sandbox metadata, VM sizing metrics, observed events, and VM boot spans.
 - `host-firecracker`: runs on the host, reads a real Firecracker/jailer exporter JSON/JSONL report from `RUNTIMEPULSE_FIRECRACKER_REPORT_PATH`, and reports microVM metadata, sizing/ready metrics, observed events, exit codes, and VM boot spans.
 - `host-gvisor`: runs on the host, reads a real runsc/gVisor exporter JSON/JSONL report from `RUNTIMEPULSE_GVISOR_REPORT_PATH`, and reports gVisor sandbox metadata, syscall/gofer/fault metrics, observed events, and sandbox boot spans.
+- `host-sandbox-reconcile`: runs on the host, reads a real runtime snapshot report from `RUNTIMEPULSE_SANDBOX_RECONCILE_REPORT_PATH`, and emits snapshot metadata used by the Query API to remove stale live sandboxes for a runtime scope.
 - `host-diagnostic-report`: runs on the host, reads runtime diagnostic bundle indexes and emits diagnostic events, issue metrics, and capture spans while keeping raw bundles in external storage.
 - `host-perf`: runs on the host, reads a perf profile artifact report or executes a configured perf exporter command that writes RuntimePulse-compatible JSON to stdout.
 - `host-ebpf`: runs on the host, reads an eBPF profile artifact report or executes a configured eBPF exporter command that writes RuntimePulse-compatible JSON to stdout.
@@ -244,6 +245,32 @@ A lightweight report can be an object with a `sandboxes` array, a JSON array of 
 ```
 
 Firecracker rows accept the same common fields plus `machineId`, `jailerPid`, `apiSocket`, `guestReadyMs`, `exitCode`, and `reason`. gVisor rows accept common fields plus `platform`, `sandboxPid`, `goferPid`, `sentryPid`, `bootTimeMs`, `syscallCount`, `syscallLatencyMs`, `goferIoBytes`, and `faults`. The collectors also accept full RuntimePulse partial ingest JSON, so a richer exporter can bypass lightweight normalization while still using the same host-agent queue/spool/outlet path.
+
+## Sandbox Reconcile Reports
+
+Use `sandbox-reconcile`/`host-sandbox-reconcile` when a report-only runtime exporter can list the currently live sandbox ids. This closes the lifecycle gap for runtimes that do not have an event stream wired yet: the Query API removes stale live sandboxes in the same `snapshot.scope` for the same node.
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=kata,firecracker,gvisor,sandbox-reconcile \
+RUNTIMEPULSE_KATA_REPORT_PATH=/var/lib/runtimepulse/kata-report.jsonl \
+RUNTIMEPULSE_FIRECRACKER_REPORT_PATH=/var/lib/runtimepulse/firecracker-report.jsonl \
+RUNTIMEPULSE_GVISOR_REPORT_PATH=/var/lib/runtimepulse/gvisor-report.jsonl \
+RUNTIMEPULSE_SANDBOX_RECONCILE_REPORT_PATH=/var/lib/runtimepulse/sandbox-snapshot.jsonl \
+runtimepulse-collector host-agent
+```
+
+Lightweight snapshot example:
+
+```json
+{
+  "timestamp": "2026-05-25T00:00:00.000Z",
+  "runtimeType": "kata",
+  "scope": "kata-running",
+  "sandboxIds": ["kata-live-1", "kata-live-2"]
+}
+```
+
+If `scope` is omitted it defaults to `<runtimeType>-running`. The same report may use `sandboxes: [{ "id": "..." }]` instead of `sandboxIds`.
 
 ## Image Cache and Snapshotter Reports
 

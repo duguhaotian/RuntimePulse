@@ -545,6 +545,9 @@ function sandboxMatchesSnapshotScope(sandbox, scope) {
       || Boolean(stringValue(sandbox.attributes?.['containerd.id']));
   }
 
+  const runtimePrefix = scope.endsWith('-running') ? scope.slice(0, -'-running'.length) : undefined;
+  if (runtimePrefix && stringValue(sandbox.runtimeType) === runtimePrefix) return true;
+
   return false;
 }
 

@@ -203,6 +203,7 @@ Collector candidates:
 - eBPF/profile collector. Generic profile artifact report ingestion is implemented with target/stats metadata, profile observation events, profile metric derivation, and perf/eBPF exporter command hooks; eBPF-specific deepening is deferred behind Kata/Firecracker and remaining non-Kubernetes P1 runtime work.
 - Diagnostic artifact collector. Generic diagnostic report ingestion is implemented for support-bundle/log/inspect indexes, including host-agent file and command exporter hooks; Docker, crictl, and native containerd diagnostics exporters are now available; artifact UI workflows plus perf/eBPF folded-stack conversion are available; next work is broader backend-specific profiler depth.
 - gVisor collector. Baseline host-agent/outlet report ingestion is implemented for real runsc/gVisor exporter JSON/JSONL, including sandbox metadata, runtime syscall/gofer/fault metrics, observed events, and sandbox boot spans.
+- Generic sandbox reconcile collector. `sandbox-reconcile`/`host-sandbox-reconcile` reads real runtime snapshot reports and emits `snapshot.scope`/`snapshot.sandboxIds` metadata so report-only runtimes such as Kata, Firecracker, and gVisor can remove stale live sandboxes without synthetic events.
 
 Collector output should map to the same domain concepts already used by the frontend:
 
