@@ -19,6 +19,8 @@ pub struct CollectorConfig {
     pub cgroup_root: PathBuf,
     pub cgroup_max_entries: usize,
     pub image_cache_report_path: Option<PathBuf>,
+    pub image_cache_report_command: Option<String>,
+    pub image_cache_report_command_timeout: Duration,
     pub profile_report_path: Option<PathBuf>,
     pub diagnostic_report_path: Option<PathBuf>,
     pub diagnostic_report_command: Option<String>,
@@ -91,6 +93,13 @@ impl CollectorConfig {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
+            image_cache_report_command: env::var("RUNTIMEPULSE_IMAGE_CACHE_REPORT_CMD")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            image_cache_report_command_timeout: env_duration_ms(
+                "RUNTIMEPULSE_IMAGE_CACHE_REPORT_TIMEOUT_MS",
+            )
+            .unwrap_or_else(adapter_timeout),
             profile_report_path: env::var("RUNTIMEPULSE_PROFILE_REPORT_PATH")
                 .or_else(|_| env::var("RUNTIMEPULSE_PROFILING_REPORT_PATH"))
                 .ok()

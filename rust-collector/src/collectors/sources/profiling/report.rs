@@ -628,6 +628,8 @@ mod tests {
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             cgroup_max_entries: 1,
             image_cache_report_path: None,
+            image_cache_report_command: None,
+            image_cache_report_command_timeout: Duration::from_secs(5),
             profile_report_path: None,
             diagnostic_report_path: None,
             diagnostic_report_command: None,

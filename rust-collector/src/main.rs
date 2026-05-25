@@ -604,6 +604,8 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             "procfs" => plugins.push(Box::new(ProcfsPlugin::new())),
             "image-cache" | "snapshotter-cache" => plugins.push(Box::new(ImageCachePlugin::new(
                 config.image_cache_report_path.clone(),
+                config.image_cache_report_command.clone(),
+                config.image_cache_report_command_timeout,
             ))),
             "profile-report" | "profiles" | "profiling-report" => plugins.push(Box::new(
                 ProfileReportPlugin::new(config.profile_report_path.clone()),

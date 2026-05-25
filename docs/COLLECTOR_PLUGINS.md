@@ -207,7 +207,9 @@ RUNTIMEPULSE_HTTP_PLUGIN_1_URL=http://127.0.0.1:19091/runtimepulse
 ```
 
 `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` sets the default adapter timeout when a
-plugin-specific timeout is not provided.
+plugin-specific timeout is not provided. It is also the default timeout for
+image-cache exporter commands unless `RUNTIMEPULSE_IMAGE_CACHE_REPORT_TIMEOUT_MS`
+is set.
 
 ## Kata, Firecracker, and gVisor Sandbox Reports
 
@@ -282,6 +284,17 @@ measurements.
 ```bash
 RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs,image-cache
 RUNTIMEPULSE_IMAGE_CACHE_REPORT_PATH=/var/lib/runtimepulse/image-cache-report.json
+runtimepulse-collector host-agent
+```
+
+For exporters that should be invoked on each host-agent collection tick, use a
+command hook instead of a file path. The command must write the same lightweight
+JSON/JSONL report to stdout:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=image-cache \
+RUNTIMEPULSE_IMAGE_CACHE_REPORT_CMD='nydus-cache-exporter --runtimepulse-json' \
+RUNTIMEPULSE_IMAGE_CACHE_REPORT_TIMEOUT_MS=5000 \
 runtimepulse-collector host-agent
 ```
 

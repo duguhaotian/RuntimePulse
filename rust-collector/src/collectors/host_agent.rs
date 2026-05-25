@@ -240,7 +240,11 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut firecracker = FirecrackerSandboxPlugin::from_env();
     let mut gvisor = GvisorSandboxPlugin::from_env();
     let mut sandbox_reconcile = SandboxReconcilePlugin::from_env();
-    let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
+    let mut image_cache = ImageCachePlugin::new(
+        config.image_cache_report_path.clone(),
+        config.image_cache_report_command.clone(),
+        config.image_cache_report_command_timeout,
+    );
     let mut diagnostic_report = DiagnosticReportPlugin::new(
         config.diagnostic_report_path.clone(),
         config.diagnostic_report_command.clone(),
@@ -2285,6 +2289,8 @@ mod tests {
             cgroup_root: PathBuf::from("/sys/fs/cgroup"),
             cgroup_max_entries: 200,
             image_cache_report_path: None,
+            image_cache_report_command: None,
+            image_cache_report_command_timeout: Duration::from_secs(5),
             profile_report_path: None,
             diagnostic_report_path: None,
             diagnostic_report_command: None,

@@ -9,10 +9,15 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::collectors::core::config::CollectorConfig;
-use crate::collectors::core::error::Result;
+use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::{EventRecord, MetricSample, PluginOutput, TraceSpan};
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::core::report::image_metric;
@@ -21,6 +26,8 @@ use crate::collectors::sources::image::layer::docker_image_id_from_ref_or_digest
 #[derive(Default)]
 pub struct ImageCachePlugin {
     path: Option<PathBuf>,
+    command: Option<String>,
+    command_timeout: Duration,
     seen_event_ids: HashSet<String>,
 }
 
@@ -94,9 +101,11 @@ struct DownloadStepReport {
 }
 
 impl ImageCachePlugin {
-    pub fn new(path: Option<PathBuf>) -> Self {
+    pub fn new(path: Option<PathBuf>, command: Option<String>, command_timeout: Duration) -> Self {
         Self {
             path,
+            command,
+            command_timeout,
             seen_event_ids: HashSet::new(),
         }
     }
@@ -108,18 +117,27 @@ impl CollectorPlugin for ImageCachePlugin {
     }
 
     fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
-        let Some(path) = self.path.clone() else {
+        let mut reports = Vec::new();
+        let source_detail = if let Some(command) = self.command.clone() {
+            let content = run_image_cache_command(&command, self.command_timeout)?;
+            if !content.trim().is_empty() {
+                reports.extend(parse_reports(&content)?);
+            }
+            Some("command".to_string())
+        } else if let Some(path) = self.path.clone() {
+            let content = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(PluginOutput::default());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            reports.extend(parse_reports(&content)?);
+            Some(path.display().to_string())
+        } else {
             return Ok(PluginOutput::default());
         };
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(PluginOutput::default());
-            }
-            Err(error) => return Err(error.into()),
-        };
 
-        let reports = parse_reports(&content)?;
         let mut output = PluginOutput::default();
         let fallback_timestamp = timestamp(now);
 
@@ -164,7 +182,7 @@ impl CollectorPlugin for ImageCachePlugin {
                 "attributes": {
                     "collector.plugin": "image-cache",
                     "snapshotter": snapshotter,
-                    "snapshotter.reportPath": path.display().to_string(),
+                    "snapshotter.reportSource": source_detail.as_deref().unwrap_or("unknown"),
                     "snapshotter.prefetches": report.prefetches.len(),
                     "snapshotter.layers": report.layers.len(),
                     "snapshotter.layerRequestedBlocks": layer_summary.requested_blocks,
@@ -456,6 +474,66 @@ fn prefetch_metrics(
     .collect()
 }
 
+fn run_image_cache_command(command: &str, timeout: Duration) -> Result<String> {
+    let mut child_command = Command::new("sh");
+    child_command
+        .arg("-lc")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    child_command.process_group(0);
+    let mut child = child_command.spawn()?;
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            if !output.status.success() {
+                return Err(CollectorError::Plugin {
+                    plugin: "image-cache".to_string(),
+                    message: format!(
+                        "image cache command exited with status {:?}: {}",
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                });
+            }
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+
+        if started.elapsed() >= timeout {
+            kill_child_tree(&mut child);
+            let _ = child.wait();
+            return Err(CollectorError::Plugin {
+                plugin: "image-cache".to_string(),
+                message: format!(
+                    "image cache command timed out after {} ms",
+                    timeout.as_millis()
+                ),
+            });
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn kill_child_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-TERM", &group]).status();
+        thread::sleep(Duration::from_millis(50));
+        let _ = Command::new("kill").args(["-KILL", &group]).status();
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    {
+        let _ = child.kill();
+    }
+}
+
 fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -648,4 +726,66 @@ fn sanitize_id(value: &str) -> String {
 
 fn timestamp(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn test_config() -> CollectorConfig {
+        CollectorConfig {
+            ingest_url: "http://localhost:8081/api/ingest/batch".to_string(),
+            node_id: "node-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            interval: Duration::from_secs(5),
+            local_report_addr: "127.0.0.1:9091".to_string(),
+            local_report_url: "http://localhost:9091/api/local/ingest".to_string(),
+            collection_scope: "host".to_string(),
+            once: true,
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            cgroup_max_entries: 100,
+            image_cache_report_path: None,
+            image_cache_report_command: None,
+            image_cache_report_command_timeout: Duration::from_secs(5),
+            profile_report_path: None,
+            diagnostic_report_path: None,
+            diagnostic_report_command: None,
+            diagnostic_report_command_timeout: Duration::from_secs(5),
+            perf_report_path: None,
+            perf_folded_path: None,
+            ebpf_report_path: None,
+            ebpf_folded_path: None,
+            perf_profile_command: None,
+            ebpf_profile_command: None,
+            profile_command_timeout: Duration::from_secs(5),
+            plugins: Vec::new(),
+            command_plugins: Vec::new(),
+            http_plugins: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn command_output_is_normalized_as_image_cache_report() {
+        let command = r#"cat <<'JSON'
+{"timestamp":"2026-05-25T00:00:00.000Z","imageRef":"registry.example/app:v1","snapshotter":"nydus","cache":{"requestedBlocks":10,"hitBlocks":7,"remoteReadBytes":4096,"localReadBytes":8192,"blockSizeBytes":131072},"downloadTimeline":[{"name":"prefetch","phase":"prefetch","durationMs":25,"bytes":1024}]}
+JSON"#;
+        let mut plugin =
+            ImageCachePlugin::new(None, Some(command.to_string()), Duration::from_secs(5));
+        let output = plugin.collect(Utc::now(), &test_config()).unwrap();
+
+        assert_eq!(output.metadata.images.len(), 1);
+        assert_eq!(
+            output.metadata.images[0]["attributes"]["snapshotter.reportSource"],
+            "command"
+        );
+        assert!(output
+            .metrics
+            .iter()
+            .any(|metric| metric.name == "image.lazy.cache_hit_ratio" && metric.value == 0.7));
+        assert!(output
+            .traces
+            .iter()
+            .any(|span| span.span_name == "image.prefetch"));
+    }
 }
