@@ -15,8 +15,8 @@ Development is now collector-first and container-first.
 
 Current execution order has been adjusted for collector-first development:
 
-1. Complete non-Kubernetes P1 collector depth first, with Kata and Firecracker sandbox report collectors ahead of remaining Kubernetes/containerd production depth.
-2. Continue snapshotter/image-cache fidelity, runtime diagnostics, and native profiling adapter depth after Kata/Firecracker. eBPF-specific deepening is explicitly deferred until these sandbox runtime paths are usable.
+1. Complete non-Kubernetes P1 collector depth first, with Kata, Firecracker, and gVisor sandbox report collectors ahead of remaining Kubernetes/containerd production depth.
+2. Continue snapshotter/image-cache fidelity, runtime diagnostics, and native profiling adapter depth after the sandbox runtime report collectors. eBPF-specific deepening is explicitly deferred until these sandbox runtime paths are usable.
 3. Keep Kubernetes/containerd production hardening behind the non-Kubernetes P1 collector work. Existing containerd/Kubernetes paths remain available for validation, but they are not the next implementation focus.
 4. Keep production security, tenancy/RBAC, and full production hardening last until collector data quality and workflows stabilize.
 
@@ -202,7 +202,7 @@ Collector candidates:
 - Firecracker collector. Baseline host-agent/outlet report ingestion is implemented for real Firecracker/jailer exporter JSON/JSONL, including sandbox metadata, microVM sizing/ready metrics, observed events, exit codes, and VM boot spans.
 - eBPF/profile collector. Generic profile artifact report ingestion is implemented with target/stats metadata, profile observation events, profile metric derivation, and perf/eBPF exporter command hooks; eBPF-specific deepening is deferred behind Kata/Firecracker and remaining non-Kubernetes P1 runtime work.
 - Diagnostic artifact collector. Generic diagnostic report ingestion is implemented for support-bundle/log/inspect indexes, including host-agent file and command exporter hooks; Docker, crictl, and native containerd diagnostics exporters are now available; artifact UI workflows plus perf/eBPF folded-stack conversion are available; next work is broader backend-specific profiler depth.
-- gVisor collector. Defer until the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
+- gVisor collector. Baseline host-agent/outlet report ingestion is implemented for real runsc/gVisor exporter JSON/JSONL, including sandbox metadata, runtime syscall/gofer/fault metrics, observed events, and sandbox boot spans.
 
 Collector output should map to the same domain concepts already used by the frontend:
 

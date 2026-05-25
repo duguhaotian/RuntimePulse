@@ -37,6 +37,7 @@ use collectors::sources::runtime::docker::lifecycle::output_from_event as lifecy
 use collectors::sources::runtime::kubelet::{output_from_cri_event, stream_cri_events};
 use collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
 use collectors::sources::sandbox::firecracker::FirecrackerSandboxPlugin;
+use collectors::sources::sandbox::gvisor::GvisorSandboxPlugin;
 use collectors::sources::sandbox::kata::KataSandboxPlugin;
 use collectors::sources::sandbox::manager::run_docker_sandbox_agent;
 use reqwest::blocking::Client;
@@ -617,6 +618,9 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             }
             "firecracker" | "firecracker-report" | "firecracker-sandbox" => {
                 plugins.push(Box::new(FirecrackerSandboxPlugin::from_env()))
+            }
+            "gvisor" | "gvisor-report" | "gvisor-sandbox" | "runsc" => {
+                plugins.push(Box::new(GvisorSandboxPlugin::from_env()))
             }
             "diagnostic-report" | "diagnostics" => {
                 plugins.push(Box::new(DiagnosticReportPlugin::new(

@@ -55,6 +55,7 @@ use crate::collectors::sources::sandbox::cgroupfs::{
     ContainerdSandboxCgroupTarget, DockerSandboxCgroupfsPlugin,
 };
 use crate::collectors::sources::sandbox::firecracker::FirecrackerSandboxPlugin;
+use crate::collectors::sources::sandbox::gvisor::GvisorSandboxPlugin;
 use crate::collectors::sources::sandbox::kata::KataSandboxPlugin;
 use crate::collectors::sources::sandbox::manager::{
     active_docker_ids_snapshot, apply_lifecycle_output, docker_active_ids_from_inventory,
@@ -94,6 +95,7 @@ struct HostAgentSources {
     containerd_sandbox_cgroupfs: bool,
     kata: bool,
     firecracker: bool,
+    gvisor: bool,
     image_cache: bool,
     diagnostic_report: bool,
     profile_report: bool,
@@ -234,6 +236,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut containerd_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut kata = KataSandboxPlugin::from_env();
     let mut firecracker = FirecrackerSandboxPlugin::from_env();
+    let mut gvisor = GvisorSandboxPlugin::from_env();
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
     let mut diagnostic_report = DiagnosticReportPlugin::new(
         config.diagnostic_report_path.clone(),
@@ -277,6 +280,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut containerd_cgroupfs,
             &mut kata,
             &mut firecracker,
+            &mut gvisor,
             &mut image_cache,
             &mut diagnostic_report,
             &mut profile_report,
@@ -342,6 +346,7 @@ fn collect_periodic(
     containerd_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     kata: &mut KataSandboxPlugin,
     firecracker: &mut FirecrackerSandboxPlugin,
+    gvisor: &mut GvisorSandboxPlugin,
     image_cache: &mut ImageCachePlugin,
     diagnostic_report: &mut DiagnosticReportPlugin,
     profile_report: &mut ProfileReportPlugin,
@@ -408,6 +413,9 @@ fn collect_periodic(
         collect_source("host-firecracker", tx, stats, || {
             firecracker.collect(now, config)
         });
+    }
+    if sources.gvisor {
+        collect_source("host-gvisor", tx, stats, || gvisor.collect(now, config));
     }
     if sources.image_cache {
         collect_source("host-image-cache", tx, stats, || {
@@ -2040,6 +2048,7 @@ impl HostAgentSources {
             containerd_sandbox_cgroupfs: false,
             kata: false,
             firecracker: false,
+            gvisor: false,
             image_cache: false,
             diagnostic_report: false,
             profile_report: false,
@@ -2087,6 +2096,9 @@ impl HostAgentSources {
                 | "firecracker-sandbox"
                 | "host-firecracker-report" => {
                     sources.firecracker = true;
+                }
+                "gvisor" | "host-gvisor" | "gvisor-report" | "gvisor-sandbox" | "runsc" => {
+                    sources.gvisor = true;
                 }
                 "image-cache" | "host-image-cache" | "snapshotter-cache" => {
                     sources.image_cache = true;
@@ -2166,6 +2178,9 @@ impl HostAgentSources {
         }
         if self.firecracker {
             names.push("firecracker");
+        }
+        if self.gvisor {
+            names.push("gvisor");
         }
         if self.image_cache {
             names.push("image-cache");
@@ -2369,6 +2384,7 @@ mod tests {
             containerd_sandbox_cgroupfs: true,
             kata: false,
             firecracker: false,
+            gvisor: false,
             image_cache: false,
             diagnostic_report: false,
             profile_report: false,

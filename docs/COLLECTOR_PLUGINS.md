@@ -39,6 +39,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-image-cache`: runs on the host, reads a RuntimePulse JSON/JSONL report emitted by a real snapshotter or image-cache exporter, and reports lazy block-cache metrics plus precise image stage spans.
 - `host-kata`: runs on the host, reads a real Kata exporter JSON/JSONL report from `RUNTIMEPULSE_KATA_REPORT_PATH`, and reports Kata sandbox metadata, VM sizing metrics, observed events, and VM boot spans.
 - `host-firecracker`: runs on the host, reads a real Firecracker/jailer exporter JSON/JSONL report from `RUNTIMEPULSE_FIRECRACKER_REPORT_PATH`, and reports microVM metadata, sizing/ready metrics, observed events, exit codes, and VM boot spans.
+- `host-gvisor`: runs on the host, reads a real runsc/gVisor exporter JSON/JSONL report from `RUNTIMEPULSE_GVISOR_REPORT_PATH`, and reports gVisor sandbox metadata, syscall/gofer/fault metrics, observed events, and sandbox boot spans.
 - `host-diagnostic-report`: runs on the host, reads runtime diagnostic bundle indexes and emits diagnostic events, issue metrics, and capture spans while keeping raw bundles in external storage.
 - `host-perf`: runs on the host, reads a perf profile artifact report or executes a configured perf exporter command that writes RuntimePulse-compatible JSON to stdout.
 - `host-ebpf`: runs on the host, reads an eBPF profile artifact report or executes a configured eBPF exporter command that writes RuntimePulse-compatible JSON to stdout.
@@ -207,14 +208,15 @@ RUNTIMEPULSE_HTTP_PLUGIN_1_URL=http://127.0.0.1:19091/runtimepulse
 `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` sets the default adapter timeout when a
 plugin-specific timeout is not provided.
 
-## Kata and Firecracker Sandbox Reports
+## Kata, Firecracker, and gVisor Sandbox Reports
 
-Use `kata`/`host-kata` and `firecracker`/`host-firecracker` when a real runtime-side exporter can write observed VM state to JSON or JSONL. RuntimePulse does not invent VM state; if the report path is unset or missing, these collectors emit no data.
+Use `kata`/`host-kata`, `firecracker`/`host-firecracker`, and `gvisor`/`host-gvisor` when a real runtime-side exporter can write observed VM or sandbox state to JSON or JSONL. RuntimePulse does not invent runtime state; if the report path is unset or missing, these collectors emit no data.
 
 ```bash
-RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,kata,firecracker \
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,kata,firecracker,gvisor \
 RUNTIMEPULSE_KATA_REPORT_PATH=/var/lib/runtimepulse/kata-report.jsonl \
 RUNTIMEPULSE_FIRECRACKER_REPORT_PATH=/var/lib/runtimepulse/firecracker-report.jsonl \
+RUNTIMEPULSE_GVISOR_REPORT_PATH=/var/lib/runtimepulse/gvisor-report.jsonl \
 runtimepulse-collector host-agent
 ```
 
@@ -241,7 +243,7 @@ A lightweight report can be an object with a `sandboxes` array, a JSON array of 
 }
 ```
 
-Firecracker rows accept the same common fields plus `machineId`, `jailerPid`, `apiSocket`, `guestReadyMs`, `exitCode`, and `reason`. The collectors also accept full RuntimePulse partial ingest JSON, so a richer exporter can bypass lightweight normalization while still using the same host-agent queue/spool/outlet path.
+Firecracker rows accept the same common fields plus `machineId`, `jailerPid`, `apiSocket`, `guestReadyMs`, `exitCode`, and `reason`. gVisor rows accept common fields plus `platform`, `sandboxPid`, `goferPid`, `sentryPid`, `bootTimeMs`, `syscallCount`, `syscallLatencyMs`, `goferIoBytes`, and `faults`. The collectors also accept full RuntimePulse partial ingest JSON, so a richer exporter can bypass lightweight normalization while still using the same host-agent queue/spool/outlet path.
 
 ## Image Cache and Snapshotter Reports
 
