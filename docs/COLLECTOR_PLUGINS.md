@@ -305,7 +305,7 @@ RUNTIMEPULSE_IMAGE_CACHE_REPORT_TIMEOUT_MS=5000 \
 runtimepulse-collector host-agent
 ```
 
-The file or command output can be RuntimePulse JSON, common snapshotter state/index JSON, JSONL, or a
+The file or command output can be RuntimePulse JSON, common snapshotter state/index JSON, RuntimePulse or common-state JSONL, or a
 Prometheus text exposition from a snapshotter/cache exporter. JSON fields may use
 either RuntimePulse camelCase names or common exporter-style snake_case aliases
 such as `image_ref`, `requested_blocks`, `hit_blocks`, `duration_ms`, and

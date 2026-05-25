@@ -581,9 +581,9 @@ fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
                 return Ok(vec![report]);
             }
         }
-        return Ok(parse_snapshotter_state_value(serde_json::from_str(
-            trimmed,
-        )?));
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            return Ok(parse_snapshotter_state_value(value));
+        }
     }
     if looks_like_prometheus_text(trimmed) {
         return Ok(parse_prometheus_reports(trimmed));
@@ -595,7 +595,20 @@ fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
-        reports.push(serde_json::from_str(line)?);
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            let parsed = parse_snapshotter_state_value(value);
+            if !parsed.is_empty() {
+                reports.extend(parsed);
+                continue;
+            }
+        }
+        if let Ok(report) = serde_json::from_str::<SnapshotterReport>(line) {
+            if snapshotter_report_has_payload(&report) {
+                reports.push(report);
+                continue;
+            }
+        }
+        reports.extend(parse_snapshotter_state_value(serde_json::from_str(line)?));
     }
     Ok(reports)
 }
@@ -1831,6 +1844,24 @@ JSON"#;
             10.0
         );
     }
+
+    #[test]
+    fn parses_snapshotter_state_jsonl() {
+        let content = r#"{"snapshotter":"nydus","name":"registry.example/jsonl-a:v1","digest":"sha256:jsonl-a","blockCache":{"requests":10,"hits":8},"stages":[{"stage":"mount","durationMs":3}]}
+{"snapshotter":"stargz","name":"registry.example/jsonl-b:v1","digest":"sha256:jsonl-b","cache":{"requestedBlocks":20,"hitBlocks":15},"prefetch":[{"name":"hot","requests":5,"hits":4}]}"#;
+
+        let reports = parse_reports(content).unwrap();
+
+        assert_eq!(reports.len(), 2);
+        assert_eq!(
+            reports[0].image_ref.as_deref(),
+            Some("registry.example/jsonl-a:v1")
+        );
+        assert_eq!(reports[0].cache.as_ref().unwrap().hit_blocks, Some(8));
+        assert_eq!(reports[1].snapshotter.as_deref(), Some("stargz"));
+        assert_eq!(reports[1].prefetches[0].requested_blocks, Some(5));
+    }
+
     #[test]
     fn parses_prometheus_snapshotter_metrics() {
         let content = r#"
