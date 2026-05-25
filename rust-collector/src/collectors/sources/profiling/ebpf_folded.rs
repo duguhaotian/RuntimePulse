@@ -14,8 +14,8 @@ use crate::collectors::core::error::Result;
 use crate::collectors::core::model::PluginOutput;
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::sources::profiling::perf_folded::{
-    file_uri, flamegraph_from_folded_stacks, parse_folded_target, perf_folded_duration_ms,
-    sanitize_id, timestamp, FoldedProfileTarget,
+    file_uri, flamegraph_from_folded_stacks, is_missing_folded_path, parse_folded_target,
+    perf_folded_duration_ms, read_folded_target, sanitize_id, timestamp, FoldedProfileTarget,
 };
 use crate::collectors::sources::profiling::report::{
     merge_profile_output, profile_output_from_content_with_plugin,
@@ -64,10 +64,10 @@ fn collect_ebpf_folded_profiles_with_path(
 ) -> Result<PluginOutput> {
     let mut output = PluginOutput::default();
     for target in ebpf_folded_targets(fallback_path) {
-        let folded = match fs::read_to_string(&target.folded_path) {
+        let folded = match read_folded_target(&target) {
             Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) if is_missing_folded_path(&error) => continue,
+            Err(error) => return Err(error),
         };
         if folded.trim().is_empty() {
             continue;
@@ -97,7 +97,8 @@ fn lightweight_ebpf_report_from_folded(
     let artifact_path = output_dir.join(
         target
             .folded_path
-            .file_name()
+            .as_ref()
+            .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
             .unwrap_or("ebpf.folded"),
     );
@@ -141,6 +142,7 @@ fn lightweight_ebpf_report_from_folded(
             },
             "attributes": {
                 "profile.sourcePath": target.folded_path,
+                "profile.command": target.command,
                 "profile.folded": true,
                 "profile.backend": "ebpf",
             }
@@ -160,18 +162,23 @@ fn ebpf_folded_targets(fallback_path: Option<PathBuf>) -> Vec<FoldedProfileTarge
         }
     }
 
-    let Some(path) = fallback_path.or_else(|| {
+    let path = fallback_path.or_else(|| {
         env::var("RUNTIMEPULSE_EBPF_FOLDED_PATH")
             .ok()
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)
-    }) else {
+    });
+    let command = env::var("RUNTIMEPULSE_EBPF_FOLDED_CMD")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if path.is_none() && command.is_none() {
         return Vec::new();
-    };
+    }
     vec![FoldedProfileTarget {
         sandbox_id: env::var("RUNTIMEPULSE_EBPF_FOLDED_SANDBOX_ID")
             .unwrap_or_else(|_| "host-ebpf-folded".to_string()),
         folded_path: path,
+        command,
         object_uri: env::var("RUNTIMEPULSE_EBPF_FOLDED_OBJECT_URI").unwrap_or_default(),
         profile_type: env::var("RUNTIMEPULSE_EBPF_FOLDED_PROFILE_TYPE")
             .unwrap_or_else(|_| "off_cpu".to_string()),
@@ -250,7 +257,8 @@ mod tests {
     fn converts_ebpf_folded_to_off_cpu_profile() {
         let target = FoldedProfileTarget {
             sandbox_id: "sandbox-a".to_string(),
-            folded_path: PathBuf::from("/tmp/ebpf.folded"),
+            folded_path: Some(PathBuf::from("/tmp/ebpf.folded")),
+            command: None,
             object_uri: "file:///tmp/ebpf.folded".to_string(),
             profile_type: "off_cpu".to_string(),
             process_role: "runtime".to_string(),

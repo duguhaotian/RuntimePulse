@@ -528,12 +528,14 @@ or an equivalent exporter. Useful settings:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `RUNTIMEPULSE_PERF_FOLDED_PATH` | unset | Single folded stack file to convert. |
+| `RUNTIMEPULSE_PERF_FOLDED_CMD` | unset | Command that prints folded stacks to stdout. |
+| `RUNTIMEPULSE_PERF_FOLDED_TIMEOUT_MS` | `3000` | Timeout for `RUNTIMEPULSE_PERF_FOLDED_CMD`. |
 | `RUNTIMEPULSE_PERF_FOLDED_SANDBOX_ID` | `host-perf-folded` | Sandbox id for the single-file mode. |
 | `RUNTIMEPULSE_PERF_FOLDED_OBJECT_URI` | generated `file://` URI | Optional URI for the raw folded stack artifact. |
 | `RUNTIMEPULSE_PERF_FOLDED_PROFILE_TYPE` | `cpu` | Profile type, for example `cpu` or `off_cpu`. |
 | `RUNTIMEPULSE_PERF_FOLDED_PROCESS_ROLE` | `app` | Process role attached to the profile artifact. |
 | `RUNTIMEPULSE_PERF_FOLDED_DURATION_MS` | `0` | Capture window used to derive sample rate. |
-| `RUNTIMEPULSE_PERF_FOLDED_TARGETS` | unset | Semicolon-separated multi-target specs such as `sandbox=s1,path=/tmp/a.folded,role=runtime`. |
+| `RUNTIMEPULSE_PERF_FOLDED_TARGETS` | unset | Semicolon-separated multi-target specs such as `sandbox=s1,path=/tmp/a.folded,role=runtime` or `sandbox=s1,command=profiler-export-folded`. |
 | `RUNTIMEPULSE_PERF_FOLDED_OUTPUT_DIR` | `/tmp/runtimepulse/profiles/perf-folded` | Directory for copied folded stack artifacts when no object URI is supplied. |
 
 Native host-agent source mode:
@@ -556,7 +558,7 @@ RUNTIMEPULSE_EBPF_FOLDED_SANDBOX_ID=docker-0123456789ab
 runtimepulse-collector host-agent
 ```
 
-Additional eBPF folded settings mirror the perf names with `RUNTIMEPULSE_EBPF_FOLDED_*`, including `TARGETS`, `OBJECT_URI`, `PROFILE_TYPE`, `PROCESS_ROLE`, `DURATION_MS`, and `OUTPUT_DIR`.
+Additional eBPF folded settings mirror the perf names with `RUNTIMEPULSE_EBPF_FOLDED_*`, including `TARGETS`, `CMD`, `TIMEOUT_MS`, `OBJECT_URI`, `PROFILE_TYPE`, `PROCESS_ROLE`, `DURATION_MS`, and `OUTPUT_DIR`.
 
 It can also be used through the existing perf command hook because `perf-folded`
 prints a RuntimePulse-compatible `PluginOutput`:

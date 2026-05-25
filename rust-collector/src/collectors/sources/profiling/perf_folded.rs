@@ -10,10 +10,15 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::collectors::core::config::CollectorConfig;
-use crate::collectors::core::error::Result;
+use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::PluginOutput;
 use crate::collectors::core::plugin::CollectorPlugin;
 use crate::collectors::sources::profiling::report::{
@@ -31,7 +36,8 @@ struct FlameNode {
 #[derive(Debug)]
 pub struct FoldedProfileTarget {
     pub sandbox_id: String,
-    pub folded_path: PathBuf,
+    pub folded_path: Option<PathBuf>,
+    pub command: Option<String>,
     pub object_uri: String,
     pub profile_type: String,
     pub process_role: String,
@@ -70,7 +76,7 @@ pub fn collect_perf_folded_profiles(
     collect_perf_folded_profiles_with_path(now, config, config.perf_folded_path.clone())
 }
 
-pub fn collect_perf_folded_profiles_with_path(
+fn collect_perf_folded_profiles_with_path(
     now: DateTime<Utc>,
     config: &CollectorConfig,
     fallback_path: Option<PathBuf>,
@@ -79,10 +85,10 @@ pub fn collect_perf_folded_profiles_with_path(
     let targets = perf_folded_targets(fallback_path);
 
     for target in targets {
-        let folded = match fs::read_to_string(&target.folded_path) {
+        let folded = match read_folded_target(&target) {
             Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
+            Err(error) if is_missing_folded_path(&error) => continue,
+            Err(error) => return Err(error),
         };
         if folded.trim().is_empty() {
             continue;
@@ -113,7 +119,8 @@ pub fn lightweight_report_from_folded(
     let artifact_path = output_dir.join(
         target
             .folded_path
-            .file_name()
+            .as_ref()
+            .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
             .unwrap_or("perf.folded"),
     );
@@ -157,6 +164,7 @@ pub fn lightweight_report_from_folded(
             },
             "attributes": {
                 "profile.sourcePath": target.folded_path,
+                "profile.command": target.command,
                 "profile.folded": true,
             }
         }]
@@ -175,18 +183,16 @@ fn perf_folded_targets(fallback_path: Option<PathBuf>) -> Vec<FoldedProfileTarge
         }
     }
 
-    let Some(path) = fallback_path.or_else(|| {
-        env::var("RUNTIMEPULSE_PERF_FOLDED_PATH")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-    }) else {
+    let path = fallback_path.or_else(|| env_path("RUNTIMEPULSE_PERF_FOLDED_PATH"));
+    let command = env_string("RUNTIMEPULSE_PERF_FOLDED_CMD");
+    if path.is_none() && command.is_none() {
         return Vec::new();
-    };
+    }
     vec![FoldedProfileTarget {
         sandbox_id: env::var("RUNTIMEPULSE_PERF_FOLDED_SANDBOX_ID")
             .unwrap_or_else(|_| "host-perf-folded".to_string()),
         folded_path: path,
+        command,
         object_uri: env::var("RUNTIMEPULSE_PERF_FOLDED_OBJECT_URI").unwrap_or_default(),
         profile_type: env::var("RUNTIMEPULSE_PERF_FOLDED_PROFILE_TYPE")
             .unwrap_or_else(|_| "cpu".to_string()),
@@ -201,6 +207,7 @@ pub fn parse_folded_target(value: &str) -> Option<FoldedProfileTarget> {
     let mut object_uri = String::new();
     let mut profile_type = "cpu".to_string();
     let mut process_role = "app".to_string();
+    let mut command = None;
 
     for part in value
         .split(',')
@@ -213,6 +220,7 @@ pub fn parse_folded_target(value: &str) -> Option<FoldedProfileTarget> {
         match key.trim() {
             "sandbox" | "sandboxId" => sandbox_id = Some(raw_value.trim().to_string()),
             "path" | "foldedPath" => path = Some(PathBuf::from(raw_value.trim())),
+            "command" | "cmd" => command = Some(raw_value.trim().to_string()),
             "objectUri" | "uri" => object_uri = raw_value.trim().to_string(),
             "profileType" | "type" => profile_type = raw_value.trim().to_string(),
             "processRole" | "role" => process_role = raw_value.trim().to_string(),
@@ -220,13 +228,93 @@ pub fn parse_folded_target(value: &str) -> Option<FoldedProfileTarget> {
         }
     }
 
+    if path.is_none() && command.is_none() {
+        return None;
+    }
+
     Some(FoldedProfileTarget {
         sandbox_id: sandbox_id?,
-        folded_path: path?,
+        folded_path: path,
+        command,
         object_uri,
         profile_type,
         process_role,
     })
+}
+
+pub fn read_folded_target(target: &FoldedProfileTarget) -> Result<String> {
+    if let Some(command) = &target.command {
+        return run_folded_command(command, perf_folded_command_timeout());
+    }
+
+    let Some(path) = &target.folded_path else {
+        return Ok(String::new());
+    };
+    fs::read_to_string(path).map_err(Into::into)
+}
+
+pub fn is_missing_folded_path(error: &CollectorError) -> bool {
+    matches!(error, CollectorError::Io(io_error) if io_error.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn run_folded_command(command: &str, timeout: Duration) -> Result<String> {
+    let mut child_command = Command::new("sh");
+    child_command
+        .arg("-lc")
+        .arg(command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    child_command.process_group(0);
+    let mut child = child_command.spawn()?;
+
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            let output = child.wait_with_output()?;
+            if !output.status.success() {
+                return Err(CollectorError::Plugin {
+                    plugin: "perf-folded".to_string(),
+                    message: format!(
+                        "perf folded command exited with status {:?}: {}",
+                        output.status.code(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                });
+            }
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+
+        if started.elapsed() >= timeout {
+            kill_child_tree(&mut child);
+            let _ = child.wait();
+            return Err(CollectorError::Plugin {
+                plugin: "perf-folded".to_string(),
+                message: format!(
+                    "perf folded command timed out after {} ms",
+                    timeout.as_millis()
+                ),
+            });
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn kill_child_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = format!("-{}", child.id());
+        let _ = Command::new("kill").args(["-TERM", &group]).status();
+        thread::sleep(Duration::from_millis(50));
+        let _ = Command::new("kill").args(["-KILL", &group]).status();
+        return;
+    }
+
+    #[allow(unreachable_code)]
+    {
+        let _ = child.kill();
+    }
 }
 
 pub fn flamegraph_from_folded_stacks(content: &str) -> (u64, Value) {
@@ -285,6 +373,25 @@ fn flame_node_to_json(name: &str, node: &FlameNode) -> Value {
         );
     }
     Value::Object(object)
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+fn env_string(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn perf_folded_command_timeout() -> Duration {
+    env::var("RUNTIMEPULSE_PERF_FOLDED_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(3000))
 }
 
 fn perf_folded_output_dir() -> PathBuf {
@@ -386,7 +493,8 @@ mod tests {
     fn converts_folded_stacks_to_profile_output() {
         let target = FoldedProfileTarget {
             sandbox_id: "sandbox-a".to_string(),
-            folded_path: PathBuf::from("/tmp/runtimepulse-test.folded"),
+            folded_path: Some(PathBuf::from("/tmp/runtimepulse-test.folded")),
+            command: None,
             object_uri: "file:///tmp/runtimepulse-test.folded".to_string(),
             profile_type: "cpu".to_string(),
             process_role: "runtime".to_string(),
@@ -418,5 +526,17 @@ mod tests {
             .iter()
             .any(|metric| metric.name == "profile.samples_total" && metric.value == 10.0));
         assert_eq!(output.events[0].event_name, "profile.cpu.observed");
+    }
+    #[test]
+    fn parses_folded_command_target() {
+        let target = parse_folded_target(
+            "sandbox=sandbox-a,command=printf 'main;work 3',type=cpu,role=app,uri=file:///tmp/generated.folded",
+        )
+        .unwrap();
+
+        assert_eq!(target.sandbox_id, "sandbox-a");
+        assert!(target.folded_path.is_none());
+        assert_eq!(target.command.as_deref(), Some("printf 'main;work 3'"));
+        assert_eq!(target.object_uri, "file:///tmp/generated.folded");
     }
 }
