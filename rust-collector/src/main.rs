@@ -36,6 +36,8 @@ use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
 use collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
 use collectors::sources::runtime::kubelet::{output_from_cri_event, stream_cri_events};
 use collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
+use collectors::sources::sandbox::firecracker::FirecrackerSandboxPlugin;
+use collectors::sources::sandbox::kata::KataSandboxPlugin;
 use collectors::sources::sandbox::manager::run_docker_sandbox_agent;
 use reqwest::blocking::Client;
 use serde_json::json;
@@ -610,6 +612,12 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
             "ebpf-folded" | "ebpf-folded-report" | "off-cpu-folded" => plugins.push(Box::new(
                 EbpfFoldedProfilePlugin::new(config.ebpf_folded_path.clone()),
             )),
+            "kata" | "kata-report" | "kata-sandbox" => {
+                plugins.push(Box::new(KataSandboxPlugin::from_env()))
+            }
+            "firecracker" | "firecracker-report" | "firecracker-sandbox" => {
+                plugins.push(Box::new(FirecrackerSandboxPlugin::from_env()))
+            }
             "diagnostic-report" | "diagnostics" => {
                 plugins.push(Box::new(DiagnosticReportPlugin::new(
                     config.diagnostic_report_path.clone(),

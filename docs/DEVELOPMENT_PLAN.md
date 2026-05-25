@@ -15,9 +15,10 @@ Development is now collector-first and container-first.
 
 Current execution order has been adjusted for collector-first development:
 
-1. Complete non-Kubernetes P1 collector depth first: snapshotter/image-cache report fidelity, native profiling adapters, and runtime diagnostic artifacts. Profile adapters now include host-agent file ingestion, perf/eBPF exporter command hooks, and native perf and eBPF folded-stack host-agent sources/converters; continue deepening backend-specific collectors as real tooling is selected.
-2. Keep Kubernetes/containerd production hardening behind the non-Kubernetes P1 collector work. Existing containerd/Kubernetes paths remain available for validation, but they are not the next implementation focus.
-3. Keep production security, tenancy/RBAC, and full production hardening last until collector data quality and workflows stabilize.
+1. Complete non-Kubernetes P1 collector depth first, with Kata and Firecracker sandbox report collectors ahead of remaining Kubernetes/containerd production depth.
+2. Continue snapshotter/image-cache fidelity, runtime diagnostics, and native profiling adapter depth after Kata/Firecracker. eBPF-specific deepening is explicitly deferred until these sandbox runtime paths are usable.
+3. Keep Kubernetes/containerd production hardening behind the non-Kubernetes P1 collector work. Existing containerd/Kubernetes paths remain available for validation, but they are not the next implementation focus.
+4. Keep production security, tenancy/RBAC, and full production hardening last until collector data quality and workflows stabilize.
 
 ## Phase 1: Frontend Prototype
 
@@ -197,9 +198,9 @@ Collector candidates:
 - Docker event collector. Docker container lifecycle, Docker image event dispatch, and Docker startup trace spans are implemented and kept as the single-node/local validation path.
 - Lifecycle-triggered sandbox cgroup collector that starts sampling only after a sandbox/container `started` event and stops sampling after the matching `stopped` event. Docker startup reconciliation, active-set management, periodic cgroup sampling, lifecycle event streaming, and stopped-container cleanup are integrated into `host-agent`. Containerd/Kubernetes task-driven sampling is now available as `containerd-sandbox-cgroupfs`, using task event PIDs to resolve exact cgroup paths without broad scanning.
 - image metadata and cache collector. Docker image metadata/layer breakdown and containerd content-store image enrichment are implemented; Docker image pull/tag/delete and containerd content/snapshot timeline observations come from runtime event dispatch; precise pull sub-stage durations and lazy block-cache hit curves are ingested from real snapshotter/exporter JSON reports through `image-cache`. Snapshotter reports now also accept layer-level cache counters and prefetch records, deriving aggregate lazy-layer and prefetch metrics plus image timeline spans.
-- Kata collector.
-- Firecracker collector.
-- eBPF/profile collector. Generic profile artifact report ingestion is implemented with target/stats metadata, profile observation events, profile metric derivation, and perf/eBPF exporter command hooks; backend-specific native capture can be deepened when real tooling is selected.
+- Kata collector. Baseline host-agent/outlet report ingestion is implemented for real Kata exporter JSON/JSONL, including sandbox metadata, VM sizing metrics, observed events, and VM boot spans.
+- Firecracker collector. Baseline host-agent/outlet report ingestion is implemented for real Firecracker/jailer exporter JSON/JSONL, including sandbox metadata, microVM sizing/ready metrics, observed events, exit codes, and VM boot spans.
+- eBPF/profile collector. Generic profile artifact report ingestion is implemented with target/stats metadata, profile observation events, profile metric derivation, and perf/eBPF exporter command hooks; eBPF-specific deepening is deferred behind Kata/Firecracker and remaining non-Kubernetes P1 runtime work.
 - Diagnostic artifact collector. Generic diagnostic report ingestion is implemented for support-bundle/log/inspect indexes, including host-agent file and command exporter hooks; Docker, crictl, and native containerd diagnostics exporters are now available; artifact UI workflows plus perf/eBPF folded-stack conversion are available; next work is broader backend-specific profiler depth.
 - gVisor collector. Defer until the common containerd/Kubernetes, Kata, Firecracker, and profiling paths are usable.
 

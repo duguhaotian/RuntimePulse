@@ -37,6 +37,8 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet for single-node Docker scenarios.
 - `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, network, and process metrics without scanning the whole cgroup tree.
 - `host-image-cache`: runs on the host, reads a RuntimePulse JSON/JSONL report emitted by a real snapshotter or image-cache exporter, and reports lazy block-cache metrics plus precise image stage spans.
+- `host-kata`: runs on the host, reads a real Kata exporter JSON/JSONL report from `RUNTIMEPULSE_KATA_REPORT_PATH`, and reports Kata sandbox metadata, VM sizing metrics, observed events, and VM boot spans.
+- `host-firecracker`: runs on the host, reads a real Firecracker/jailer exporter JSON/JSONL report from `RUNTIMEPULSE_FIRECRACKER_REPORT_PATH`, and reports microVM metadata, sizing/ready metrics, observed events, exit codes, and VM boot spans.
 - `host-diagnostic-report`: runs on the host, reads runtime diagnostic bundle indexes and emits diagnostic events, issue metrics, and capture spans while keeping raw bundles in external storage.
 - `host-perf`: runs on the host, reads a perf profile artifact report or executes a configured perf exporter command that writes RuntimePulse-compatible JSON to stdout.
 - `host-ebpf`: runs on the host, reads an eBPF profile artifact report or executes a configured eBPF exporter command that writes RuntimePulse-compatible JSON to stdout.
@@ -204,6 +206,42 @@ RUNTIMEPULSE_HTTP_PLUGIN_1_URL=http://127.0.0.1:19091/runtimepulse
 
 `RUNTIMEPULSE_ADAPTER_TIMEOUT_MS` sets the default adapter timeout when a
 plugin-specific timeout is not provided.
+
+## Kata and Firecracker Sandbox Reports
+
+Use `kata`/`host-kata` and `firecracker`/`host-firecracker` when a real runtime-side exporter can write observed VM state to JSON or JSONL. RuntimePulse does not invent VM state; if the report path is unset or missing, these collectors emit no data.
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,kata,firecracker \
+RUNTIMEPULSE_KATA_REPORT_PATH=/var/lib/runtimepulse/kata-report.jsonl \
+RUNTIMEPULSE_FIRECRACKER_REPORT_PATH=/var/lib/runtimepulse/firecracker-report.jsonl \
+runtimepulse-collector host-agent
+```
+
+A lightweight report can be an object with a `sandboxes` array, a JSON array of sandbox rows, or JSONL rows. Example Kata row:
+
+```json
+{
+  "timestamp": "2026-05-25T00:00:00.000Z",
+  "sandboxes": [
+    {
+      "id": "kata-demo",
+      "workloadName": "demo/app",
+      "namespace": "default",
+      "imageRef": "registry.example/demo:v1",
+      "status": "running",
+      "runtimeVersion": "kata-3.3.0",
+      "vmId": "vm-1",
+      "hypervisor": "qemu",
+      "vcpus": 2,
+      "memoryBytes": 536870912,
+      "bootTimeMs": 1234
+    }
+  ]
+}
+```
+
+Firecracker rows accept the same common fields plus `machineId`, `jailerPid`, `apiSocket`, `guestReadyMs`, `exitCode`, and `reason`. The collectors also accept full RuntimePulse partial ingest JSON, so a richer exporter can bypass lightweight normalization while still using the same host-agent queue/spool/outlet path.
 
 ## Image Cache and Snapshotter Reports
 

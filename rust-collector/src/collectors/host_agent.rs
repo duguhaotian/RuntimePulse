@@ -54,6 +54,8 @@ use crate::collectors::sources::runtime::kubelet::{
 use crate::collectors::sources::sandbox::cgroupfs::{
     ContainerdSandboxCgroupTarget, DockerSandboxCgroupfsPlugin,
 };
+use crate::collectors::sources::sandbox::firecracker::FirecrackerSandboxPlugin;
+use crate::collectors::sources::sandbox::kata::KataSandboxPlugin;
 use crate::collectors::sources::sandbox::manager::{
     active_docker_ids_snapshot, apply_lifecycle_output, docker_active_ids_from_inventory,
     ActiveDockerIds,
@@ -90,6 +92,8 @@ struct HostAgentSources {
     kubernetes_metrics: bool,
     docker_sandbox_cgroupfs: bool,
     containerd_sandbox_cgroupfs: bool,
+    kata: bool,
+    firecracker: bool,
     image_cache: bool,
     diagnostic_report: bool,
     profile_report: bool,
@@ -228,6 +232,8 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let mut cgroupfs = CgroupfsPlugin::new(config.cgroup_root.clone(), config.cgroup_max_entries);
     let mut docker_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
     let mut containerd_cgroupfs = DockerSandboxCgroupfsPlugin::new(config.cgroup_root.clone());
+    let mut kata = KataSandboxPlugin::from_env();
+    let mut firecracker = FirecrackerSandboxPlugin::from_env();
     let mut image_cache = ImageCachePlugin::new(config.image_cache_report_path.clone());
     let mut diagnostic_report = DiagnosticReportPlugin::new(
         config.diagnostic_report_path.clone(),
@@ -269,6 +275,8 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut cgroupfs,
             &mut docker_cgroupfs,
             &mut containerd_cgroupfs,
+            &mut kata,
+            &mut firecracker,
             &mut image_cache,
             &mut diagnostic_report,
             &mut profile_report,
@@ -332,6 +340,8 @@ fn collect_periodic(
     cgroupfs: &mut CgroupfsPlugin,
     docker_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
     containerd_cgroupfs: &mut DockerSandboxCgroupfsPlugin,
+    kata: &mut KataSandboxPlugin,
+    firecracker: &mut FirecrackerSandboxPlugin,
     image_cache: &mut ImageCachePlugin,
     diagnostic_report: &mut DiagnosticReportPlugin,
     profile_report: &mut ProfileReportPlugin,
@@ -389,6 +399,14 @@ fn collect_periodic(
                 .transpose()?
                 .unwrap_or_default();
             containerd_cgroupfs.collect_for_containerd_targets(now, config, &targets)
+        });
+    }
+    if sources.kata {
+        collect_source("host-kata", tx, stats, || kata.collect(now, config));
+    }
+    if sources.firecracker {
+        collect_source("host-firecracker", tx, stats, || {
+            firecracker.collect(now, config)
         });
     }
     if sources.image_cache {
@@ -2020,6 +2038,8 @@ impl HostAgentSources {
             kubernetes_metrics: false,
             docker_sandbox_cgroupfs: false,
             containerd_sandbox_cgroupfs: false,
+            kata: false,
+            firecracker: false,
             image_cache: false,
             diagnostic_report: false,
             profile_report: false,
@@ -2057,6 +2077,16 @@ impl HostAgentSources {
                 "containerd-sandbox-cgroupfs" | "host-containerd-cgroupfs" => {
                     sources.containerd_sandbox_cgroupfs = true;
                     sources.containerd_events = true;
+                }
+                "kata" | "host-kata" | "kata-report" | "kata-sandbox" | "host-kata-report" => {
+                    sources.kata = true;
+                }
+                "firecracker"
+                | "host-firecracker"
+                | "firecracker-report"
+                | "firecracker-sandbox"
+                | "host-firecracker-report" => {
+                    sources.firecracker = true;
                 }
                 "image-cache" | "host-image-cache" | "snapshotter-cache" => {
                     sources.image_cache = true;
@@ -2130,6 +2160,12 @@ impl HostAgentSources {
         }
         if self.containerd_sandbox_cgroupfs {
             names.push("containerd-sandbox-cgroupfs");
+        }
+        if self.kata {
+            names.push("kata");
+        }
+        if self.firecracker {
+            names.push("firecracker");
         }
         if self.image_cache {
             names.push("image-cache");
@@ -2331,6 +2367,8 @@ mod tests {
             kubernetes_metrics: false,
             docker_sandbox_cgroupfs: true,
             containerd_sandbox_cgroupfs: true,
+            kata: false,
+            firecracker: false,
             image_cache: false,
             diagnostic_report: false,
             profile_report: false,
