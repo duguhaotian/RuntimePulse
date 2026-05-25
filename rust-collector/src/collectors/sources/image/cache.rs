@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -115,7 +115,9 @@ struct PrefetchReport {
 #[serde(rename_all = "camelCase")]
 struct DownloadStepReport {
     id: Option<String>,
+    #[serde(default)]
     name: String,
+    #[serde(default)]
     phase: String,
     #[serde(alias = "duration_ms", alias = "duration", default)]
     duration_ms: f64,
@@ -569,6 +571,9 @@ fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
     if trimmed.starts_with('{') {
         return Ok(vec![serde_json::from_str(trimmed)?]);
     }
+    if looks_like_prometheus_text(trimmed) {
+        return Ok(parse_prometheus_reports(trimmed));
+    }
 
     let mut reports = Vec::new();
     for line in trimmed
@@ -579,6 +584,519 @@ fn parse_reports(content: &str) -> Result<Vec<SnapshotterReport>> {
         reports.push(serde_json::from_str(line)?);
     }
     Ok(reports)
+}
+
+#[derive(Clone, Debug, Default)]
+struct PrometheusImageRow {
+    image_id: Option<String>,
+    image_ref: Option<String>,
+    image_digest: Option<String>,
+    snapshotter: Option<String>,
+    loading_mode: Option<String>,
+    size_bytes: Option<u64>,
+    layer_count: Option<u64>,
+    cache: CacheReportBuilder,
+    layers: BTreeMap<String, LayerCacheReportBuilder>,
+    prefetches: BTreeMap<String, PrefetchReportBuilder>,
+    timeline: BTreeMap<String, DownloadStepReportBuilder>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CacheReportBuilder {
+    requested_blocks: Option<u64>,
+    hit_blocks: Option<u64>,
+    local_read_bytes: Option<u64>,
+    remote_read_bytes: Option<u64>,
+    block_size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LayerCacheReportBuilder {
+    id: Option<String>,
+    digest: Option<String>,
+    media_type: Option<String>,
+    size_bytes: Option<u64>,
+    requested_blocks: Option<u64>,
+    hit_blocks: Option<u64>,
+    local_read_bytes: Option<u64>,
+    remote_read_bytes: Option<u64>,
+    block_size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PrefetchReportBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    phase: Option<String>,
+    started_at: Option<String>,
+    duration_ms: Option<f64>,
+    bytes: Option<u64>,
+    hit_blocks: Option<u64>,
+    requested_blocks: Option<u64>,
+    detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DownloadStepReportBuilder {
+    id: Option<String>,
+    name: Option<String>,
+    phase: Option<String>,
+    duration_ms: Option<f64>,
+    bytes: Option<u64>,
+    timestamp: Option<String>,
+    detail: Option<String>,
+}
+
+fn looks_like_prometheus_text(content: &str) -> bool {
+    content.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("# HELP")
+            || line.starts_with("# TYPE")
+            || line.starts_with("containerd_")
+            || line.starts_with("nydus_")
+            || line.starts_with("stargz_")
+            || line.starts_with("overlaybd_")
+            || line.starts_with("image_cache_")
+            || line.starts_with("snapshotter_")
+    })
+}
+
+fn parse_prometheus_reports(content: &str) -> Vec<SnapshotterReport> {
+    let mut rows = BTreeMap::<String, PrometheusImageRow>::new();
+
+    for line in content.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(sample) = parse_prometheus_sample(line) else {
+            continue;
+        };
+        if !is_image_cache_metric(&sample.name) {
+            continue;
+        }
+        let image_key = prometheus_image_key(&sample.labels);
+        let row = rows.entry(image_key).or_default();
+        apply_prometheus_sample(row, &sample);
+    }
+
+    rows.into_values()
+        .filter_map(prometheus_row_to_report)
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct PrometheusSample {
+    name: String,
+    labels: BTreeMap<String, String>,
+    value: f64,
+}
+
+fn parse_prometheus_sample(line: &str) -> Option<PrometheusSample> {
+    let (metric, value_text) = line.rsplit_once(char::is_whitespace)?;
+    let value = value_text.trim().parse::<f64>().ok()?;
+    let (name, labels) = if let Some(start) = metric.find('{') {
+        let end = metric.rfind('}')?;
+        (
+            &metric[..start],
+            parse_prometheus_labels(&metric[start + 1..end]),
+        )
+    } else {
+        (metric, BTreeMap::new())
+    };
+    Some(PrometheusSample {
+        name: name.to_string(),
+        labels,
+        value,
+    })
+}
+
+fn parse_prometheus_labels(input: &str) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    let mut key = String::new();
+    let mut value = String::new();
+    let mut in_key = true;
+    let mut in_quote = false;
+    let mut escape = false;
+
+    for char in input.chars() {
+        if in_key {
+            if char == '=' {
+                in_key = false;
+            } else if char != ' ' {
+                key.push(char);
+            }
+            continue;
+        }
+
+        if escape {
+            value.push(match char {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+            escape = false;
+            continue;
+        }
+        match char {
+            '\\' if in_quote => escape = true,
+            '"' => in_quote = !in_quote,
+            ',' if !in_quote => {
+                if !key.trim().is_empty() {
+                    labels.insert(key.trim().to_string(), value.clone());
+                }
+                key.clear();
+                value.clear();
+                in_key = true;
+            }
+            other => value.push(other),
+        }
+    }
+    if !key.trim().is_empty() {
+        labels.insert(key.trim().to_string(), value);
+    }
+    labels
+}
+
+fn is_image_cache_metric(name: &str) -> bool {
+    normalized_metric_name(name).contains("image_cache")
+        || normalized_metric_name(name).contains("snapshotter")
+        || normalized_metric_name(name).contains("nydus")
+        || normalized_metric_name(name).contains("stargz")
+        || normalized_metric_name(name).contains("overlaybd")
+}
+
+fn normalized_metric_name(name: &str) -> String {
+    name.trim_end_matches("_total")
+        .trim_end_matches("_sum")
+        .trim_end_matches("_count")
+        .trim_end_matches("_bucket")
+        .to_ascii_lowercase()
+}
+
+fn prometheus_image_key(labels: &BTreeMap<String, String>) -> String {
+    label_value(
+        labels,
+        &["image_id", "imageId", "image", "image_ref", "ref", "digest"],
+    )
+    .unwrap_or_else(|| "snapshotter/unknown:latest".to_string())
+}
+
+fn apply_prometheus_sample(row: &mut PrometheusImageRow, sample: &PrometheusSample) {
+    fill_prometheus_identity(row, &sample.labels);
+    let metric = normalized_metric_name(&sample.name);
+    let value_u64 = sample.value.max(0.0).round() as u64;
+
+    if metric.contains("layer_count") || metric.contains("layers") {
+        row.layer_count = Some(value_u64);
+        return;
+    }
+    if metric.contains("layer") {
+        apply_prometheus_layer_sample(row, sample, &metric, value_u64);
+        return;
+    }
+    if metric.contains("prefetch") || metric.contains("warmup") {
+        apply_prometheus_prefetch_sample(row, sample, &metric, value_u64);
+        return;
+    }
+    if metric.contains("duration")
+        || metric.contains("latency")
+        || metric.contains("stage")
+        || metric.contains("timeline")
+    {
+        apply_prometheus_timeline_sample(row, sample, &metric);
+        return;
+    }
+
+    assign_cache_metric(&mut row.cache, &metric, value_u64);
+    if metric.contains("size") && !metric.contains("block") {
+        row.size_bytes = Some(value_u64);
+    }
+}
+
+fn fill_prometheus_identity(row: &mut PrometheusImageRow, labels: &BTreeMap<String, String>) {
+    row.image_id = row
+        .image_id
+        .clone()
+        .or_else(|| label_value(labels, &["image_id", "imageId"]));
+    row.image_ref = row
+        .image_ref
+        .clone()
+        .or_else(|| label_value(labels, &["image_ref", "image", "ref", "reference"]));
+    row.image_digest = row
+        .image_digest
+        .clone()
+        .or_else(|| label_value(labels, &["image_digest", "digest"]));
+    row.snapshotter = row.snapshotter.clone().or_else(|| {
+        label_value(labels, &["snapshotter", "remote_snapshotter", "driver"])
+            .or_else(|| infer_snapshotter_from_labels(labels))
+    });
+    row.loading_mode = row
+        .loading_mode
+        .clone()
+        .or_else(|| label_value(labels, &["loading_mode", "mode"]));
+}
+
+fn apply_prometheus_layer_sample(
+    row: &mut PrometheusImageRow,
+    sample: &PrometheusSample,
+    metric: &str,
+    value: u64,
+) {
+    let layer_key = label_value(&sample.labels, &["layer", "layer_id", "layerId", "digest"])
+        .unwrap_or_else(|| "layer-0".to_string());
+    let layer = row.layers.entry(layer_key.clone()).or_default();
+    layer.id = layer.id.clone().or_else(|| Some(layer_key));
+    layer.digest = layer
+        .digest
+        .clone()
+        .or_else(|| label_value(&sample.labels, &["layer_digest", "digest"]));
+    layer.media_type = layer
+        .media_type
+        .clone()
+        .or_else(|| label_value(&sample.labels, &["media_type", "mediaType"]));
+
+    if metric.contains("size") && !metric.contains("block") {
+        layer.size_bytes = Some(value);
+    } else if metric.contains("requested") || metric.contains("request") {
+        layer.requested_blocks = Some(value);
+    } else if metric.contains("hit") || metric.contains("cached") {
+        layer.hit_blocks = Some(value);
+    } else if metric.contains("local") {
+        layer.local_read_bytes = Some(value);
+    } else if metric.contains("remote") || metric.contains("read") || metric.contains("fetch") {
+        layer.remote_read_bytes = Some(value);
+    } else if metric.contains("block_size") {
+        layer.block_size_bytes = Some(value);
+    }
+}
+
+fn apply_prometheus_prefetch_sample(
+    row: &mut PrometheusImageRow,
+    sample: &PrometheusSample,
+    metric: &str,
+    value: u64,
+) {
+    let key = label_value(&sample.labels, &["prefetch", "phase", "stage", "name"])
+        .unwrap_or_else(|| "prefetch".to_string());
+    let prefetch = row.prefetches.entry(key.clone()).or_default();
+    prefetch.id = prefetch.id.clone().or_else(|| Some(sanitize_id(&key)));
+    prefetch.name = prefetch.name.clone().or_else(|| Some(key.clone()));
+    prefetch.phase = prefetch
+        .phase
+        .clone()
+        .or_else(|| Some("prefetch".to_string()));
+    prefetch.started_at = prefetch
+        .started_at
+        .clone()
+        .or_else(|| label_value(&sample.labels, &["timestamp", "started_at", "start_time"]));
+
+    if metric.contains("duration") || metric.contains("latency") {
+        prefetch.duration_ms = Some(prometheus_duration_ms(&sample.name, sample.value));
+    } else if metric.contains("byte") || metric.contains("size") {
+        prefetch.bytes = Some(value);
+    } else if metric.contains("requested") || metric.contains("request") {
+        prefetch.requested_blocks = Some(value);
+    } else if metric.contains("hit") || metric.contains("cached") {
+        prefetch.hit_blocks = Some(value);
+    }
+}
+
+fn apply_prometheus_timeline_sample(
+    row: &mut PrometheusImageRow,
+    sample: &PrometheusSample,
+    metric: &str,
+) {
+    let phase = label_value(&sample.labels, &["phase", "stage", "operation", "op"])
+        .unwrap_or_else(|| infer_timeline_phase(metric));
+    let step = row.timeline.entry(phase.clone()).or_default();
+    step.id = step.id.clone().or_else(|| Some(sanitize_id(&phase)));
+    step.name = step.name.clone().or_else(|| Some(title_case(&phase)));
+    step.phase = step.phase.clone().or_else(|| Some(phase));
+    step.duration_ms = Some(prometheus_duration_ms(&sample.name, sample.value));
+    step.bytes = step.bytes.or_else(|| {
+        label_value(&sample.labels, &["bytes"]).and_then(|value| value.parse::<u64>().ok())
+    });
+    step.timestamp = step
+        .timestamp
+        .clone()
+        .or_else(|| label_value(&sample.labels, &["timestamp", "started_at", "start_time"]));
+    step.detail = step.detail.clone().or_else(|| {
+        Some(format!(
+            "{} from Prometheus metric {}",
+            step.name.clone().unwrap_or_else(|| "stage".to_string()),
+            sample.name
+        ))
+    });
+}
+
+fn assign_cache_metric(cache: &mut CacheReportBuilder, metric: &str, value: u64) {
+    if metric.contains("requested") || metric.contains("request") {
+        cache.requested_blocks = Some(value);
+    } else if metric.contains("hit") || metric.contains("cached") {
+        cache.hit_blocks = Some(value);
+    } else if metric.contains("local") {
+        cache.local_read_bytes = Some(value);
+    } else if metric.contains("remote") || metric.contains("fetch") || metric.contains("read") {
+        cache.remote_read_bytes = Some(value);
+    } else if metric.contains("block_size") {
+        cache.block_size_bytes = Some(value);
+    }
+}
+
+fn prometheus_row_to_report(row: PrometheusImageRow) -> Option<SnapshotterReport> {
+    let image_ref = row
+        .image_ref
+        .clone()
+        .or_else(|| row.image_id.clone())
+        .or_else(|| row.image_digest.clone());
+    if image_ref.is_none()
+        && row.cache.requested_blocks.is_none()
+        && row.cache.hit_blocks.is_none()
+        && row.layers.is_empty()
+        && row.prefetches.is_empty()
+        && row.timeline.is_empty()
+    {
+        return None;
+    }
+
+    Some(SnapshotterReport {
+        image_id: row.image_id,
+        image_ref,
+        image_digest: row.image_digest,
+        loading_mode: row.loading_mode.or_else(|| Some("lazy".to_string())),
+        size_bytes: row.size_bytes,
+        layer_count: row.layer_count,
+        timestamp: None,
+        snapshotter: row.snapshotter.or_else(|| Some("snapshotter".to_string())),
+        cache: cache_builder_to_report(row.cache),
+        layers: row
+            .layers
+            .into_values()
+            .map(layer_builder_to_report)
+            .collect(),
+        prefetches: row
+            .prefetches
+            .into_values()
+            .map(prefetch_builder_to_report)
+            .collect(),
+        download_timeline: Some(
+            row.timeline
+                .into_values()
+                .map(timeline_builder_to_report)
+                .collect(),
+        ),
+    })
+}
+
+fn cache_builder_to_report(cache: CacheReportBuilder) -> Option<CacheReport> {
+    if cache.requested_blocks.is_none()
+        && cache.hit_blocks.is_none()
+        && cache.local_read_bytes.is_none()
+        && cache.remote_read_bytes.is_none()
+        && cache.block_size_bytes.is_none()
+    {
+        return None;
+    }
+    Some(CacheReport {
+        requested_blocks: cache.requested_blocks,
+        hit_blocks: cache.hit_blocks,
+        local_read_bytes: cache.local_read_bytes,
+        remote_read_bytes: cache.remote_read_bytes,
+        block_size_bytes: cache.block_size_bytes,
+    })
+}
+
+fn layer_builder_to_report(layer: LayerCacheReportBuilder) -> LayerCacheReport {
+    LayerCacheReport {
+        id: layer.id,
+        digest: layer.digest,
+        media_type: layer.media_type,
+        size_bytes: layer.size_bytes,
+        requested_blocks: layer.requested_blocks,
+        hit_blocks: layer.hit_blocks,
+        local_read_bytes: layer.local_read_bytes,
+        remote_read_bytes: layer.remote_read_bytes,
+        block_size_bytes: layer.block_size_bytes,
+    }
+}
+
+fn prefetch_builder_to_report(prefetch: PrefetchReportBuilder) -> PrefetchReport {
+    PrefetchReport {
+        id: prefetch.id,
+        name: prefetch.name,
+        phase: prefetch.phase,
+        started_at: prefetch.started_at,
+        duration_ms: prefetch.duration_ms,
+        bytes: prefetch.bytes,
+        hit_blocks: prefetch.hit_blocks,
+        requested_blocks: prefetch.requested_blocks,
+        detail: prefetch.detail,
+    }
+}
+
+fn timeline_builder_to_report(step: DownloadStepReportBuilder) -> DownloadStepReport {
+    DownloadStepReport {
+        id: step.id,
+        name: step.name.unwrap_or_else(|| "Snapshotter stage".to_string()),
+        phase: step.phase.unwrap_or_else(|| "snapshotter".to_string()),
+        duration_ms: step.duration_ms.unwrap_or(0.0),
+        bytes: step.bytes,
+        timestamp: step.timestamp,
+        detail: step.detail,
+    }
+}
+
+fn label_value(labels: &BTreeMap<String, String>, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| labels.get(*name).filter(|value| !value.is_empty()).cloned())
+}
+
+fn infer_snapshotter_from_labels(labels: &BTreeMap<String, String>) -> Option<String> {
+    for value in labels.values() {
+        let lower = value.to_ascii_lowercase();
+        for snapshotter in ["nydus", "stargz", "overlaybd"] {
+            if lower.contains(snapshotter) {
+                return Some(snapshotter.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn infer_timeline_phase(metric: &str) -> String {
+    for phase in [
+        "resolve", "fetch", "download", "mount", "prefetch", "unpack",
+    ] {
+        if metric.contains(phase) {
+            return phase.to_string();
+        }
+    }
+    "snapshotter".to_string()
+}
+
+fn prometheus_duration_ms(name: &str, value: f64) -> f64 {
+    if name.ends_with("_seconds") || name.contains("seconds") {
+        value * 1000.0
+    } else {
+        value
+    }
+}
+
+fn title_case(value: &str) -> String {
+    value
+        .split(|char: char| !char.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn cache_metrics(
@@ -867,5 +1385,43 @@ JSON"#;
             reports[0].download_timeline.as_ref().unwrap()[0].duration_ms,
             10.0
         );
+    }
+    #[test]
+    fn parses_prometheus_snapshotter_metrics() {
+        let content = r#"
+# HELP image_cache_requested_blocks requested lazy blocks
+# TYPE image_cache_requested_blocks counter
+image_cache_requested_blocks{image_ref="registry.example/prom:v1",snapshotter="nydus"} 100
+image_cache_hit_blocks{image_ref="registry.example/prom:v1",snapshotter="nydus"} 75
+image_cache_remote_read_bytes{image_ref="registry.example/prom:v1",snapshotter="nydus"} 4096
+image_cache_local_read_bytes{image_ref="registry.example/prom:v1",snapshotter="nydus"} 8192
+image_cache_block_size_bytes{image_ref="registry.example/prom:v1",snapshotter="nydus"} 131072
+image_cache_layer_requested_blocks{image_ref="registry.example/prom:v1",snapshotter="nydus",layer="sha256:layer-a"} 60
+image_cache_layer_hit_blocks{image_ref="registry.example/prom:v1",snapshotter="nydus",layer="sha256:layer-a"} 50
+image_cache_prefetch_duration_seconds{image_ref="registry.example/prom:v1",snapshotter="nydus",phase="prefetch"} 0.125
+image_cache_prefetch_bytes{image_ref="registry.example/prom:v1",snapshotter="nydus",phase="prefetch"} 2048
+image_cache_stage_duration_seconds{image_ref="registry.example/prom:v1",snapshotter="nydus",phase="mount"} 0.04
+"#;
+
+        let reports = parse_reports(content).unwrap();
+        assert_eq!(reports.len(), 1);
+        let report = &reports[0];
+        assert_eq!(
+            report.image_ref.as_deref(),
+            Some("registry.example/prom:v1")
+        );
+        assert_eq!(report.snapshotter.as_deref(), Some("nydus"));
+        assert_eq!(report.cache.as_ref().unwrap().requested_blocks, Some(100));
+        assert_eq!(report.cache.as_ref().unwrap().hit_blocks, Some(75));
+        assert_eq!(report.layers.len(), 1);
+        assert_eq!(report.layers[0].requested_blocks, Some(60));
+        assert_eq!(report.prefetches.len(), 1);
+        assert_eq!(report.prefetches[0].duration_ms, Some(125.0));
+        assert!(report
+            .download_timeline
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|step| step.phase == "mount" && step.duration_ms == 40.0));
     }
 }

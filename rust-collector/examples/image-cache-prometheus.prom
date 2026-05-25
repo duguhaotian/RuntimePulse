@@ -1,0 +1,12 @@
+# HELP image_cache_requested_blocks Requested lazy-loading cache blocks by image.
+# TYPE image_cache_requested_blocks counter
+image_cache_requested_blocks{image_ref="registry.example/app:v1",snapshotter="nydus"} 120
+image_cache_hit_blocks{image_ref="registry.example/app:v1",snapshotter="nydus"} 96
+image_cache_remote_read_bytes{image_ref="registry.example/app:v1",snapshotter="nydus"} 1048576
+image_cache_local_read_bytes{image_ref="registry.example/app:v1",snapshotter="nydus"} 4194304
+image_cache_block_size_bytes{image_ref="registry.example/app:v1",snapshotter="nydus"} 131072
+image_cache_layer_requested_blocks{image_ref="registry.example/app:v1",snapshotter="nydus",layer="sha256:layer-a"} 80
+image_cache_layer_hit_blocks{image_ref="registry.example/app:v1",snapshotter="nydus",layer="sha256:layer-a"} 70
+image_cache_prefetch_duration_seconds{image_ref="registry.example/app:v1",snapshotter="nydus",phase="prefetch"} 0.125
+image_cache_prefetch_bytes{image_ref="registry.example/app:v1",snapshotter="nydus",phase="prefetch"} 524288
+image_cache_stage_duration_seconds{image_ref="registry.example/app:v1",snapshotter="nydus",phase="mount"} 0.04
