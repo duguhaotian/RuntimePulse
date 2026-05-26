@@ -130,10 +130,12 @@ event. The expected report carries one sandbox startup trace plus spans such as
 `oci.runc.create`, `kata.vm.boot`, or `kata.agent.connect`, with attributes for
 `CNI_CONTAINERID`, OCI bundle path, runtime handler, PID/PPID, argv/env, and
 helper-binary role. If the exporter does not provide an explicit `traceId`,
-RuntimePulse uses `cri-containerd-startup-{sandboxId}` and parents the
-call-chain root under the existing `sandbox.startup.e2e` root span, so detailed
-RunPod/CNI/OCI/Kata spans join the lightweight CRI+containerd startup trace by
-default.
+RuntimePulse derives the same stable sandbox id as CRI/containerd events
+(`k8s-{namespace}-{pod}-{container}` when pod fields are present, otherwise the
+CRI/containerd sandbox id), uses `cri-containerd-startup-{stableSandboxId}`, and
+parents the call-chain root under the existing `sandbox.startup.e2e` root span.
+Detailed RunPod/CNI/OCI/Kata spans therefore join the lightweight
+CRI+containerd startup trace by default.
 
 Docker sources are retained for single-node and local validation scenarios.
 They are not the preferred Kubernetes path.

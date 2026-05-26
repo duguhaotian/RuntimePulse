@@ -39,8 +39,30 @@ struct StartupCallchainReport {
     id: Option<String>,
     #[serde(alias = "trace_id")]
     trace_id: Option<String>,
-    #[serde(alias = "sandbox_id")]
+    #[serde(default, alias = "sandbox_id")]
     sandbox_id: String,
+    #[serde(
+        default,
+        alias = "cri_sandbox_id",
+        alias = "podSandboxId",
+        alias = "pod_sandbox_id"
+    )]
+    cri_sandbox_id: String,
+    #[serde(default, alias = "containerd_id", alias = "containerdContainerId")]
+    containerd_id: String,
+    #[serde(
+        default,
+        alias = "namespace",
+        alias = "k8s_namespace",
+        alias = "podNamespace"
+    )]
+    k8s_namespace: String,
+    #[serde(default, alias = "pod_name", alias = "podName")]
+    pod_name: String,
+    #[serde(default, alias = "container_name", alias = "containerName")]
+    container_name: String,
+    #[serde(default, alias = "pod_uid", alias = "podUid")]
+    pod_uid: String,
     timestamp: Option<String>,
     source: Option<String>,
     #[serde(alias = "runtime_type")]
@@ -264,6 +286,12 @@ fn output_from_lightweight_report(
     fallback_timestamp: &str,
     config: &CollectorConfig,
 ) -> PluginOutput {
+    let sandbox_id = stable_sandbox_id(&report);
+    let runtime_sandbox_id = first_non_empty([
+        report.cri_sandbox_id.as_str(),
+        report.sandbox_id.as_str(),
+        report.containerd_id.as_str(),
+    ]);
     let explicit_trace_id = report
         .trace_id
         .as_deref()
@@ -272,7 +300,7 @@ fn output_from_lightweight_report(
         .trace_id
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("cri-containerd-startup-{}", sanitize_id(&report.sandbox_id)));
+        .unwrap_or_else(|| format!("cri-containerd-startup-{}", sanitize_id(&sandbox_id)));
     let cri_startup_root_span_id = format!("{trace_id}-e2e");
     let root_span_id = if explicit_trace_id {
         format!("{trace_id}-root")
@@ -293,6 +321,12 @@ fn output_from_lightweight_report(
     base_attributes.insert("scope".to_string(), json!(config.collection_scope));
     base_attributes.insert("startup.trace.source".to_string(), json!(source));
     base_attributes.insert("runtime.type".to_string(), json!(runtime_type));
+    base_attributes.insert("cri.sandbox_id".to_string(), json!(runtime_sandbox_id));
+    base_attributes.insert("containerd.id".to_string(), json!(report.containerd_id));
+    base_attributes.insert("k8s.namespace".to_string(), json!(report.k8s_namespace));
+    base_attributes.insert("k8s.pod".to_string(), json!(report.pod_name));
+    base_attributes.insert("k8s.container".to_string(), json!(report.container_name));
+    base_attributes.insert("k8s.pod_uid".to_string(), json!(report.pod_uid));
     if let Some(handler) = &report.runtime_handler {
         base_attributes.insert("runtime.handler".to_string(), json!(handler));
     }
@@ -309,6 +343,7 @@ fn output_from_lightweight_report(
     let mut traces = Vec::new();
     if let Some(root_span) = root_span_from_report(
         &report,
+        &sandbox_id,
         &trace_id,
         &root_span_id,
         (!explicit_trace_id).then_some(cri_startup_root_span_id.as_str()),
@@ -328,7 +363,7 @@ fn output_from_lightweight_report(
             stage,
             &trace_id,
             default_parent.as_deref(),
-            &report.sandbox_id,
+            &sandbox_id,
             &runtime_type,
             base_attributes.clone(),
         ) {
@@ -344,7 +379,7 @@ fn output_from_lightweight_report(
     let mut metrics = metrics_from_summary(
         report.summary.as_ref(),
         &observed_at,
-        &report.sandbox_id,
+        &sandbox_id,
         &runtime_type,
         &base_attributes,
         config,
@@ -355,7 +390,7 @@ fn output_from_lightweight_report(
             "sandbox.startup.callchain_duration_ms",
             duration_ms,
             "ms",
-            &report.sandbox_id,
+            &sandbox_id,
             &runtime_type,
             &base_attributes,
             config,
@@ -379,14 +414,14 @@ fn output_from_lightweight_report(
             message: format!(
                 "Startup call-chain report observed {} spans for {}.",
                 traces.len(),
-                report.sandbox_id
+                sandbox_id
             ),
             source: format!(
                 "runtimepulse-rust-collector/{}/startup-callchain",
                 config.node_id
             ),
             attributes: base_attributes,
-            sandbox_id: Some(report.sandbox_id),
+            sandbox_id: Some(sandbox_id),
             image_id: None,
             node_id: Some(config.node_id.clone()),
             runtime_type: Some(runtime_type),
@@ -397,8 +432,31 @@ fn output_from_lightweight_report(
     }
 }
 
+fn stable_sandbox_id(report: &StartupCallchainReport) -> String {
+    if !report.k8s_namespace.trim().is_empty()
+        && !report.pod_name.trim().is_empty()
+        && !report.container_name.trim().is_empty()
+    {
+        return format!(
+            "k8s-{}-{}-{}",
+            sanitize_id(&report.k8s_namespace),
+            sanitize_id(&report.pod_name),
+            sanitize_id(&report.container_name)
+        );
+    }
+
+    first_non_empty([
+        report.sandbox_id.as_str(),
+        report.cri_sandbox_id.as_str(),
+        report.containerd_id.as_str(),
+        report.pod_uid.as_str(),
+    ])
+    .to_string()
+}
+
 fn root_span_from_report(
     report: &StartupCallchainReport,
+    sandbox_id: &str,
     trace_id: &str,
     root_span_id: &str,
     parent_span_id: Option<&str>,
@@ -419,7 +477,7 @@ fn root_span_from_report(
         duration_ms,
         status: status.to_string(),
         attributes,
-        sandbox_id: Some(report.sandbox_id.clone()),
+        sandbox_id: Some(sandbox_id.to_string()),
         image_id: None,
         parent_span_id: parent_span_id.map(ToOwned::to_owned),
     })
@@ -722,6 +780,17 @@ fn metric_unit(key: &str) -> &'static str {
     }
 }
 
+fn first_non_empty<'a, I>(values: I) -> &'a str
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    values
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or("")
+}
+
 fn sanitize_metric_key(value: &str) -> String {
     let mut output = String::new();
     let mut previous_lowercase = false;
@@ -852,6 +921,46 @@ mod tests {
         assert_eq!(
             output.traces[1].parent_span_id.as_deref(),
             Some("cri-containerd-startup-cri-sandbox-a-callchain")
+        );
+    }
+
+    #[test]
+    fn derives_kubernetes_sandbox_identity_for_trace_join() {
+        let config = test_config();
+        let content = r#"
+        {
+          "criSandboxId": "sandboxabcdef1234567890",
+          "containerdId": "sandboxabcdef1234567890",
+          "namespace": "default",
+          "podName": "runtimepulse-demo",
+          "containerName": "POD",
+          "podUid": "runtimepulse-demo-uid",
+          "runtimeType": "runc",
+          "startTime": "2026-05-26T01:00:00.000Z",
+          "durationMs": 100,
+          "spans": [{
+            "spanName": "cni.plugin.loopback",
+            "startTime": "2026-05-26T01:00:00.010Z",
+            "durationMs": 10
+          }]
+        }
+        "#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+        assert!(output.traces.iter().all(
+            |span| span.trace_id == "cri-containerd-startup-k8s-default-runtimepulse-demo-pod"
+        ));
+        assert_eq!(
+            output.traces[0].sandbox_id.as_deref(),
+            Some("k8s-default-runtimepulse-demo-pod")
+        );
+        assert_eq!(
+            output.traces[0].attributes["cri.sandbox_id"],
+            json!("sandboxabcdef1234567890")
+        );
+        assert_eq!(
+            output.events[0].sandbox_id.as_deref(),
+            Some("k8s-default-runtimepulse-demo-pod")
         );
     }
 
