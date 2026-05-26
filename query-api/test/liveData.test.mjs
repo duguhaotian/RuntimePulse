@@ -415,3 +415,61 @@ test('keeps event source attribution when node metadata is refreshed by another 
   assert.equal(dockerEvents?.events, 1);
   assert.equal(cgroupfs?.events ?? 0, 0);
 });
+
+test('derives sandbox startup duration from cri startup trace spans and callchain metrics', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'startup-test',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{
+        id: 'cri-sandbox-a',
+        nodeId: 'node-a',
+        imageRef: 'pause:latest',
+        runtimeType: 'runc',
+        startupDurationMs: 0,
+      }],
+    },
+    metrics: [],
+    events: [],
+    traces: [{
+      traceId: 'cri-containerd-startup-cri-sandbox-a',
+      spanId: 'cri-containerd-startup-cri-sandbox-a-e2e',
+      spanName: 'sandbox.startup.e2e',
+      startTime: '2026-05-22T02:00:00.000Z',
+      endTime: '2026-05-22T02:00:01.200Z',
+      durationMs: 1200,
+      status: 'ok',
+      attributes: { plugin: 'cri-startup-trace' },
+      sandboxId: 'cri-sandbox-a',
+    }],
+    profiles: [],
+  });
+
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 1200);
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
+
+  recordLiveBatch(store, {
+    source: 'startup-callchain',
+    metadata: { clusters: [], nodes: [], images: [], sandboxes: [] },
+    metrics: [{
+      timestamp: '2026-05-22T02:00:02.000Z',
+      name: 'sandbox.startup.callchain_duration_ms',
+      value: 1500,
+      unit: 'ms',
+      group: 'startup',
+      sandboxId: 'cri-sandbox-a',
+      nodeId: 'node-a',
+      runtimeType: 'runc',
+      attributes: { plugin: 'startup-callchain' },
+    }],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 1500);
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'startup-callchain');
+});
