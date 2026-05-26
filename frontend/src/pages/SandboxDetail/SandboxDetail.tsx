@@ -374,7 +374,7 @@ function StartupCallchainPanel({
       <div className="startup-callchain-header">
         <div>
           <h3>RunPod startup call chain</h3>
-          <p>Collector-derived CNI/OCI/Kata/helper attribution for this sandbox startup.</p>
+          <p>Collector-derived CNI plugin, OCI, Kata, and helper attribution for this sandbox startup.</p>
         </div>
         <div className="startup-callchain-total">
           <strong>{formatDuration(totalDuration)}</strong>
@@ -409,11 +409,11 @@ function StartupCallchainPanel({
 
 function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
   const definitions = [
-    { key: 'cni', label: 'CNI', durationMetric: 'sandbox.startup.cni_duration_ms', countMetric: 'sandbox.startup.cni_plugin_count', tone: 'network', patterns: [/\bcni\b/i, /network/i] },
+    { key: 'cni', label: 'CNI plugin', durationMetric: 'sandbox.startup.cni_duration_ms', countMetric: 'sandbox.startup.cni_plugin_count', tone: 'network', patterns: [/^cni\./i] },
     { key: 'oci', label: 'OCI runtime', durationMetric: 'sandbox.startup.oci_duration_ms', countMetric: 'sandbox.startup.oci_call_count', tone: 'runtime', patterns: [/\boci\b/i, /runc/i, /runtime\.(create|start)/i] },
     { key: 'kata', label: 'Kata VM', durationMetric: 'sandbox.startup.kata_duration_ms', countMetric: undefined, tone: 'secure', patterns: [/kata/i, /vm\.(boot|start|ready)/i, /hypervisor/i] },
-    { key: 'helpers', label: 'Helper binaries', durationMetric: 'sandbox.startup.helper_binary_duration_ms', countMetric: 'sandbox.startup.helper_binary_count', tone: 'helper', patterns: [/exec/i, /iptables/i, /nft/i, /\bip\b/i, /\btc\b/i] },
-    { key: 'exec', label: 'All exec', durationMetric: 'sandbox.startup.binary_exec_duration_ms', countMetric: 'sandbox.startup.binary_exec_count', tone: 'helper', patterns: [/exec/i, /process/i] },
+    { key: 'helpers', label: 'Helper drill-down', durationMetric: 'sandbox.startup.helper_binary_duration_ms', countMetric: 'sandbox.startup.helper_binary_count', tone: 'helper', patterns: [/exec/i, /process/i] },
+    { key: 'exec', label: 'Exec total', durationMetric: 'sandbox.startup.binary_exec_duration_ms', countMetric: 'sandbox.startup.binary_exec_count', tone: 'helper', patterns: [/exec/i, /process/i] },
   ];
 
   return definitions.map((definition) => {

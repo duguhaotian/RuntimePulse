@@ -3,7 +3,6 @@ export function buildSandboxAnalysis({ sandbox, image, metrics, events, spans, p
     startupDurationFinding(sandbox, spans),
     traceBottleneckFinding(sandbox, spans),
     startupCallchainFinding(sandbox, metrics, spans),
-    binaryBreakdownFinding(sandbox, metrics, spans),
     nodePressureFinding(metrics),
     imageAccessFinding(image, sandbox),
     eventFinding(events),
@@ -93,16 +92,22 @@ function startupCallchainFinding(sandbox, metrics, spans) {
   const share = best.durationMs / Math.max(totalMs, 1);
   if (best.durationMs < best.durationThresholdMs && share < best.shareThreshold && best.count < best.countThreshold) return undefined;
 
+  const title = best.key === 'cni' && best.binary
+    ? `${best.binary} is the hottest CNI plugin binary`
+    : best.title;
+  const summary = best.key === 'cni' && best.binary
+    ? `${best.binary} accounts for ${formatRatio(share)} of the measured startup call chain.`
+    : best.durationMs > 0
+      ? `${best.label} accounts for ${formatRatio(share)} of the measured startup call chain.`
+      : `${best.label} executed ${best.count} times during startup; inspect per-command attribution for hidden latency.`;
   const severity = share >= 0.55 || best.durationMs >= 5_000 || best.errorSpan ? 'critical' : 'warning';
 
   return {
     id: `${sandbox.id}-startup-callchain-${best.key}`,
     severity,
     category: best.category,
-    title: best.title,
-    summary: best.durationMs > 0
-      ? `${best.label} accounts for ${formatRatio(share)} of the measured startup call chain.`
-      : `${best.label} executed ${best.count} times during startup; inspect per-command attribution for hidden latency.`,
+    title,
+    summary,
     evidence: [
       best.durationMs > 0 ? `${best.durationMetricName}=${formatDuration(best.durationMs)}` : undefined,
       totalMs > 0 ? `startup.callchain=${formatDuration(totalMs)}` : undefined,
@@ -115,54 +120,15 @@ function startupCallchainFinding(sandbox, metrics, spans) {
   };
 }
 
-function binaryBreakdownFinding(sandbox, metrics, spans) {
-  const candidates = startupBinaryCandidates(metrics, spans);
-  if (candidates.length === 0) return undefined;
-
-  const best = candidates.sort((left, right) => callchainScore(right, startupTotalMs(sandbox, metrics, spans)) - callchainScore(left, startupTotalMs(sandbox, metrics, spans)))[0];
-  if (!best) return undefined;
-
-  const totalMs = startupTotalMs(sandbox, metrics, spans);
-  const share = best.durationMs / Math.max(totalMs, 1);
-  if (best.durationMs < 150 && best.count < 3 && share < 0.08) return undefined;
-
-  const severity = share >= 0.4 || best.durationMs >= 1_500 || best.errorSpan ? 'critical' : best.durationMs >= 300 || best.count >= 5 ? 'warning' : 'info';
-
-  return {
-    id: `${sandbox.id}-startup-binary-${best.key}`,
-    severity,
-    category: 'runtime',
-    title: best.durationMs > 0
-      ? `${best.binary} is the hottest startup binary`
-      : `${best.binary} is called repeatedly during startup`,
-    summary: best.durationMs > 0
-      ? `${best.binary} accounts for ${formatRatio(share)} of measured startup time across helper binaries.`
-      : `${best.binary} executed ${best.count} times during startup and deserves per-command attribution.`,
-    evidence: [
-      best.durationMs > 0 ? `${best.durationMetricName}=${formatDuration(best.durationMs)}` : undefined,
-      best.count > 0 ? `${best.countMetricName}=${best.count}` : undefined,
-      totalMs > 0 ? `startup=${formatDuration(totalMs)}` : undefined,
-      best.errorSpan ? `span.status=error in ${best.errorSpan.spanName}` : undefined,
-    ].filter(Boolean),
-    recommendedActions: [
-      'Inspect the per-binary helper breakdown and compare repeated commands across one RunPodSandbox call.',
-      'If the hottest binary is iptables, nft, ip, or tc, review the CNI plugin path before changing runtime class.',
-    ],
-    relatedMetricNames: [...new Set([best.durationMetricName, best.countMetricName].filter(Boolean))],
-    relatedSpanIds: best.relatedSpanIds,
-  };
-}
-
 function startupCallchainCandidates(metrics, spans) {
   const phaseDefinitions = [
     {
       key: 'cni',
-      label: 'CNI setup',
-      title: 'CNI setup dominates sandbox startup',
+      label: 'CNI plugin',
+      title: 'CNI plugin binary dominates sandbox startup',
       category: 'startup',
       durationMetricName: 'sandbox.startup.cni_duration_ms',
       countMetricName: 'sandbox.startup.cni_plugin_count',
-      spanPatterns: [/\bcni\b/i, /network/i],
       durationThresholdMs: 1_000,
       shareThreshold: 0.25,
       countThreshold: 4,
@@ -205,8 +171,8 @@ function startupCallchainCandidates(metrics, spans) {
     },
     {
       key: 'helper-binaries',
-      label: 'startup helper binaries',
-      title: 'Helper binary execution is high during startup',
+      label: 'helper binaries',
+      title: 'Helper binaries are high during startup',
       category: 'runtime',
       durationMetricName: 'sandbox.startup.helper_binary_duration_ms',
       countMetricName: 'sandbox.startup.helper_binary_count',
@@ -221,7 +187,7 @@ function startupCallchainCandidates(metrics, spans) {
     },
     {
       key: 'binary-exec',
-      label: 'startup binary executions',
+      label: 'binary executions',
       title: 'Startup invokes many helper processes',
       category: 'runtime',
       durationMetricName: 'sandbox.startup.binary_exec_duration_ms',
@@ -238,58 +204,19 @@ function startupCallchainCandidates(metrics, spans) {
   ];
 
   return phaseDefinitions.map((definition) => {
-    const relatedSpans = spans.filter((span) => definition.spanPatterns.some((pattern) => pattern.test(span.spanName)));
+    const relatedSpans = definition.key === 'cni'
+      ? spans.filter(isCniStartupSpan)
+      : spans.filter((span) => definition.spanPatterns.some((pattern) => pattern.test(span.spanName)));
     const spanDurationMs = relatedSpans.reduce((total, span) => total + Number(span.durationMs ?? 0), 0);
     return {
       ...definition,
+      binary: dominantBinaryName(relatedSpans),
       durationMs: maxMetricValue(metrics, definition.durationMetricName) ?? spanDurationMs,
       count: definition.countMetricName ? maxMetricValue(metrics, definition.countMetricName) ?? 0 : 0,
       relatedSpanIds: relatedSpans.map((span) => span.spanId),
       errorSpan: relatedSpans.find((span) => span.status === 'error'),
     };
   });
-}
-
-function startupBinaryCandidates(metrics, spans) {
-  const candidates = new Map();
-
-  for (const series of metrics) {
-    const match = String(series?.name ?? '').match(/^sandbox\.startup\.binary\.(.+)_(count|duration_ms)$/);
-    if (!match) continue;
-
-    const [, binary, kind] = match;
-    const candidate = candidates.get(binary) ?? {
-      key: binaryKey(binary),
-      binary,
-      count: 0,
-      countMetricName: undefined,
-      durationMs: 0,
-      durationMetricName: undefined,
-      relatedSpanIds: [],
-      errorSpan: undefined,
-    };
-
-    const value = maxPoint(series)?.value ?? 0;
-    if (kind === 'count') {
-      candidate.count = Math.max(candidate.count, value);
-      candidate.countMetricName = series.name;
-    } else {
-      candidate.durationMs = Math.max(candidate.durationMs, value);
-      candidate.durationMetricName = series.name;
-    }
-    candidates.set(binary, candidate);
-  }
-
-  const binaries = [...candidates.values()].map((candidate) => {
-    const relatedSpans = spans.filter((span) => binaryMatchesSpan(candidate.binary, span));
-    return {
-      ...candidate,
-      relatedSpanIds: relatedSpans.map((span) => span.spanId),
-      errorSpan: relatedSpans.find((span) => span.status === 'error'),
-    };
-  });
-
-  return binaries.sort((left, right) => right.durationMs - left.durationMs || right.count - left.count);
 }
 
 function startupTotalMs(sandbox, metrics, spans) {
@@ -310,29 +237,44 @@ function callchainScore(candidate, totalMs) {
   return share + (candidate.durationMs / 10_000) + countWeight + (candidate.errorSpan ? 1 : 0);
 }
 
-function binaryKey(value) {
-  return String(value).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'binary';
-}
+function dominantBinaryName(spans) {
+  const counts = new Map();
 
-function binaryMatchesSpan(binary, span) {
-  const text = [
-    span.spanName,
-    span.attributes?.['process.binary'],
-    span.attributes?.['process.command'],
-  ]
-    .map((value) => String(value ?? '').toLowerCase())
-    .join(' ');
-
-  if (!text.trim()) return false;
-  if (binary.length <= 2) {
-    return new RegExp(`(^|[^a-z0-9])${escapeRegExp(binary)}([^a-z0-9]|$)`).test(text);
+  for (const span of spans) {
+    const binary = processBinaryName(span)
+      ?? cniPluginAttribute(span)
+      ?? binaryFromSpanName(span);
+    if (!binary) continue;
+    counts.set(binary, (counts.get(binary) ?? 0) + 1);
   }
 
-  return text.includes(binary.toLowerCase());
+  return [...counts.entries()].sort((left, right) => right[1] - left[1])[0]?.[0];
 }
 
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function isCniStartupSpan(span) {
+  return String(span?.spanName ?? '').startsWith('cni.')
+    || Boolean(span?.attributes?.['cni.plugin'])
+    || Boolean(span?.attributes?.['cni.command'])
+    || Boolean(span?.attributes?.['cni.container_id'])
+    || Boolean(span?.attributes?.['cni.netns']);
+}
+
+function processBinaryName(span) {
+  const raw = span?.attributes?.['process.binary'] ?? span?.attributes?.['process.command'];
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  return raw.trim().split(/\s+/)[0].split('/').filter(Boolean).pop();
+}
+
+function cniPluginAttribute(span) {
+  const value = span?.attributes?.['cni.plugin'];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function binaryFromSpanName(span) {
+  const name = String(span?.spanName ?? '');
+  if (name.startsWith('cni.plugin.')) return name.slice('cni.plugin.'.length).split('.').filter(Boolean).pop();
+  if (name.startsWith('oci.')) return name.slice('oci.'.length).split('.').filter(Boolean).pop();
+  return undefined;
 }
 
 function nodePressureFinding(metrics) {

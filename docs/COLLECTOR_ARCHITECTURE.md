@@ -138,10 +138,7 @@ Detailed RunPod/CNI/OCI/Kata spans therefore join the lightweight
 CRI+containerd startup trace by default.
 When summary values are absent, RuntimePulse derives first-pass aggregate
 metrics from the spans, including CNI duration/plugin count, OCI duration/call
-count, binary/helper execution count and duration, `iptables`/`nft`/`ip`/`tc`
-count and duration, Kata stage duration, plus per-binary helper breakdowns such
-as `sandbox.startup.binary.iptables_duration_ms` and
-`sandbox.startup.binary.iptables_count` for the hottest helper executables.
+count, binary/helper execution count and duration, and Kata stage duration. The CNI plugin binary is identified from the plugin-stage spans themselves rather than from helper binaries inside the plugin.
 
 Docker sources are retained for single-node and local validation scenarios.
 They are not the preferred Kubernetes path.

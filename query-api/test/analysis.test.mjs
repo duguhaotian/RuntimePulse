@@ -63,7 +63,7 @@ test('analysis flags CNI-dominated startup callchain metrics', () => {
 
   const finding = analysis.findings.find((item) => item.id === 'cri-sandbox-a-startup-callchain-cni');
   assert.ok(finding);
-  assert.equal(finding.title, 'CNI setup dominates sandbox startup');
+  assert.equal(finding.title, 'CNI plugin binary dominates sandbox startup');
   assert.equal(finding.severity, 'critical');
   assert.deepEqual(finding.relatedMetricNames, ['sandbox.startup.cni_duration_ms', 'sandbox.startup.cni_plugin_count']);
   assert.deepEqual(finding.relatedSpanIds, ['span-cni-add']);
@@ -85,42 +85,7 @@ test('analysis flags high helper-binary count even with small aggregate duration
 
   const finding = analysis.findings.find((item) => item.id === 'cri-sandbox-a-startup-callchain-helper-binaries');
   assert.ok(finding);
-  assert.equal(finding.title, 'Helper binary execution is high during startup');
+  assert.equal(finding.title, 'Helper binaries are high during startup');
   assert.equal(finding.severity, 'warning');
-  assert.match(finding.summary, /startup helper binaries accounts|startup helper binaries executed/);
-});
-
-test('analysis flags hottest per-binary helper execution from binary breakdown metrics', () => {
-  const analysis = buildSandboxAnalysis({
-    sandbox: { ...baseSandbox, runtimeType: 'runc', startupDurationMs: 2600 },
-    image: undefined,
-    metrics: [
-      metric('sandbox.startup.callchain_duration_ms', 2600),
-      metric('sandbox.startup.binary.iptables_duration_ms', 580),
-      metric('sandbox.startup.binary.iptables_count', 4),
-      metric('sandbox.startup.binary.nft_duration_ms', 180),
-      metric('sandbox.startup.binary.nft_count', 2),
-    ],
-    events: [],
-    spans: [{
-      traceId: 'cri-containerd-startup-cri-sandbox-a',
-      spanId: 'span-iptables',
-      parentSpanId: 'root',
-      sandboxId: 'cri-sandbox-a',
-      spanName: 'process.exec.iptables',
-      startTime: '2026-05-22T02:00:00.800Z',
-      endTime: '2026-05-22T02:00:01.380Z',
-      durationMs: 580,
-      status: 'ok',
-      attributes: { 'process.binary': 'iptables' },
-    }],
-    profiles: [],
-  });
-
-  const finding = analysis.findings.find((item) => item.id === 'cri-sandbox-a-startup-binary-iptables');
-  assert.ok(finding);
-  assert.equal(finding.title, 'iptables is the hottest startup binary');
-  assert.equal(finding.severity, 'warning');
-  assert.deepEqual(finding.relatedMetricNames, ['sandbox.startup.binary.iptables_duration_ms', 'sandbox.startup.binary.iptables_count']);
-  assert.deepEqual(finding.relatedSpanIds, ['span-iptables']);
+  assert.match(finding.summary, /helper binaries accounts|helper binaries executed/);
 });
