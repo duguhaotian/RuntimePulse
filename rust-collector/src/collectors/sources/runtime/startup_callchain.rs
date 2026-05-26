@@ -264,12 +264,21 @@ fn output_from_lightweight_report(
     fallback_timestamp: &str,
     config: &CollectorConfig,
 ) -> PluginOutput {
+    let explicit_trace_id = report
+        .trace_id
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
     let trace_id = report
         .trace_id
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("startup-callchain-{}", sanitize_id(&report.sandbox_id)));
-    let root_span_id = format!("{trace_id}-root");
+        .unwrap_or_else(|| format!("cri-containerd-startup-{}", sanitize_id(&report.sandbox_id)));
+    let cri_startup_root_span_id = format!("{trace_id}-e2e");
+    let root_span_id = if explicit_trace_id {
+        format!("{trace_id}-root")
+    } else {
+        format!("{trace_id}-callchain")
+    };
     let status = report.status.as_deref().unwrap_or("ok").to_string();
     let runtime_type = report
         .runtime_type
@@ -290,12 +299,19 @@ fn output_from_lightweight_report(
     if let Some(summary) = &report.summary {
         base_attributes.insert("startup.summary".to_string(), json!(summary));
     }
+    if !explicit_trace_id {
+        base_attributes.insert(
+            "startup.trace.joined_trace_id".to_string(),
+            json!("cri-containerd-startup"),
+        );
+    }
 
     let mut traces = Vec::new();
     if let Some(root_span) = root_span_from_report(
         &report,
         &trace_id,
         &root_span_id,
+        (!explicit_trace_id).then_some(cri_startup_root_span_id.as_str()),
         &status,
         base_attributes.clone(),
     ) {
@@ -303,7 +319,7 @@ fn output_from_lightweight_report(
     }
 
     let default_parent = if traces.is_empty() {
-        None
+        (!explicit_trace_id).then_some(cri_startup_root_span_id.clone())
     } else {
         Some(root_span_id.clone())
     };
@@ -385,6 +401,7 @@ fn root_span_from_report(
     report: &StartupCallchainReport,
     trace_id: &str,
     root_span_id: &str,
+    parent_span_id: Option<&str>,
     status: &str,
     attributes: Map<String, Value>,
 ) -> Option<TraceSpan> {
@@ -404,7 +421,7 @@ fn root_span_from_report(
         attributes,
         sandbox_id: Some(report.sandbox_id.clone()),
         image_id: None,
-        parent_span_id: None,
+        parent_span_id: parent_span_id.map(ToOwned::to_owned),
     })
 }
 
@@ -804,6 +821,38 @@ mod tests {
         }));
         assert_eq!(output.events[0].event_name, "startup.callchain.observed");
         assert_eq!(output.metadata.nodes.len(), 1);
+    }
+
+    #[test]
+    fn defaults_to_cri_containerd_startup_trace_id_when_missing() {
+        let config = test_config();
+        let content = r#"
+        {
+          "sandboxId": "cri-sandbox-a",
+          "runtimeType": "kata",
+          "startTime": "2026-05-26T01:00:00.000Z",
+          "endTime": "2026-05-26T01:00:01.000Z",
+          "spans": [{
+            "spanName": "kata.agent.connect",
+            "startTime": "2026-05-26T01:00:00.800Z",
+            "durationMs": 50
+          }]
+        }
+        "#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+        assert!(output
+            .traces
+            .iter()
+            .all(|span| span.trace_id == "cri-containerd-startup-cri-sandbox-a"));
+        assert_eq!(
+            output.traces[0].parent_span_id.as_deref(),
+            Some("cri-containerd-startup-cri-sandbox-a-e2e")
+        );
+        assert_eq!(
+            output.traces[1].parent_span_id.as_deref(),
+            Some("cri-containerd-startup-cri-sandbox-a-callchain")
+        );
     }
 
     #[test]
