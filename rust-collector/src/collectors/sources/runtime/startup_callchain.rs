@@ -9,7 +9,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 #[cfg(unix)]
@@ -688,9 +688,16 @@ fn metrics_from_summary(
 }
 
 #[derive(Default)]
+struct CniPluginMetrics {
+    count: u64,
+    duration_ms: f64,
+}
+
+#[derive(Default)]
 struct SpanDerivedMetrics {
     cni_duration_ms: f64,
     cni_plugin_count: BTreeSet<String>,
+    cni_plugins: BTreeMap<String, CniPluginMetrics>,
     oci_duration_ms: f64,
     oci_call_count: u64,
     binary_exec_count: u64,
@@ -737,7 +744,10 @@ fn metrics_from_spans(
             derived.cni_duration_ms += duration;
             let plugin = cni_plugin_name(span, &span_name, &binary_name);
             if !plugin.is_empty() {
-                derived.cni_plugin_count.insert(plugin);
+                derived.cni_plugin_count.insert(plugin.clone());
+                let plugin_stats = derived.cni_plugins.entry(plugin).or_default();
+                plugin_stats.count += 1;
+                plugin_stats.duration_ms += duration;
             }
         }
 
@@ -809,6 +819,19 @@ fn metrics_from_spans(
         attributes,
         config,
     );
+    for (plugin_name, stats) in &derived.cni_plugins {
+        push_cni_plugin_metric_if_positive(
+            &mut metrics,
+            timestamp,
+            plugin_name,
+            stats.count as f64,
+            stats.duration_ms,
+            sandbox_id,
+            runtime_type,
+            attributes,
+            config,
+        );
+    }
     push_metric_if_positive(
         &mut metrics,
         timestamp,
@@ -976,6 +999,49 @@ fn metrics_from_spans(
     );
 
     metrics
+}
+
+fn push_cni_plugin_metric_if_positive(
+    metrics: &mut Vec<MetricSample>,
+    timestamp: &str,
+    plugin_name: &str,
+    count: f64,
+    duration_ms: f64,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) {
+    if count <= 0.0 && duration_ms <= 0.0 {
+        return;
+    }
+
+    let mut plugin_attributes = attributes.clone();
+    plugin_attributes.insert("cni.plugin".to_string(), json!(plugin_name));
+    plugin_attributes.insert("startup.metric.kind".to_string(), json!("cni_plugin_breakdown"));
+    let metric_prefix = format!("sandbox.startup.cni.plugin.{}", sanitize_metric_key(plugin_name));
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_count"),
+        count,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &plugin_attributes,
+        config,
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_duration_ms"),
+        duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        &plugin_attributes,
+        config,
+    );
 }
 
 fn push_metric_if_positive(
@@ -1348,6 +1414,12 @@ mod tests {
                 && span.attributes["cni.plugin"] == json!("bridge")));
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.cni_duration_ms" && metric.value == 250.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.cni.plugin.bridge_duration_ms" && metric.value == 100.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.cni.plugin.bridge_count" && metric.value == 1.0
         }));
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.oci_duration_ms" && metric.value == 80.0

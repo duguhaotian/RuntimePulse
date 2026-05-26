@@ -129,6 +129,7 @@ function startupCallchainCandidates(metrics, spans) {
       category: 'startup',
       durationMetricName: 'sandbox.startup.cni_duration_ms',
       countMetricName: 'sandbox.startup.cni_plugin_count',
+      perPlugin: true,
       durationThresholdMs: 1_000,
       shareThreshold: 0.25,
       countThreshold: 4,
@@ -208,15 +209,44 @@ function startupCallchainCandidates(metrics, spans) {
       ? spans.filter(isCniStartupSpan)
       : spans.filter((span) => definition.spanPatterns.some((pattern) => pattern.test(span.spanName)));
     const spanDurationMs = relatedSpans.reduce((total, span) => total + Number(span.durationMs ?? 0), 0);
+    const pluginBreakdown = definition.perPlugin ? dominantCniPluginMetrics(metrics) : undefined;
     return {
       ...definition,
-      binary: dominantBinaryName(relatedSpans),
-      durationMs: maxMetricValue(metrics, definition.durationMetricName) ?? spanDurationMs,
-      count: definition.countMetricName ? maxMetricValue(metrics, definition.countMetricName) ?? 0 : 0,
-      relatedSpanIds: relatedSpans.map((span) => span.spanId),
+      binary: pluginBreakdown?.binary ?? dominantBinaryName(relatedSpans),
+      durationMs: pluginBreakdown?.durationMs ?? maxMetricValue(metrics, definition.durationMetricName) ?? spanDurationMs,
+      count: pluginBreakdown?.count ?? (definition.countMetricName ? maxMetricValue(metrics, definition.countMetricName) ?? 0 : 0),
+      durationMetricName: pluginBreakdown?.durationMetricName ?? definition.durationMetricName,
+      countMetricName: pluginBreakdown?.countMetricName ?? definition.countMetricName,
+      relatedSpanIds: pluginBreakdown?.binary
+        ? relatedSpans.filter((span) => spanMatchesBinary(span, pluginBreakdown.binary)).map((span) => span.spanId)
+        : relatedSpans.map((span) => span.spanId),
       errorSpan: relatedSpans.find((span) => span.status === 'error'),
     };
   });
+}
+
+function dominantCniPluginMetrics(metrics) {
+  const plugins = new Map();
+
+  for (const series of metrics) {
+    const match = String(series?.name ?? '').match(/^sandbox\.startup\.cni\.plugin\.(.+)_(count|duration_ms)$/);
+    if (!match) continue;
+
+    const [, binary, kind] = match;
+    const candidate = plugins.get(binary) ?? {
+      binary,
+      count: 0,
+      durationMs: 0,
+      countMetricName: `sandbox.startup.cni.plugin.${binary}_count`,
+      durationMetricName: `sandbox.startup.cni.plugin.${binary}_duration_ms`,
+    };
+    const value = maxPoint(series)?.value ?? 0;
+    if (kind === 'count') candidate.count = Math.max(candidate.count, value);
+    if (kind === 'duration_ms') candidate.durationMs = Math.max(candidate.durationMs, value);
+    plugins.set(binary, candidate);
+  }
+
+  return [...plugins.values()].sort((left, right) => right.durationMs - left.durationMs || right.count - left.count)[0];
 }
 
 function startupTotalMs(sandbox, metrics, spans) {
@@ -275,6 +305,12 @@ function binaryFromSpanName(span) {
   if (name.startsWith('cni.plugin.')) return name.slice('cni.plugin.'.length).split('.').filter(Boolean).pop();
   if (name.startsWith('oci.')) return name.slice('oci.'.length).split('.').filter(Boolean).pop();
   return undefined;
+}
+
+function spanMatchesBinary(span, binary) {
+  return [processBinaryName(span), cniPluginAttribute(span), binaryFromSpanName(span)]
+    .filter(Boolean)
+    .some((value) => value === binary);
 }
 
 function nodePressureFinding(metrics) {

@@ -421,14 +421,33 @@ function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
       ? spans.filter(isCniStartupSpan)
       : spans.filter((span) => definition.patterns.some((pattern) => pattern.test(span.spanName)));
     const spanDuration = relatedSpans.reduce((sum, span) => sum + span.durationMs, 0);
+    const pluginBreakdown = definition.key === 'cni' ? dominantCniPluginMetrics(metrics) : undefined;
     return {
       ...definition,
-      binary: dominantStartupBinaryName(relatedSpans),
-      durationMs: latestMetricByName(metrics, definition.durationMetric) ?? spanDuration,
-      count: definition.countMetric ? latestMetricByName(metrics, definition.countMetric) ?? 0 : 0,
-      relatedSpans,
+      binary: pluginBreakdown?.binary ?? dominantStartupBinaryName(relatedSpans),
+      durationMs: pluginBreakdown?.durationMs ?? latestMetricByName(metrics, definition.durationMetric) ?? spanDuration,
+      count: pluginBreakdown?.count ?? (definition.countMetric ? latestMetricByName(metrics, definition.countMetric) ?? 0 : 0),
+      relatedSpans: pluginBreakdown?.binary ? relatedSpans.filter((span) => spanMatchesBinary(span, pluginBreakdown.binary)) : relatedSpans,
     };
   });
+}
+
+function dominantCniPluginMetrics(metrics: MetricSeries[]) {
+  const plugins = new Map<string, { binary: string; count: number; durationMs: number }>();
+
+  for (const series of metrics) {
+    const match = series.name.match(/^sandbox\.startup\.cni\.plugin\.(.+)_(count|duration_ms)$/);
+    if (!match) continue;
+
+    const [, binary, kind] = match;
+    const candidate = plugins.get(binary) ?? { binary, count: 0, durationMs: 0 };
+    const value = latestMetricValue(series);
+    if (kind === 'count') candidate.count = Math.max(candidate.count, value);
+    if (kind === 'duration_ms') candidate.durationMs = Math.max(candidate.durationMs, value);
+    plugins.set(binary, candidate);
+  }
+
+  return Array.from(plugins.values()).sort((left, right) => right.durationMs - left.durationMs || right.count - left.count)[0];
 }
 
 function isCniStartupSpan(span: TraceSpan) {
@@ -466,6 +485,12 @@ function binaryFromSpanName(span: TraceSpan) {
   if (span.spanName.startsWith('cni.plugin.')) return span.spanName.slice('cni.plugin.'.length).split('.').filter(Boolean).pop();
   if (span.spanName.startsWith('oci.')) return span.spanName.slice('oci.'.length).split('.').filter(Boolean).pop();
   return undefined;
+}
+
+function spanMatchesBinary(span: TraceSpan, binary: string) {
+  return [processBinaryName(span), cniPluginName(span), binaryFromSpanName(span)]
+    .filter(Boolean)
+    .some((value) => value === binary);
 }
 
 function startupCallchainTotal(sandbox: Sandbox, metrics: MetricSeries[], spans: TraceSpan[]) {

@@ -44,6 +44,10 @@ test('analysis flags CNI-dominated startup callchain metrics', () => {
       metric('sandbox.startup.callchain_duration_ms', 4000),
       metric('sandbox.startup.cni_duration_ms', 2600),
       metric('sandbox.startup.cni_plugin_count', 3),
+      metric('sandbox.startup.cni.plugin.bridge_duration_ms', 1800),
+      metric('sandbox.startup.cni.plugin.bridge_count', 1),
+      metric('sandbox.startup.cni.plugin.loopback_duration_ms', 200),
+      metric('sandbox.startup.cni.plugin.loopback_count', 1),
     ],
     events: [],
     spans: [{
@@ -64,8 +68,8 @@ test('analysis flags CNI-dominated startup callchain metrics', () => {
   const finding = analysis.findings.find((item) => item.id === 'cri-sandbox-a-startup-callchain-cni');
   assert.ok(finding);
   assert.equal(finding.title, 'bridge is the hottest CNI plugin binary');
-  assert.equal(finding.severity, 'critical');
-  assert.deepEqual(finding.relatedMetricNames, ['sandbox.startup.cni_duration_ms', 'sandbox.startup.cni_plugin_count']);
+  assert.equal(finding.severity, 'warning');
+  assert.deepEqual(finding.relatedMetricNames, ['sandbox.startup.cni.plugin.bridge_duration_ms', 'sandbox.startup.cni.plugin.bridge_count']);
   assert.deepEqual(finding.relatedSpanIds, ['span-cni-add']);
 });
 
