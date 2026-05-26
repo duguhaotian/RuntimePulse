@@ -245,7 +245,7 @@ Implemented:
 - Sandbox rule analysis endpoint: `GET /api/sandboxes/{id}/analysis`.
 - Rule findings combine sandbox metadata, metrics, events, trace spans, image details, and profile indexes.
 - Startup call-chain findings now identify CNI, OCI, Kata VM, helper-binary, and binary-exec bottlenecks from collector-derived `sandbox.startup.*` metrics plus matching spans.
-- Sandbox detail overview now shows rule findings with evidence, recommended actions, and trace-span drill-down links.
+- Sandbox detail overview now shows a RunPod startup call-chain summary for CNI/OCI/Kata/helper phases, plus rule findings with evidence, related metrics, recommended actions, and trace-span drill-down links.
 
 Potential architecture:
 

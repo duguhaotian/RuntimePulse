@@ -3610,6 +3610,163 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   padding: 6px 8px;
 }
 
+
+.startup-callchain-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.startup-callchain-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.startup-callchain-header h3,
+.startup-callchain-header p {
+  margin: 0;
+}
+
+.startup-callchain-header p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.startup-callchain-total {
+  min-width: 140px;
+  padding: 10px 12px;
+  border: 1px solid rgba(75, 163, 255, 0.23);
+  border-radius: 12px;
+  background: rgba(75, 163, 255, 0.08);
+  text-align: right;
+}
+
+.startup-callchain-total strong {
+  display: block;
+  color: #d8ecff;
+  font-size: 24px;
+}
+
+.startup-callchain-total span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.startup-callchain-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.startup-callchain-card {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 12px;
+  background: rgba(10, 14, 20, 0.42);
+  padding: 11px;
+}
+
+.startup-callchain-card.network { border-color: rgba(45, 212, 191, 0.24); }
+.startup-callchain-card.runtime { border-color: rgba(96, 165, 250, 0.26); }
+.startup-callchain-card.secure { border-color: rgba(167, 139, 250, 0.28); }
+.startup-callchain-card.helper { border-color: rgba(246, 195, 68, 0.24); }
+
+.startup-callchain-card-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.startup-callchain-card-title span,
+.startup-callchain-meta span,
+.analysis-related-metrics span {
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.startup-callchain-card-title strong {
+  color: #f8fafc;
+  font-size: 16px;
+  white-space: nowrap;
+}
+
+.startup-callchain-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.startup-callchain-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(75, 163, 255, 0.95), rgba(45, 212, 191, 0.86));
+}
+
+.startup-callchain-card.secure .startup-callchain-track i {
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.95), rgba(75, 163, 255, 0.76));
+}
+
+.startup-callchain-card.helper .startup-callchain-track i {
+  background: linear-gradient(90deg, rgba(246, 195, 68, 0.95), rgba(251, 146, 60, 0.76));
+}
+
+.startup-callchain-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.startup-callchain-spans,
+.analysis-related-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.startup-callchain-spans button {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: #cbd5e1;
+  font-size: 11px;
+  padding: 5px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysis-related-metrics span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.06);
+  padding: 5px 7px;
+}
+
+.analysis-related-metrics strong {
+  color: #e5edf6;
+  font-size: 11px;
+}
+
 .config-card dl {
   display: grid;
   grid-template-columns: 125px minmax(0, 1fr);
@@ -4843,6 +5000,16 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
 
   .stage-heatmap-cells {
     grid-template-columns: repeat(12, minmax(0, 1fr));
+  }
+
+  .startup-callchain-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .startup-callchain-total {
+    width: 100%;
+    min-width: 0;
+    text-align: left;
   }
 
   .image-layer-row,

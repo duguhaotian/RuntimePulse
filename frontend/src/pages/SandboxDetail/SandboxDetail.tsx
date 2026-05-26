@@ -194,7 +194,8 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 
       {tab === 'overview' && (
         <div className="overview-stack">
-          {analysis && <AnalysisPanel analysis={analysis} spans={spans} onSelectSpan={setSelectedSpan} />}
+          <StartupCallchainPanel sandbox={sandbox} metrics={metrics} spans={spans} onSelectSpan={setSelectedSpan} />
+          {analysis && <AnalysisPanel analysis={analysis} spans={spans} metrics={metrics} onSelectSpan={setSelectedSpan} />}
           {image && (
             <ContainerImageAccessPanel
               sandbox={sandbox}
@@ -256,10 +257,12 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 function AnalysisPanel({
   analysis,
   spans,
+  metrics,
   onSelectSpan,
 }: {
   analysis: SandboxAnalysis;
   spans: TraceSpan[];
+  metrics: MetricSeries[];
   onSelectSpan: (span: TraceSpan) => void;
 }) {
   const topFinding = analysis.findings[0];
@@ -289,7 +292,7 @@ function AnalysisPanel({
 
       <div className="analysis-finding-grid">
         {analysis.findings.map((finding) => (
-          <AnalysisFindingCard finding={finding} key={finding.id} spans={spans} onSelectSpan={onSelectSpan} />
+          <AnalysisFindingCard finding={finding} key={finding.id} metrics={metrics} spans={spans} onSelectSpan={onSelectSpan} />
         ))}
       </div>
     </div>
@@ -299,15 +302,20 @@ function AnalysisPanel({
 function AnalysisFindingCard({
   finding,
   spans,
+  metrics,
   onSelectSpan,
 }: {
   finding: AnalysisFinding;
   spans: TraceSpan[];
+  metrics: MetricSeries[];
   onSelectSpan: (span: TraceSpan) => void;
 }) {
   const relatedSpans = (finding.relatedSpanIds ?? [])
     .map((spanId) => spans.find((span) => span.spanId === spanId))
     .filter((span): span is TraceSpan => Boolean(span));
+  const relatedMetrics = (finding.relatedMetricNames ?? [])
+    .map((name) => metrics.find((series) => series.name === name))
+    .filter((series): series is MetricSeries => Boolean(series));
 
   return (
     <article className={`analysis-finding-card ${finding.severity}`}>
@@ -324,6 +332,13 @@ function AnalysisFindingCard({
         <span>Next actions</span>
         {finding.recommendedActions.slice(0, 2).map((item) => <em key={item}>{item}</em>)}
       </div>
+      {relatedMetrics.length > 0 && (
+        <div className="analysis-related-metrics">
+          {relatedMetrics.slice(0, 4).map((series) => (
+            <span key={series.name}>{metricShortLabel(series.name)} <strong>{formatMetricValue(latestMetricValue(series), series.unit)}</strong></span>
+          ))}
+        </div>
+      )}
       {relatedSpans.length > 0 && (
         <div className="analysis-related-actions">
           {relatedSpans.map((span) => (
@@ -333,6 +348,114 @@ function AnalysisFindingCard({
       )}
     </article>
   );
+}
+
+
+function StartupCallchainPanel({
+  sandbox,
+  metrics,
+  spans,
+  onSelectSpan,
+}: {
+  sandbox: Sandbox;
+  metrics: MetricSeries[];
+  spans: TraceSpan[];
+  onSelectSpan: (span: TraceSpan) => void;
+}) {
+  const phases = startupCallchainPhases(metrics, spans);
+  const totalDuration = startupCallchainTotal(sandbox, metrics, spans);
+  const maxDuration = Math.max(...phases.map((phase) => phase.durationMs), 1);
+  const hasCallchainData = phases.some((phase) => phase.durationMs > 0 || phase.count > 0);
+
+  if (!hasCallchainData) return null;
+
+  return (
+    <div className="panel-card startup-callchain-panel">
+      <div className="startup-callchain-header">
+        <div>
+          <h3>RunPod startup call chain</h3>
+          <p>Collector-derived CNI/OCI/Kata/helper attribution for this sandbox startup.</p>
+        </div>
+        <div className="startup-callchain-total">
+          <strong>{formatDuration(totalDuration)}</strong>
+          <span>measured startup</span>
+        </div>
+      </div>
+      <div className="startup-callchain-grid">
+        {phases.map((phase) => (
+          <article className={`startup-callchain-card ${phase.tone}`} key={phase.key}>
+            <div className="startup-callchain-card-title">
+              <span>{phase.label}</span>
+              <strong>{formatDuration(phase.durationMs)}</strong>
+            </div>
+            <div className="startup-callchain-track"><i style={{ width: `${Math.max(phase.durationMs > 0 ? 7 : 0, phase.durationMs / maxDuration * 100)}%` }} /></div>
+            <div className="startup-callchain-meta">
+              <span>{formatRatio(ratio(phase.durationMs, Math.max(totalDuration, 1)))} of startup</span>
+              {phase.count > 0 && <span>{phase.count} calls</span>}
+            </div>
+            {phase.relatedSpans.length > 0 && (
+              <div className="startup-callchain-spans">
+                {phase.relatedSpans.slice(0, 3).map((span) => (
+                  <button key={span.spanId} onClick={() => onSelectSpan(span)}>{span.spanName}</button>
+                ))}
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
+  const definitions = [
+    { key: 'cni', label: 'CNI', durationMetric: 'sandbox.startup.cni_duration_ms', countMetric: 'sandbox.startup.cni_plugin_count', tone: 'network', patterns: [/\bcni\b/i, /network/i] },
+    { key: 'oci', label: 'OCI runtime', durationMetric: 'sandbox.startup.oci_duration_ms', countMetric: 'sandbox.startup.oci_call_count', tone: 'runtime', patterns: [/\boci\b/i, /runc/i, /runtime\.(create|start)/i] },
+    { key: 'kata', label: 'Kata VM', durationMetric: 'sandbox.startup.kata_duration_ms', countMetric: undefined, tone: 'secure', patterns: [/kata/i, /vm\.(boot|start|ready)/i, /hypervisor/i] },
+    { key: 'helpers', label: 'Helper binaries', durationMetric: 'sandbox.startup.helper_binary_duration_ms', countMetric: 'sandbox.startup.helper_binary_count', tone: 'helper', patterns: [/exec/i, /iptables/i, /nft/i, /\bip\b/i, /\btc\b/i] },
+    { key: 'exec', label: 'All exec', durationMetric: 'sandbox.startup.binary_exec_duration_ms', countMetric: 'sandbox.startup.binary_exec_count', tone: 'helper', patterns: [/exec/i, /process/i] },
+  ];
+
+  return definitions.map((definition) => {
+    const relatedSpans = spans.filter((span) => definition.patterns.some((pattern) => pattern.test(span.spanName)));
+    const spanDuration = relatedSpans.reduce((sum, span) => sum + span.durationMs, 0);
+    return {
+      ...definition,
+      durationMs: latestMetricByName(metrics, definition.durationMetric) ?? spanDuration,
+      count: definition.countMetric ? latestMetricByName(metrics, definition.countMetric) ?? 0 : 0,
+      relatedSpans,
+    };
+  });
+}
+
+function startupCallchainTotal(sandbox: Sandbox, metrics: MetricSeries[], spans: TraceSpan[]) {
+  return sandbox.startupDurationMs
+    || latestMetricByName(metrics, 'sandbox.startup.callchain_duration_ms')
+    || latestMetricByName(metrics, 'sandbox.startup.e2e_duration_ms')
+    || latestMetricByName(metrics, 'sandbox.startup.duration_ms')
+    || Math.max(0, ...spans
+      .filter((span) => ['sandbox.startup.callchain', 'sandbox.startup.e2e', 'sandbox.startup'].includes(span.spanName))
+      .map((span) => span.durationMs));
+}
+
+function latestMetricByName(metrics: MetricSeries[], name?: string) {
+  if (!name) return undefined;
+  const values = metrics
+    .filter((series) => series.name === name)
+    .map((series) => latestMetricValue(series))
+    .filter((value) => Number.isFinite(value));
+  return values.length > 0 ? Math.max(...values) : undefined;
+}
+
+function metricShortLabel(name: string) {
+  return name.replace(/^sandbox\.startup\./, '').replace(/_/g, ' ');
+}
+
+function formatMetricValue(value: number, unit: string) {
+  if (unit === 'ms') return formatDuration(value);
+  if (unit === 'bytes') return formatBytes(value);
+  if (unit === 'ratio') return formatRatio(value);
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function DetailDataSections({
