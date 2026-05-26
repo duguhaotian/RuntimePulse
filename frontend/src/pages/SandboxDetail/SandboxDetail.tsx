@@ -364,8 +364,8 @@ function StartupCallchainPanel({
 }) {
   const phases = startupCallchainPhases(metrics, spans);
   const totalDuration = startupCallchainTotal(sandbox, metrics, spans);
-  const maxDuration = Math.max(...phases.map((phase) => phase.durationMs), 1);
-  const hasCallchainData = phases.some((phase) => phase.durationMs > 0 || phase.count > 0);
+  const maxDuration = Math.max(...phases.items.map((phase) => phase.durationMs), 1);
+  const hasCallchainData = phases.items.some((phase) => phase.durationMs > 0 || phase.count > 0);
 
   if (!hasCallchainData) return null;
 
@@ -381,8 +381,28 @@ function StartupCallchainPanel({
           <span>measured startup</span>
         </div>
       </div>
+      {phases.cniPlugins.length > 0 && (
+        <div className="cni-plugin-breakdown">
+          <div className="cni-plugin-breakdown-header">
+            <strong>CNI plugin binaries</strong>
+            <span>{phases.cniPlugins.length} observed</span>
+          </div>
+          <div className="cni-plugin-list">
+            {phases.cniPlugins.map((plugin) => (
+              <article className="cni-plugin-row" key={plugin.binary}>
+                <div>
+                  <strong>{plugin.binary}</strong>
+                  <span>{plugin.count} calls · {formatRatio(ratio(plugin.durationMs, Math.max(totalDuration, 1)))} of startup</span>
+                </div>
+                <div className="cni-plugin-track"><i style={{ width: `${Math.max(plugin.durationMs > 0 ? 7 : 0, plugin.durationMs / Math.max(phases.cniMaxDurationMs, 1) * 100)}%` }} /></div>
+                <em>{formatDuration(plugin.durationMs)}</em>
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="startup-callchain-grid">
-        {phases.map((phase) => (
+        {phases.items.map((phase) => (
           <article className={`startup-callchain-card ${phase.tone}`} key={phase.key}>
             <div className="startup-callchain-card-title">
               <span>{phase.label}{phase.binary ? ` · ${phase.binary}` : ''}</span>
@@ -416,12 +436,13 @@ function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
     { key: 'exec', label: 'Exec total', durationMetric: 'sandbox.startup.binary_exec_duration_ms', countMetric: 'sandbox.startup.binary_exec_count', tone: 'helper', patterns: [/exec/i, /process/i] },
   ];
 
-  return definitions.map((definition) => {
+  const cniPlugins = cniPluginMetrics(metrics);
+  const items = definitions.map((definition) => {
     const relatedSpans = definition.key === 'cni'
       ? spans.filter(isCniStartupSpan)
       : spans.filter((span) => definition.patterns.some((pattern) => pattern.test(span.spanName)));
     const spanDuration = relatedSpans.reduce((sum, span) => sum + span.durationMs, 0);
-    const pluginBreakdown = definition.key === 'cni' ? dominantCniPluginMetrics(metrics) : undefined;
+    const pluginBreakdown = definition.key === 'cni' ? cniPlugins[0] : undefined;
     return {
       ...definition,
       binary: pluginBreakdown?.binary ?? dominantStartupBinaryName(relatedSpans),
@@ -430,9 +451,15 @@ function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
       relatedSpans: pluginBreakdown?.binary ? relatedSpans.filter((span) => spanMatchesBinary(span, pluginBreakdown.binary)) : relatedSpans,
     };
   });
+
+  return {
+    items,
+    cniPlugins,
+    cniMaxDurationMs: Math.max(...cniPlugins.map((plugin) => plugin.durationMs), 1),
+  };
 }
 
-function dominantCniPluginMetrics(metrics: MetricSeries[]) {
+function cniPluginMetrics(metrics: MetricSeries[]) {
   const plugins = new Map<string, { binary: string; count: number; durationMs: number }>();
 
   for (const series of metrics) {
@@ -447,7 +474,7 @@ function dominantCniPluginMetrics(metrics: MetricSeries[]) {
     plugins.set(binary, candidate);
   }
 
-  return Array.from(plugins.values()).sort((left, right) => right.durationMs - left.durationMs || right.count - left.count)[0];
+  return Array.from(plugins.values()).sort((left, right) => right.durationMs - left.durationMs || right.count - left.count);
 }
 
 function isCniStartupSpan(span: TraceSpan) {
