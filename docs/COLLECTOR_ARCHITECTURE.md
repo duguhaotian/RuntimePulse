@@ -99,6 +99,28 @@ keeps Kubernetes/containerd sandbox metrics aligned with the same
 `k8s-{namespace}-{pod}-{container}` identity used by inventory, events, and
 Prometheus metrics.
 
+`cri-startup-trace` is the lightweight CRI+containerd startup correlator for
+CRI/containerd deployments. Enabling it also enables `kubelet-events` and
+`containerd-events`. It does not proxy the CRI socket. Instead it correlates
+`SANDBOX_CREATED`/`SANDBOX_READY` CRI events with containerd
+container/task create/start events and emits a `sandbox.startup.e2e` trace plus
+child spans such as `cri.sandbox.create_to_ready`,
+`containerd.container.create_to_task_start`, `containerd.task.create`, and
+`containerd.task.start`. This first pass is intentionally event based: its
+start point is the first observable CRI/containerd sandbox event, not the
+internal `RunPodSandbox` function entry.
+
+The later high-fidelity startup path should add eBPF uprobes on versioned
+containerd CRI `RunPodSandbox` implementations and OCI-runtime boundaries,
+combined with exec/exit capture for CNI and runtime helper binaries. The goal is
+to attribute CNI plugin cost, `iptables`/`nft`/`ip`/`tc` helper calls, and
+`runc`/`kata-runtime`/hypervisor invocations to the active RunPodSandbox
+context. Plain process exec tracing is not sufficient by itself because
+containerd can run concurrent sandbox creations; RunPodSandbox context and
+stable IDs such as `CNI_CONTAINERID`, containerd sandbox id, OCI bundle path,
+and CRI sandbox id must drive correlation. CRI socket proxying is not part of
+the preferred design.
+
 Docker sources are retained for single-node and local validation scenarios.
 They are not the preferred Kubernetes path.
 
@@ -343,7 +365,8 @@ starting each source manually.
 1. Keep the non-Kubernetes P1 path first. Kata, Firecracker, and gVisor now have baseline host-agent/outlet report sources, and `sandbox-reconcile` can remove stale live sandboxes for report-only runtimes via `snapshot.scope`/`snapshot.sandboxIds`.
 2. Deepen snapshotter/image-cache fidelity next. The generic `image-cache` report path accepts file reports, exporter commands, common snapshotter state/index JSON and JSONL, Prometheus text exposition, layer-level cache counters, prefetch records, and timeline spans; add native parsers for nydus, stargz, overlaybd, or other snapshotters once their real local formats are selected.
 3. Deepen runtime diagnostic and profile artifact workflows without moving eBPF-specific work forward yet. Generic diagnostic-report ingestion supports files, exporter commands, and artifact-index aliases, Docker diagnostics can be exported with `runtimepulse-collector docker-diagnostics`, and CRI/containerd diagnostics are available through `crictl-diagnostics` and `containerd-diagnostics`. Generic profile reports and artifact-index aliases plus native perf-script target/duration inference and perf folded-stack conversion with command input is available; eBPF backend deepening remains deferred.
-4. Complete the Kubernetes path on containerd after the non-Kubernetes P1 collector work: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
-5. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
-6. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
-7. Keep production security, tenancy/RBAC, and full hardening last until collector data quality and workflows stabilize.
+4. Complete the CRI+containerd runc/Kata path before broader Kubernetes integration: deepen `cri-startup-trace`, add RunPodSandbox/OCI-runtime uprobe profiles, then attribute CNI and helper-binary costs without introducing a CRI proxy.
+5. Complete the Kubernetes path on containerd after the CRI+containerd runtime path: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
+6. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
+7. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
+8. Keep production security, tenancy/RBAC, and full hardening last until collector data quality and workflows stabilize.

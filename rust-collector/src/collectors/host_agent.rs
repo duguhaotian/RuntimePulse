@@ -50,7 +50,11 @@ use crate::collectors::sources::runtime::docker::events::{
 use crate::collectors::sources::runtime::docker::inventory::collect_docker_inventory;
 use crate::collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
 use crate::collectors::sources::runtime::kubelet::{
-    output_from_cri_event, stream_cri_events, CriEvent,
+    cri_event_action as kubelet_cri_event_action,
+    cri_event_runtime_object_id as kubelet_cri_event_runtime_object_id,
+    cri_event_runtime_sandbox_id as kubelet_cri_event_runtime_sandbox_id,
+    cri_event_stable_sandbox_id as kubelet_cri_event_stable_sandbox_id, output_from_cri_event,
+    stream_cri_events, CriEvent,
 };
 use crate::collectors::sources::sandbox::cgroupfs::{
     ContainerdSandboxCgroupTarget, DockerSandboxCgroupfsPlugin,
@@ -65,6 +69,7 @@ use crate::collectors::sources::sandbox::manager::{
 use crate::collectors::sources::sandbox::reconcile::SandboxReconcilePlugin;
 
 type ActiveContainerdTargets = Arc<Mutex<HashMap<String, ContainerdSandboxCgroupTarget>>>;
+type SharedCriContainerdStartupTracker = Arc<Mutex<CriContainerdStartupTraceTracker>>;
 
 const DEFAULT_QUEUE_CAPACITY: usize = 512;
 const DEFAULT_FLUSH_MS: u64 = 1000;
@@ -92,6 +97,7 @@ struct HostAgentSources {
     docker_events: bool,
     containerd_events: bool,
     kubelet_events: bool,
+    cri_startup_trace: bool,
     kubernetes_metrics: bool,
     docker_sandbox_cgroupfs: bool,
     containerd_sandbox_cgroupfs: bool,
@@ -182,6 +188,13 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     } else {
         None
     };
+    let cri_containerd_startup_tracker = if sources.cri_startup_trace {
+        Some(Arc::new(Mutex::new(
+            CriContainerdStartupTraceTracker::default(),
+        )))
+    } else {
+        None
+    };
 
     let restart_delay = event_stream_restart_delay();
     let docker_event_thread = if !config.once && sources.needs_docker_event_stream() {
@@ -208,12 +221,14 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         let event_tx = tx.clone();
         let event_config = config.clone();
         let event_active_containerd_targets = active_containerd_targets.clone();
+        let event_startup_tracker = cri_containerd_startup_tracker.clone();
         let event_stats = Arc::clone(&stats);
         Some(thread::spawn(move || {
             run_containerd_event_worker_loop(
                 event_config,
                 event_tx,
                 event_active_containerd_targets,
+                event_startup_tracker,
                 event_stats,
                 restart_delay,
             )
@@ -225,9 +240,16 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
     let kubelet_event_thread = if !config.once && sources.kubelet_events {
         let event_tx = tx.clone();
         let event_config = config.clone();
+        let event_startup_tracker = cri_containerd_startup_tracker.clone();
         let event_stats = Arc::clone(&stats);
         Some(thread::spawn(move || {
-            run_kubelet_event_worker_loop(event_config, event_tx, event_stats, restart_delay)
+            run_kubelet_event_worker_loop(
+                event_config,
+                event_tx,
+                event_startup_tracker,
+                event_stats,
+                restart_delay,
+            )
         }))
     } else {
         None
@@ -579,6 +601,7 @@ fn run_containerd_event_worker_loop(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
     active_containerd_targets: Option<ActiveContainerdTargets>,
+    cri_containerd_startup_tracker: Option<SharedCriContainerdStartupTracker>,
     stats: Arc<HostAgentStats>,
     restart_delay: Duration,
 ) -> Result<()> {
@@ -588,6 +611,7 @@ fn run_containerd_event_worker_loop(
             config.clone(),
             tx.clone(),
             active_containerd_targets.clone(),
+            cri_containerd_startup_tracker.clone(),
             Arc::clone(&stats),
             restart_attempt,
         ) {
@@ -605,6 +629,7 @@ fn run_containerd_event_worker_once(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
     active_containerd_targets: Option<ActiveContainerdTargets>,
+    cri_containerd_startup_tracker: Option<SharedCriContainerdStartupTracker>,
     stats: Arc<HostAgentStats>,
     restart_attempt: bool,
 ) -> Result<()> {
@@ -620,11 +645,23 @@ fn run_containerd_event_worker_once(
         if let Some(active) = active_containerd_targets.as_ref() {
             apply_containerd_runtime_event(active, &event);
         }
+        let cri_trace_outputs = if let Some(tracker) = cri_containerd_startup_tracker.as_ref() {
+            let mut tracker = tracker.lock().map_err(|_| CollectorError::Plugin {
+                plugin: "cri-startup-trace".to_string(),
+                message: "CRI/containerd startup tracker lock poisoned".to_string(),
+            })?;
+            tracker.outputs_from_containerd_event(&event, &config)
+        } else {
+            Vec::new()
+        };
         if let Some(output) = containerd_output_from_event(event, &config)? {
             enqueue_report("containerd-events", &tx, output, &stats);
         }
         if let Some(output) = trace_output {
             enqueue_report("containerd-startup-trace", &tx, output, &stats);
+        }
+        for output in cri_trace_outputs {
+            enqueue_report("cri-startup-trace", &tx, output, &stats);
         }
         Ok(())
     });
@@ -638,6 +675,7 @@ fn run_containerd_event_worker_once(
 fn run_kubelet_event_worker_loop(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
+    cri_containerd_startup_tracker: Option<SharedCriContainerdStartupTracker>,
     stats: Arc<HostAgentStats>,
     restart_delay: Duration,
 ) -> Result<()> {
@@ -646,6 +684,7 @@ fn run_kubelet_event_worker_loop(
         match run_kubelet_event_worker_once(
             config.clone(),
             tx.clone(),
+            cri_containerd_startup_tracker.clone(),
             Arc::clone(&stats),
             restart_attempt,
         ) {
@@ -662,14 +701,27 @@ fn run_kubelet_event_worker_loop(
 fn run_kubelet_event_worker_once(
     config: CollectorConfig,
     tx: SyncSender<PluginOutput>,
+    cri_containerd_startup_tracker: Option<SharedCriContainerdStartupTracker>,
     stats: Arc<HostAgentStats>,
     restart_attempt: bool,
 ) -> Result<()> {
     mark_event_stream_running(&stats, "kubelet-events", true, restart_attempt);
     let result = stream_cri_events(&config, |event| {
         mark_event_stream_event(&stats, "kubelet-events", cri_event_timestamp(&event));
+        let trace_outputs = if let Some(tracker) = cri_containerd_startup_tracker.as_ref() {
+            let mut tracker = tracker.lock().map_err(|_| CollectorError::Plugin {
+                plugin: "cri-startup-trace".to_string(),
+                message: "CRI/containerd startup tracker lock poisoned".to_string(),
+            })?;
+            tracker.outputs_from_cri_event(&event, &config)
+        } else {
+            Vec::new()
+        };
         if let Some(output) = output_from_cri_event(event, &config) {
             enqueue_report("kubelet-events", &tx, output, &stats);
+        }
+        for output in trace_outputs {
+            enqueue_report("cri-startup-trace", &tx, output, &stats);
         }
         Ok(())
     });
@@ -1846,6 +1898,626 @@ fn containerd_startup_trace_output(
     }
 }
 
+#[derive(Default)]
+struct CriContainerdStartupTraceTracker {
+    pending: HashMap<String, CriContainerdStartupState>,
+    aliases: HashMap<String, String>,
+}
+
+#[derive(Clone, Default)]
+struct CriContainerdStartupState {
+    sandbox_id: String,
+    runtime_sandbox_id: String,
+    containerd_container_id: String,
+    containerd_namespace: String,
+    runtime_name: String,
+    runtime_type: String,
+    image_ref: String,
+    k8s_namespace: String,
+    k8s_pod: String,
+    k8s_container: String,
+    k8s_pod_uid: String,
+    cri_created_at: Option<DateTime<Utc>>,
+    containerd_create_at: Option<DateTime<Utc>>,
+    containerd_task_create_at: Option<DateTime<Utc>>,
+    containerd_task_start_at: Option<DateTime<Utc>>,
+}
+
+impl CriContainerdStartupTraceTracker {
+    fn outputs_from_cri_event(
+        &mut self,
+        event: &CriEvent,
+        config: &CollectorConfig,
+    ) -> Vec<PluginOutput> {
+        let action = kubelet_cri_event_action(event);
+        if !matches!(
+            action,
+            "SANDBOX_CREATED" | "SANDBOX_READY" | "SANDBOX_NOTREADY"
+        ) {
+            return Vec::new();
+        }
+
+        let Some(sandbox_id) = kubelet_cri_event_stable_sandbox_id(event) else {
+            return Vec::new();
+        };
+        let timestamp = cri_event_timestamp(event);
+        let runtime_sandbox_id = kubelet_cri_event_runtime_sandbox_id(event);
+        let object_id = kubelet_cri_event_runtime_object_id(event);
+        let key = self
+            .known_alias([
+                sandbox_id.as_str(),
+                runtime_sandbox_id.as_str(),
+                object_id.as_str(),
+                event.container_id.as_str(),
+            ])
+            .unwrap_or_else(|| sandbox_id.clone());
+        self.register_aliases(
+            &key,
+            [
+                sandbox_id.as_str(),
+                runtime_sandbox_id.as_str(),
+                object_id.as_str(),
+                event.container_id.as_str(),
+            ],
+        );
+
+        {
+            let state = self.pending.entry(key.clone()).or_default();
+            merge_cri_startup_state_from_cri_event(state, event, &sandbox_id, timestamp);
+            state.sandbox_id = sandbox_id.clone();
+        }
+
+        match action {
+            "SANDBOX_CREATED" => Vec::new(),
+            "SANDBOX_READY" => self
+                .complete_trace(&key, timestamp, "ok", "cri.sandbox.ready", config)
+                .into_iter()
+                .collect(),
+            "SANDBOX_NOTREADY" => self
+                .complete_trace(&key, timestamp, "error", "cri.sandbox.notready", config)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn outputs_from_containerd_event(
+        &mut self,
+        event: &ContainerdRuntimeEvent,
+        _config: &CollectorConfig,
+    ) -> Vec<PluginOutput> {
+        let ContainerdRuntimeEvent::Container(event) = event else {
+            return Vec::new();
+        };
+        if !matches!(
+            event.action.as_str(),
+            "create" | "task_create" | "start" | "resume"
+        ) {
+            return Vec::new();
+        }
+
+        let identity = sandbox_identity_from_containerd_event(event);
+        let sandbox_id = identity.sandbox_id.clone();
+        let key = self
+            .known_alias([
+                sandbox_id.as_str(),
+                identity.runtime_sandbox_id.as_str(),
+                event.container_id.as_str(),
+                identity.pod_uid.as_str(),
+            ])
+            .unwrap_or_else(|| sandbox_id.clone());
+        self.register_aliases(
+            &key,
+            [
+                &sandbox_id,
+                &identity.runtime_sandbox_id,
+                &event.container_id,
+                identity.pod_uid.as_str(),
+            ],
+        );
+
+        {
+            let state = self.pending.entry(key.clone()).or_default();
+            merge_cri_startup_state_from_containerd_event(state, event, &identity);
+        }
+
+        Vec::new()
+    }
+
+    fn complete_trace(
+        &mut self,
+        key: &str,
+        completed_at: DateTime<Utc>,
+        status: &str,
+        completion_reason: &str,
+        config: &CollectorConfig,
+    ) -> Option<PluginOutput> {
+        let state = self.pending.remove(key)?;
+        Some(cri_containerd_startup_trace_output(
+            config,
+            state,
+            completed_at,
+            status,
+            completion_reason,
+        ))
+    }
+
+    fn known_alias<'a, I>(&self, candidates: I) -> Option<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        candidates.into_iter().find_map(|candidate| {
+            let candidate = candidate.trim();
+            if candidate.is_empty() {
+                None
+            } else {
+                self.aliases.get(candidate).cloned()
+            }
+        })
+    }
+
+    fn register_aliases<'a, I>(&mut self, canonical: &str, aliases: I)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        if canonical.is_empty() {
+            return;
+        }
+        let canonical = self
+            .aliases
+            .get(canonical)
+            .cloned()
+            .unwrap_or_else(|| canonical.to_string());
+        self.aliases.insert(canonical.clone(), canonical.clone());
+        for alias in aliases {
+            let alias = alias.trim();
+            if !alias.is_empty() {
+                self.aliases.insert(alias.to_string(), canonical.clone());
+            }
+        }
+    }
+}
+
+fn merge_cri_startup_state_from_cri_event(
+    state: &mut CriContainerdStartupState,
+    event: &CriEvent,
+    sandbox_id: &str,
+    event_at: DateTime<Utc>,
+) {
+    if state.sandbox_id.is_empty() {
+        state.sandbox_id = sandbox_id.to_string();
+    }
+    state.runtime_sandbox_id = first_non_empty_owned([
+        state.runtime_sandbox_id.as_str(),
+        kubelet_cri_event_runtime_sandbox_id(event).as_str(),
+    ]);
+    state.image_ref = first_non_empty_owned([
+        state.image_ref.as_str(),
+        event.image_ref.as_str(),
+        event.labels.get("image").map(String::as_str).unwrap_or(""),
+        "containerd/unknown:latest",
+    ]);
+    state.k8s_namespace = first_non_empty_owned([
+        state.k8s_namespace.as_str(),
+        event
+            .labels
+            .get("io.kubernetes.pod.namespace")
+            .map(String::as_str)
+            .unwrap_or(""),
+        event
+            .labels
+            .get("KubernetesPodNamespace")
+            .map(String::as_str)
+            .unwrap_or(""),
+    ]);
+    state.k8s_pod = first_non_empty_owned([
+        state.k8s_pod.as_str(),
+        event
+            .labels
+            .get("io.kubernetes.pod.name")
+            .map(String::as_str)
+            .unwrap_or(""),
+        event
+            .labels
+            .get("KubernetesPodName")
+            .map(String::as_str)
+            .unwrap_or(""),
+        event.metadata.get("name").map(String::as_str).unwrap_or(""),
+    ]);
+    state.k8s_container = first_non_empty_owned([
+        state.k8s_container.as_str(),
+        event
+            .labels
+            .get("io.kubernetes.container.name")
+            .map(String::as_str)
+            .unwrap_or(""),
+        event
+            .labels
+            .get("KubernetesContainerName")
+            .map(String::as_str)
+            .unwrap_or(""),
+    ]);
+    state.k8s_pod_uid = first_non_empty_owned([
+        state.k8s_pod_uid.as_str(),
+        event
+            .labels
+            .get("io.kubernetes.pod.uid")
+            .map(String::as_str)
+            .unwrap_or(""),
+        event
+            .labels
+            .get("KubernetesPodUID")
+            .map(String::as_str)
+            .unwrap_or(""),
+    ]);
+
+    if matches!(kubelet_cri_event_action(event), "SANDBOX_CREATED") {
+        state.cri_created_at = Some(
+            state
+                .cri_created_at
+                .map(|existing| existing.min(event_at))
+                .unwrap_or(event_at),
+        );
+    }
+}
+
+fn merge_cri_startup_state_from_containerd_event(
+    state: &mut CriContainerdStartupState,
+    event: &ContainerdEvent,
+    identity: &crate::collectors::sources::runtime::containerd::ContainerdSandboxIdentity,
+) {
+    if state.sandbox_id.is_empty() {
+        state.sandbox_id = identity.sandbox_id.clone();
+    }
+    state.containerd_container_id = first_non_empty_owned([
+        state.containerd_container_id.as_str(),
+        event.container_id.as_str(),
+    ]);
+    state.containerd_namespace = first_non_empty_owned([
+        state.containerd_namespace.as_str(),
+        event.namespace.as_str(),
+    ]);
+    state.runtime_sandbox_id = first_non_empty_owned([
+        state.runtime_sandbox_id.as_str(),
+        identity.runtime_sandbox_id.as_str(),
+    ]);
+    state.runtime_name = first_non_empty_owned([
+        state.runtime_name.as_str(),
+        event.runtime_name.as_deref().unwrap_or(""),
+        "containerd",
+    ]);
+    state.runtime_type = runtime_type_from_containerd_name(&state.runtime_name);
+    state.image_ref = first_non_empty_owned([
+        state.image_ref.as_str(),
+        event.image.as_deref().unwrap_or(""),
+        "containerd/unknown:latest",
+    ]);
+    state.k8s_namespace = first_non_empty_owned([
+        state.k8s_namespace.as_str(),
+        identity.kubernetes_namespace.as_str(),
+    ]);
+    state.k8s_pod = first_non_empty_owned([state.k8s_pod.as_str(), identity.pod_name.as_str()]);
+    state.k8s_container = first_non_empty_owned([
+        state.k8s_container.as_str(),
+        identity.container_name.as_str(),
+    ]);
+    state.k8s_pod_uid =
+        first_non_empty_owned([state.k8s_pod_uid.as_str(), identity.pod_uid.as_str()]);
+
+    match event.action.as_str() {
+        "create" => {
+            state.containerd_create_at = Some(
+                state
+                    .containerd_create_at
+                    .map(|existing| existing.min(event.timestamp))
+                    .unwrap_or(event.timestamp),
+            );
+        }
+        "task_create" => {
+            state.containerd_task_create_at = Some(
+                state
+                    .containerd_task_create_at
+                    .map(|existing| existing.min(event.timestamp))
+                    .unwrap_or(event.timestamp),
+            );
+        }
+        "start" | "resume" => {
+            state.containerd_task_start_at = Some(event.timestamp);
+        }
+        _ => {}
+    }
+}
+
+fn cri_containerd_startup_trace_output(
+    config: &CollectorConfig,
+    state: CriContainerdStartupState,
+    completed_at: DateTime<Utc>,
+    status: &str,
+    completion_reason: &str,
+) -> PluginOutput {
+    let sandbox_id = if state.sandbox_id.is_empty() {
+        format!("cri-{}", sanitize_id(&state.runtime_sandbox_id))
+    } else {
+        state.sandbox_id.clone()
+    };
+    let trace_id = format!("cri-containerd-startup-{}", sanitize_id(&sandbox_id));
+    let root_span_id = format!("{trace_id}-e2e");
+    let runtime_type = if state.runtime_type.is_empty() {
+        runtime_type_from_containerd_name(&state.runtime_name)
+    } else {
+        state.runtime_type.clone()
+    };
+    let start_time = earliest_time([
+        state.cri_created_at,
+        state.containerd_create_at,
+        state.containerd_task_create_at,
+        state.containerd_task_start_at,
+    ])
+    .unwrap_or(completed_at);
+    let end_time = monotonic_end_time(start_time, completed_at);
+    let e2e_duration_ms = duration_ms(start_time, end_time);
+
+    let mut attributes = base_cri_containerd_startup_attributes(
+        config,
+        &state,
+        &runtime_type,
+        completion_reason,
+        "event-correlated",
+    );
+
+    let mut traces = vec![TraceSpan {
+        trace_id: trace_id.clone(),
+        span_id: root_span_id.clone(),
+        span_name: "sandbox.startup.e2e".to_string(),
+        start_time: timestamp(start_time),
+        end_time: timestamp(end_time),
+        duration_ms: e2e_duration_ms,
+        status: status.to_string(),
+        attributes: attributes.clone(),
+        sandbox_id: Some(sandbox_id.clone()),
+        image_id: None,
+        parent_span_id: None,
+    }];
+
+    push_child_span(
+        &mut traces,
+        &trace_id,
+        &root_span_id,
+        &sandbox_id,
+        "cri.sandbox.create_to_ready",
+        state.cri_created_at,
+        Some(completed_at),
+        status,
+        attributes.clone(),
+    );
+    push_child_span(
+        &mut traces,
+        &trace_id,
+        &root_span_id,
+        &sandbox_id,
+        "containerd.container.create_to_task_start",
+        state
+            .containerd_create_at
+            .or(state.containerd_task_create_at),
+        state.containerd_task_start_at,
+        "ok",
+        attributes.clone(),
+    );
+    push_marker_span(
+        &mut traces,
+        &trace_id,
+        &root_span_id,
+        &sandbox_id,
+        "containerd.container.create",
+        state.containerd_create_at,
+        attributes.clone(),
+    );
+    push_marker_span(
+        &mut traces,
+        &trace_id,
+        &root_span_id,
+        &sandbox_id,
+        "containerd.task.create",
+        state.containerd_task_create_at,
+        attributes.clone(),
+    );
+    push_marker_span(
+        &mut traces,
+        &trace_id,
+        &root_span_id,
+        &sandbox_id,
+        "containerd.task.start",
+        state.containerd_task_start_at,
+        attributes.clone(),
+    );
+    push_marker_span(
+        &mut traces,
+        &trace_id,
+        &root_span_id,
+        &sandbox_id,
+        "cri.sandbox.ready",
+        Some(completed_at),
+        attributes.clone(),
+    );
+
+    attributes.insert("startup.duration_ms".to_string(), json!(e2e_duration_ms));
+
+    PluginOutput {
+        source: None,
+        metadata: Metadata::default(),
+        metrics: vec![
+            startup_metric(
+                &timestamp(end_time),
+                "sandbox.startup.e2e_duration_ms",
+                e2e_duration_ms,
+                &sandbox_id,
+                &runtime_type,
+                &attributes,
+                config,
+            ),
+            startup_metric(
+                &timestamp(end_time),
+                "sandbox.startup.containerd_create_to_task_start_ms",
+                state
+                    .containerd_create_at
+                    .zip(state.containerd_task_start_at)
+                    .map(|(start, end)| duration_ms(start, monotonic_end_time(start, end)))
+                    .unwrap_or(0.0),
+                &sandbox_id,
+                &runtime_type,
+                &attributes,
+                config,
+            ),
+        ],
+        events: Vec::new(),
+        traces,
+        profiles: Vec::new(),
+    }
+}
+
+fn base_cri_containerd_startup_attributes(
+    config: &CollectorConfig,
+    state: &CriContainerdStartupState,
+    runtime_type: &str,
+    completion_reason: &str,
+    source: &str,
+) -> Map<String, serde_json::Value> {
+    let mut attributes = Map::new();
+    attributes.insert("plugin".to_string(), json!("cri-startup-trace"));
+    attributes.insert("scope".to_string(), json!(config.collection_scope));
+    attributes.insert("startup.trace.source".to_string(), json!(source));
+    attributes.insert(
+        "startup.completion_reason".to_string(),
+        json!(completion_reason),
+    );
+    attributes.insert("runtime.type".to_string(), json!(runtime_type));
+    attributes.insert("containerd.runtime".to_string(), json!(state.runtime_name));
+    attributes.insert(
+        "containerd.namespace".to_string(),
+        json!(state.containerd_namespace),
+    );
+    attributes.insert(
+        "containerd.id".to_string(),
+        json!(state.containerd_container_id),
+    );
+    attributes.insert(
+        "cri.sandbox_id".to_string(),
+        json!(state.runtime_sandbox_id),
+    );
+    attributes.insert("image.ref".to_string(), json!(state.image_ref));
+    attributes.insert("k8s.namespace".to_string(), json!(state.k8s_namespace));
+    attributes.insert("k8s.pod".to_string(), json!(state.k8s_pod));
+    attributes.insert("k8s.container".to_string(), json!(state.k8s_container));
+    attributes.insert("k8s.pod_uid".to_string(), json!(state.k8s_pod_uid));
+    attributes
+}
+
+fn push_child_span(
+    traces: &mut Vec<TraceSpan>,
+    trace_id: &str,
+    parent_span_id: &str,
+    sandbox_id: &str,
+    name: &str,
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+    status: &str,
+    attributes: Map<String, serde_json::Value>,
+) {
+    let (Some(start), Some(end)) = (start, end) else {
+        return;
+    };
+    let end = monotonic_end_time(start, end);
+    traces.push(TraceSpan {
+        trace_id: trace_id.to_string(),
+        span_id: format!("{trace_id}-{}", sanitize_id(name)),
+        span_name: name.to_string(),
+        start_time: timestamp(start),
+        end_time: timestamp(end),
+        duration_ms: duration_ms(start, end),
+        status: status.to_string(),
+        attributes,
+        sandbox_id: Some(sandbox_id.to_string()),
+        image_id: None,
+        parent_span_id: Some(parent_span_id.to_string()),
+    });
+}
+
+fn push_marker_span(
+    traces: &mut Vec<TraceSpan>,
+    trace_id: &str,
+    parent_span_id: &str,
+    sandbox_id: &str,
+    name: &str,
+    at: Option<DateTime<Utc>>,
+    attributes: Map<String, serde_json::Value>,
+) {
+    push_child_span(
+        traces,
+        trace_id,
+        parent_span_id,
+        sandbox_id,
+        name,
+        at,
+        at,
+        "ok",
+        attributes,
+    );
+}
+
+fn startup_metric(
+    timestamp: &str,
+    name: &str,
+    value: f64,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, serde_json::Value>,
+    config: &CollectorConfig,
+) -> MetricSample {
+    MetricSample {
+        timestamp: timestamp.to_string(),
+        name: name.to_string(),
+        value,
+        unit: Some("ms".to_string()),
+        group: Some("startup".to_string()),
+        sandbox_id: Some(sandbox_id.to_string()),
+        node_id: Some(config.node_id.clone()),
+        image_id: None,
+        runtime_type: Some(runtime_type.to_string()),
+        attributes: Some(attributes.clone()),
+    }
+}
+
+fn earliest_time<I>(times: I) -> Option<DateTime<Utc>>
+where
+    I: IntoIterator<Item = Option<DateTime<Utc>>>,
+{
+    times.into_iter().flatten().min()
+}
+
+fn monotonic_end_time(start: DateTime<Utc>, end: DateTime<Utc>) -> DateTime<Utc> {
+    if end > start {
+        end
+    } else {
+        start + chrono::Duration::milliseconds(1)
+    }
+}
+
+fn duration_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> f64 {
+    (end - start).num_milliseconds().max(1) as f64
+}
+
+fn first_non_empty_owned<'a, I>(values: I) -> String
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    values
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn containerd_event_key(namespace: &str, container_id: &str) -> String {
     format!("{namespace}/{container_id}")
 }
@@ -2071,6 +2743,7 @@ impl HostAgentSources {
             docker_events: false,
             containerd_events: false,
             kubelet_events: false,
+            cri_startup_trace: false,
             kubernetes_metrics: false,
             docker_sandbox_cgroupfs: false,
             containerd_sandbox_cgroupfs: false,
@@ -2103,6 +2776,11 @@ impl HostAgentSources {
                 "containerd-events" | "host-containerd-events" => sources.containerd_events = true,
                 "kubelet-events" | "host-kubelet-events" | "cri-events" | "host-cri-events" => {
                     sources.kubelet_events = true;
+                }
+                "cri-startup-trace" | "host-cri-startup-trace" | "cri-containerd-startup" => {
+                    sources.cri_startup_trace = true;
+                    sources.kubelet_events = true;
+                    sources.containerd_events = true;
                 }
                 "kubernetes-metrics"
                 | "k8s-metrics"
@@ -2199,6 +2877,9 @@ impl HostAgentSources {
         }
         if self.kubelet_events {
             names.push("kubelet-events");
+        }
+        if self.cri_startup_trace {
+            names.push("cri-startup-trace");
         }
         if self.kubernetes_metrics {
             names.push("kubernetes-metrics");
@@ -2298,38 +2979,7 @@ mod tests {
 
     #[test]
     fn containerd_startup_trace_uses_kubernetes_sandbox_identity() {
-        let config = CollectorConfig {
-            ingest_url: "http://query-api/api/ingest/batch".to_string(),
-            node_id: "node-a".to_string(),
-            cluster_id: "cluster-a".to_string(),
-            interval: Duration::from_secs(1),
-            local_report_addr: "127.0.0.1:9091".to_string(),
-            local_report_url: "http://127.0.0.1:9091/api/local/ingest".to_string(),
-            collection_scope: "host".to_string(),
-            once: true,
-            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
-            cgroup_max_entries: 200,
-            image_cache_report_path: None,
-            image_cache_report_command: None,
-            image_cache_report_command_timeout: Duration::from_secs(5),
-            profile_report_path: None,
-            diagnostic_report_path: None,
-            diagnostic_report_command: None,
-            diagnostic_report_command_timeout: Duration::from_secs(1),
-            perf_report_path: None,
-            perf_script_path: None,
-            perf_script_command: None,
-            perf_script_command_timeout: Duration::from_secs(1),
-            perf_folded_path: None,
-            ebpf_report_path: None,
-            ebpf_folded_path: None,
-            perf_profile_command: None,
-            ebpf_profile_command: None,
-            profile_command_timeout: Duration::from_secs(1),
-            plugins: Vec::new(),
-            command_plugins: Vec::new(),
-            http_plugins: Vec::new(),
-        };
+        let config = test_config();
 
         let mut labels = HashMap::new();
         labels.insert(
@@ -2372,6 +3022,83 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("runtimepulse-demo")
         );
+    }
+
+    #[test]
+    fn cri_containerd_startup_trace_correlates_ready_with_containerd_spans() {
+        let config = test_config();
+        let mut tracker = CriContainerdStartupTraceTracker::default();
+        let labels = HashMap::from([
+            (
+                "io.kubernetes.pod.namespace".to_string(),
+                "default".to_string(),
+            ),
+            (
+                "io.kubernetes.pod.name".to_string(),
+                "runtimepulse-demo".to_string(),
+            ),
+            (
+                "io.kubernetes.container.name".to_string(),
+                "POD".to_string(),
+            ),
+            (
+                "io.kubernetes.pod.uid".to_string(),
+                "runtimepulse-demo-uid".to_string(),
+            ),
+        ]);
+        let created = CriEvent {
+            container_id: String::new(),
+            sandbox_id: "sandboxabcdef1234567890".to_string(),
+            event_type: "SANDBOX_CREATED".to_string(),
+            reason: String::new(),
+            created_at: 1_779_415_900_000_000_000,
+            image_ref: "registry.k8s.io/pause:3.10".to_string(),
+            labels: labels.clone(),
+            metadata: HashMap::new(),
+            annotations: HashMap::new(),
+        };
+        assert!(tracker.outputs_from_cri_event(&created, &config).is_empty());
+
+        for (action, timestamp) in [
+            ("create", 1_779_415_900_100_000_000),
+            ("task_create", 1_779_415_900_200_000_000),
+            ("start", 1_779_415_900_300_000_000),
+        ] {
+            let event = ContainerdRuntimeEvent::Container(ContainerdEvent {
+                namespace: "k8s.io".to_string(),
+                action: action.to_string(),
+                container_id: "sandboxabcdef1234567890".to_string(),
+                image: Some("registry.k8s.io/pause:3.10".to_string()),
+                runtime_name: Some("io.containerd.runc.v2".to_string()),
+                labels: labels.clone(),
+                timestamp: DateTime::from_timestamp(timestamp / 1_000_000_000, 0).unwrap(),
+                exit_status: None,
+                pid: None,
+                topic: format!("/tasks/{action}"),
+            });
+            assert!(tracker
+                .outputs_from_containerd_event(&event, &config)
+                .is_empty());
+        }
+
+        let ready = CriEvent {
+            event_type: "SANDBOX_READY".to_string(),
+            created_at: 1_779_415_900_500_000_000,
+            ..created
+        };
+        let outputs = tracker.outputs_from_cri_event(&ready, &config);
+        assert_eq!(outputs.len(), 1);
+        let output = &outputs[0];
+        assert_eq!(output.traces[0].span_name, "sandbox.startup.e2e");
+        assert_eq!(
+            output.traces[0].sandbox_id.as_deref(),
+            Some("k8s-default-runtimepulse-demo-pod")
+        );
+        assert!(output
+            .traces
+            .iter()
+            .any(|span| span.span_name == "containerd.task.start"));
+        assert_eq!(output.metrics[0].name, "sandbox.startup.e2e_duration_ms");
     }
 
     #[test]
@@ -2426,6 +3153,7 @@ mod tests {
             docker_events: false,
             containerd_events: false,
             kubelet_events: false,
+            cri_startup_trace: false,
             kubernetes_metrics: false,
             docker_sandbox_cgroupfs: true,
             containerd_sandbox_cgroupfs: true,
@@ -2455,5 +3183,40 @@ mod tests {
             sandbox_sampling_mode(&sources),
             "containerd-task-active-set"
         );
+    }
+
+    fn test_config() -> CollectorConfig {
+        CollectorConfig {
+            ingest_url: "http://query-api/api/ingest/batch".to_string(),
+            node_id: "node-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            interval: Duration::from_secs(1),
+            local_report_addr: "127.0.0.1:9091".to_string(),
+            local_report_url: "http://127.0.0.1:9091/api/local/ingest".to_string(),
+            collection_scope: "host".to_string(),
+            once: true,
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            cgroup_max_entries: 200,
+            image_cache_report_path: None,
+            image_cache_report_command: None,
+            image_cache_report_command_timeout: Duration::from_secs(5),
+            profile_report_path: None,
+            diagnostic_report_path: None,
+            diagnostic_report_command: None,
+            diagnostic_report_command_timeout: Duration::from_secs(1),
+            perf_report_path: None,
+            perf_script_path: None,
+            perf_script_command: None,
+            perf_script_command_timeout: Duration::from_secs(1),
+            perf_folded_path: None,
+            ebpf_report_path: None,
+            ebpf_folded_path: None,
+            perf_profile_command: None,
+            ebpf_profile_command: None,
+            profile_command_timeout: Duration::from_secs(1),
+            plugins: Vec::new(),
+            command_plugins: Vec::new(),
+            http_plugins: Vec::new(),
+        }
     }
 }

@@ -81,7 +81,7 @@ where
 }
 
 pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Option<PluginOutput> {
-    let action = event_action(&event);
+    let action = cri_event_action(&event);
     if !is_lifecycle_action(action) {
         return None;
     }
@@ -320,6 +320,73 @@ fn event_action(event: &CriEvent) -> &str {
     }
 }
 
+pub fn cri_event_action(event: &CriEvent) -> &str {
+    event_action(event)
+}
+
+pub fn cri_event_timestamp(event: &CriEvent) -> DateTime<Utc> {
+    if event.created_at > 1_000_000_000_000_000_000 {
+        let secs = event.created_at / 1_000_000_000;
+        let nanos = (event.created_at % 1_000_000_000) as u32;
+        if let Some(time) = DateTime::from_timestamp(secs, nanos) {
+            return time;
+        }
+    }
+    if event.created_at > 1_000_000_000 {
+        if let Some(time) = DateTime::from_timestamp(event.created_at, 0) {
+            return time;
+        }
+    }
+    Utc::now()
+}
+
+pub fn cri_event_runtime_sandbox_id(event: &CriEvent) -> String {
+    first_non_empty(&[
+        event.sandbox_id.as_str(),
+        label(event, "io.kubernetes.cri.sandbox-id"),
+        label(event, "io.kubernetes.sandbox.id"),
+        label(event, "io.kubernetes.pod.uid"),
+        label(event, "KubernetesPodUID"),
+        event.container_id.as_str(),
+    ])
+}
+
+pub fn cri_event_runtime_object_id(event: &CriEvent) -> String {
+    runtime_object_id(&first_non_empty(&[
+        event.container_id.as_str(),
+        event.sandbox_id.as_str(),
+        label(event, "io.kubernetes.cri.sandbox-id"),
+    ]))
+}
+
+pub fn cri_event_stable_sandbox_id(event: &CriEvent) -> Option<String> {
+    let runtime_id = runtime_object_id(&cri_event_runtime_sandbox_id(event));
+    if runtime_id.is_empty() {
+        return None;
+    }
+
+    let namespace = first_non_empty(&[
+        label(event, "io.kubernetes.pod.namespace"),
+        label(event, "KubernetesPodNamespace"),
+    ]);
+    let pod_name = first_non_empty(&[
+        label(event, "io.kubernetes.pod.name"),
+        label(event, "KubernetesPodName"),
+        metadata(event, "name"),
+    ]);
+    let container_name = first_non_empty(&[
+        label(event, "io.kubernetes.container.name"),
+        label(event, "KubernetesContainerName"),
+        pod_name.as_str(),
+    ]);
+
+    if !namespace.is_empty() && !pod_name.is_empty() && !container_name.is_empty() {
+        kubernetes_sandbox_id(&namespace, &pod_name, &container_name)
+    } else {
+        Some(format!("cri-{}", sanitize_id(&runtime_id)))
+    }
+}
+
 fn is_lifecycle_action(action: &str) -> bool {
     matches!(
         action,
@@ -360,19 +427,7 @@ fn event_severity(action: &str) -> &'static str {
 }
 
 fn event_timestamp(event: &CriEvent) -> String {
-    if event.created_at > 1_000_000_000_000_000_000 {
-        let secs = event.created_at / 1_000_000_000;
-        let nanos = (event.created_at % 1_000_000_000) as u32;
-        if let Some(time) = DateTime::from_timestamp(secs, nanos) {
-            return time.to_rfc3339_opts(SecondsFormat::Millis, true);
-        }
-    }
-    if event.created_at > 1_000_000_000 {
-        if let Some(time) = DateTime::from_timestamp(event.created_at, 0) {
-            return time.to_rfc3339_opts(SecondsFormat::Millis, true);
-        }
-    }
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    cri_event_timestamp(event).to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 fn first_non_empty(values: &[&str]) -> String {
