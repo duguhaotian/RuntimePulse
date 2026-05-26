@@ -9,7 +9,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 #[cfg(unix)]
@@ -406,9 +406,32 @@ fn output_from_lightweight_report(
         ));
     }
 
+    let mut metadata = Metadata::default();
+    metadata.sandboxes.push(json!({
+        "id": sandbox_id,
+        "clusterId": config.cluster_id,
+        "nodeId": config.node_id,
+        "namespace": if report.k8s_namespace.trim().is_empty() { "collector" } else { report.k8s_namespace.as_str() },
+        "workloadId": first_non_empty([report.pod_uid.as_str(), report.pod_name.as_str(), sandbox_id.as_str()]),
+        "workloadName": first_non_empty([report.pod_name.as_str(), sandbox_id.as_str()]),
+        "imageRef": "collector/startup-callchain:unknown",
+        "runtimeType": runtime_type,
+        "runtimeVersion": report.runtime_handler.as_deref().unwrap_or(runtime_type.as_str()),
+        "status": if status == "ok" { "running" } else { "failed" },
+        "createdAt": report.start_time.as_deref().unwrap_or(&observed_at),
+        "startedAt": report.end_time.as_deref(),
+        "startupDurationMs": report.duration_ms.unwrap_or(0.0),
+        "labels": {
+            "collector": "runtimepulse-rust-collector",
+            "plugin": "startup-callchain",
+            "runtime": runtime_type,
+        },
+        "attributes": base_attributes.clone(),
+    }));
+
     PluginOutput {
         source: None,
-        metadata: Metadata::default(),
+        metadata,
         metrics,
         events: vec![EventRecord {
             id: format!(
@@ -657,6 +680,12 @@ fn metrics_from_summary(
 }
 
 #[derive(Default)]
+struct BinaryDerivedMetrics {
+    count: u64,
+    duration_ms: f64,
+}
+
+#[derive(Default)]
 struct SpanDerivedMetrics {
     cni_duration_ms: f64,
     cni_plugin_count: BTreeSet<String>,
@@ -675,6 +704,7 @@ struct SpanDerivedMetrics {
     tc_count: u64,
     tc_duration_ms: f64,
     kata_duration_ms: f64,
+    binaries: BTreeMap<String, BinaryDerivedMetrics>,
 }
 
 fn metrics_from_spans(
@@ -732,6 +762,12 @@ fn metrics_from_spans(
         {
             derived.binary_exec_count += 1;
             derived.binary_exec_duration_ms += duration;
+        }
+
+        if !binary_name.is_empty() {
+            let binary_stats = derived.binaries.entry(binary_name.clone()).or_default();
+            binary_stats.count += 1;
+            binary_stats.duration_ms += duration;
         }
 
         if is_helper_binary(&binary_name) {
@@ -937,6 +973,20 @@ fn metrics_from_spans(
         attributes,
         config,
     );
+    for (binary_name, stats) in &derived.binaries {
+        push_binary_metric_if_positive(
+            &mut metrics,
+            timestamp,
+            binary_name,
+            stats.count as f64,
+            stats.duration_ms,
+            sandbox_id,
+            runtime_type,
+            attributes,
+            config,
+        );
+    }
+
     push_metric_if_positive(
         &mut metrics,
         timestamp,
@@ -950,6 +1000,49 @@ fn metrics_from_spans(
     );
 
     metrics
+}
+
+fn push_binary_metric_if_positive(
+    metrics: &mut Vec<MetricSample>,
+    timestamp: &str,
+    binary_name: &str,
+    count: f64,
+    duration_ms: f64,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) {
+    if count <= 0.0 && duration_ms <= 0.0 {
+        return;
+    }
+
+    let mut binary_attributes = attributes.clone();
+    binary_attributes.insert("process.binary".to_string(), json!(binary_name));
+    binary_attributes.insert("startup.metric.kind".to_string(), json!("binary_breakdown"));
+    let metric_prefix = format!("sandbox.startup.binary.{}", sanitize_metric_key(binary_name));
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_count"),
+        count,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &binary_attributes,
+        config,
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_duration_ms"),
+        duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        &binary_attributes,
+        config,
+    );
 }
 
 fn push_metric_if_positive(
@@ -1307,6 +1400,12 @@ mod tests {
         }));
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.iptables_count" && metric.value == 1.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.binary.iptables_count" && metric.value == 1.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.binary.iptables_duration_ms" && metric.value == 25.0
         }));
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.binary_exec_count" && metric.value == 3.0

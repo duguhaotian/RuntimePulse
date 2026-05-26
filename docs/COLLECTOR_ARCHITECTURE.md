@@ -139,7 +139,9 @@ CRI+containerd startup trace by default.
 When summary values are absent, RuntimePulse derives first-pass aggregate
 metrics from the spans, including CNI duration/plugin count, OCI duration/call
 count, binary/helper execution count and duration, `iptables`/`nft`/`ip`/`tc`
-count and duration, and Kata stage duration.
+count and duration, Kata stage duration, plus per-binary helper breakdowns such
+as `sandbox.startup.binary.iptables_duration_ms` and
+`sandbox.startup.binary.iptables_count` for the hottest helper executables.
 
 Docker sources are retained for single-node and local validation scenarios.
 They are not the preferred Kubernetes path.

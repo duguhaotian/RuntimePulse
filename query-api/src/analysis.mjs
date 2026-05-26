@@ -3,6 +3,7 @@ export function buildSandboxAnalysis({ sandbox, image, metrics, events, spans, p
     startupDurationFinding(sandbox, spans),
     traceBottleneckFinding(sandbox, spans),
     startupCallchainFinding(sandbox, metrics, spans),
+    binaryBreakdownFinding(sandbox, metrics, spans),
     nodePressureFinding(metrics),
     imageAccessFinding(image, sandbox),
     eventFinding(events),
@@ -114,6 +115,44 @@ function startupCallchainFinding(sandbox, metrics, spans) {
   };
 }
 
+function binaryBreakdownFinding(sandbox, metrics, spans) {
+  const candidates = startupBinaryCandidates(metrics, spans);
+  if (candidates.length === 0) return undefined;
+
+  const best = candidates.sort((left, right) => callchainScore(right, startupTotalMs(sandbox, metrics, spans)) - callchainScore(left, startupTotalMs(sandbox, metrics, spans)))[0];
+  if (!best) return undefined;
+
+  const totalMs = startupTotalMs(sandbox, metrics, spans);
+  const share = best.durationMs / Math.max(totalMs, 1);
+  if (best.durationMs < 150 && best.count < 3 && share < 0.08) return undefined;
+
+  const severity = share >= 0.4 || best.durationMs >= 1_500 || best.errorSpan ? 'critical' : best.durationMs >= 300 || best.count >= 5 ? 'warning' : 'info';
+
+  return {
+    id: `${sandbox.id}-startup-binary-${best.key}`,
+    severity,
+    category: 'runtime',
+    title: best.durationMs > 0
+      ? `${best.binary} is the hottest startup binary`
+      : `${best.binary} is called repeatedly during startup`,
+    summary: best.durationMs > 0
+      ? `${best.binary} accounts for ${formatRatio(share)} of measured startup time across helper binaries.`
+      : `${best.binary} executed ${best.count} times during startup and deserves per-command attribution.`,
+    evidence: [
+      best.durationMs > 0 ? `${best.durationMetricName}=${formatDuration(best.durationMs)}` : undefined,
+      best.count > 0 ? `${best.countMetricName}=${best.count}` : undefined,
+      totalMs > 0 ? `startup=${formatDuration(totalMs)}` : undefined,
+      best.errorSpan ? `span.status=error in ${best.errorSpan.spanName}` : undefined,
+    ].filter(Boolean),
+    recommendedActions: [
+      'Inspect the per-binary helper breakdown and compare repeated commands across one RunPodSandbox call.',
+      'If the hottest binary is iptables, nft, ip, or tc, review the CNI plugin path before changing runtime class.',
+    ],
+    relatedMetricNames: [...new Set([best.durationMetricName, best.countMetricName].filter(Boolean))],
+    relatedSpanIds: best.relatedSpanIds,
+  };
+}
+
 function startupCallchainCandidates(metrics, spans) {
   const phaseDefinitions = [
     {
@@ -211,6 +250,48 @@ function startupCallchainCandidates(metrics, spans) {
   });
 }
 
+function startupBinaryCandidates(metrics, spans) {
+  const candidates = new Map();
+
+  for (const series of metrics) {
+    const match = String(series?.name ?? '').match(/^sandbox\.startup\.binary\.(.+)_(count|duration_ms)$/);
+    if (!match) continue;
+
+    const [, binary, kind] = match;
+    const candidate = candidates.get(binary) ?? {
+      key: binaryKey(binary),
+      binary,
+      count: 0,
+      countMetricName: undefined,
+      durationMs: 0,
+      durationMetricName: undefined,
+      relatedSpanIds: [],
+      errorSpan: undefined,
+    };
+
+    const value = maxPoint(series)?.value ?? 0;
+    if (kind === 'count') {
+      candidate.count = Math.max(candidate.count, value);
+      candidate.countMetricName = series.name;
+    } else {
+      candidate.durationMs = Math.max(candidate.durationMs, value);
+      candidate.durationMetricName = series.name;
+    }
+    candidates.set(binary, candidate);
+  }
+
+  const binaries = [...candidates.values()].map((candidate) => {
+    const relatedSpans = spans.filter((span) => binaryMatchesSpan(candidate.binary, span));
+    return {
+      ...candidate,
+      relatedSpanIds: relatedSpans.map((span) => span.spanId),
+      errorSpan: relatedSpans.find((span) => span.status === 'error'),
+    };
+  });
+
+  return binaries.sort((left, right) => right.durationMs - left.durationMs || right.count - left.count);
+}
+
 function startupTotalMs(sandbox, metrics, spans) {
   return Number(sandbox.startupDurationMs || 0)
     || maxMetricValue(metrics, 'sandbox.startup.callchain_duration_ms')
@@ -227,6 +308,31 @@ function callchainScore(candidate, totalMs) {
     ? Math.min(candidate.count / candidate.countThreshold, 2) * 0.1
     : 0;
   return share + (candidate.durationMs / 10_000) + countWeight + (candidate.errorSpan ? 1 : 0);
+}
+
+function binaryKey(value) {
+  return String(value).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'binary';
+}
+
+function binaryMatchesSpan(binary, span) {
+  const text = [
+    span.spanName,
+    span.attributes?.['process.binary'],
+    span.attributes?.['process.command'],
+  ]
+    .map((value) => String(value ?? '').toLowerCase())
+    .join(' ');
+
+  if (!text.trim()) return false;
+  if (binary.length <= 2) {
+    return new RegExp(`(^|[^a-z0-9])${escapeRegExp(binary)}([^a-z0-9]|$)`).test(text);
+  }
+
+  return text.includes(binary.toLowerCase());
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function nodePressureFinding(metrics) {
