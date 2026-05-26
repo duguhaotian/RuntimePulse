@@ -9,6 +9,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 #[cfg(unix)]
@@ -384,6 +385,14 @@ fn output_from_lightweight_report(
         &base_attributes,
         config,
     );
+    metrics.extend(metrics_from_spans(
+        &report.spans,
+        &observed_at,
+        &sandbox_id,
+        &runtime_type,
+        &base_attributes,
+        config,
+    ));
     if let Some(duration_ms) = report.duration_ms {
         metrics.push(metric(
             &observed_at,
@@ -647,6 +656,404 @@ fn metrics_from_summary(
         .collect()
 }
 
+#[derive(Default)]
+struct SpanDerivedMetrics {
+    cni_duration_ms: f64,
+    cni_plugin_count: BTreeSet<String>,
+    oci_duration_ms: f64,
+    oci_call_count: u64,
+    binary_exec_count: u64,
+    binary_exec_duration_ms: f64,
+    helper_binary_count: u64,
+    helper_binary_duration_ms: f64,
+    iptables_count: u64,
+    iptables_duration_ms: f64,
+    nft_count: u64,
+    nft_duration_ms: f64,
+    ip_count: u64,
+    ip_duration_ms: f64,
+    tc_count: u64,
+    tc_duration_ms: f64,
+    kata_duration_ms: f64,
+}
+
+fn metrics_from_spans(
+    spans: &[StartupStageReport],
+    timestamp: &str,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) -> Vec<MetricSample> {
+    let mut derived = SpanDerivedMetrics::default();
+
+    for span in spans {
+        let duration = span_duration_ms(span).unwrap_or(0.0);
+        let span_name = span.span_name.to_ascii_lowercase();
+        let binary = span
+            .binary
+            .as_deref()
+            .or_else(|| span.command.as_deref())
+            .unwrap_or("");
+        let binary_name = binary_basename(binary).to_ascii_lowercase();
+        let role = span.role.as_deref().unwrap_or("").to_ascii_lowercase();
+
+        let is_cni = is_cni_span(span, &span_name, &binary_name);
+        let is_oci = is_oci_span(span, &span_name, &binary_name);
+        let is_kata = is_kata_span(&span_name, &binary_name);
+
+        if is_cni {
+            derived.cni_duration_ms += duration;
+            let plugin = span
+                .cni_plugin
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| cni_plugin_from_span_name(&span_name, &binary_name));
+            if !plugin.is_empty() {
+                derived.cni_plugin_count.insert(plugin);
+            }
+        }
+
+        if is_oci {
+            derived.oci_duration_ms += duration;
+            derived.oci_call_count += 1;
+        }
+
+        if is_kata {
+            derived.kata_duration_ms += duration;
+        }
+
+        if !binary_name.is_empty()
+            || span.process_id.is_some()
+            || role == "exec"
+            || is_cni
+            || is_oci
+        {
+            derived.binary_exec_count += 1;
+            derived.binary_exec_duration_ms += duration;
+        }
+
+        if is_helper_binary(&binary_name) {
+            derived.helper_binary_count += 1;
+            derived.helper_binary_duration_ms += duration;
+        }
+
+        match binary_name.as_str() {
+            "iptables" | "iptables-restore" | "ip6tables" | "ip6tables-restore" => {
+                derived.iptables_count += 1;
+                derived.iptables_duration_ms += duration;
+            }
+            "nft" => {
+                derived.nft_count += 1;
+                derived.nft_duration_ms += duration;
+            }
+            "ip" => {
+                derived.ip_count += 1;
+                derived.ip_duration_ms += duration;
+            }
+            "tc" => {
+                derived.tc_count += 1;
+                derived.tc_duration_ms += duration;
+            }
+            _ => {}
+        }
+    }
+
+    let mut metrics = Vec::new();
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.cni_duration_ms",
+        derived.cni_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.cni_plugin_count",
+        derived.cni_plugin_count.len() as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.oci_duration_ms",
+        derived.oci_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.oci_call_count",
+        derived.oci_call_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.binary_exec_count",
+        derived.binary_exec_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.binary_exec_duration_ms",
+        derived.binary_exec_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.helper_binary_count",
+        derived.helper_binary_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.helper_binary_duration_ms",
+        derived.helper_binary_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.iptables_count",
+        derived.iptables_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.iptables_duration_ms",
+        derived.iptables_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.nft_count",
+        derived.nft_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.nft_duration_ms",
+        derived.nft_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.ip_count",
+        derived.ip_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.ip_duration_ms",
+        derived.ip_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.tc_count",
+        derived.tc_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.tc_duration_ms",
+        derived.tc_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.kata_duration_ms",
+        derived.kata_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+
+    metrics
+}
+
+fn push_metric_if_positive(
+    metrics: &mut Vec<MetricSample>,
+    timestamp: &str,
+    name: &str,
+    value: f64,
+    unit: &str,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) {
+    if value > 0.0 {
+        metrics.push(metric(
+            timestamp,
+            name,
+            value,
+            unit,
+            sandbox_id,
+            runtime_type,
+            attributes,
+            config,
+        ));
+    }
+}
+
+fn span_duration_ms(span: &StartupStageReport) -> Option<f64> {
+    if let Some(duration) = span.duration_ms {
+        return Some(duration.max(1.0));
+    }
+    duration_between(span.start_time.as_deref()?, span.end_time.as_deref()?)
+}
+
+fn is_cni_span(span: &StartupStageReport, span_name: &str, binary_name: &str) -> bool {
+    span_name.starts_with("cni.")
+        || span.cni_plugin.is_some()
+        || span.cni_command.is_some()
+        || span.cni_container_id.is_some()
+        || span
+            .env
+            .as_ref()
+            .is_some_and(|env| env.contains_key("CNI_COMMAND"))
+        || cni_plugin_from_span_name(span_name, binary_name) != ""
+}
+
+fn is_oci_span(span: &StartupStageReport, span_name: &str, binary_name: &str) -> bool {
+    span_name.starts_with("oci.")
+        || span.oci_runtime.is_some()
+        || span.oci_operation.is_some()
+        || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
+}
+
+fn is_kata_span(span_name: &str, binary_name: &str) -> bool {
+    span_name.starts_with("kata.")
+        || binary_name.contains("kata")
+        || matches!(
+            binary_name,
+            "qemu-system-x86_64" | "qemu-system-aarch64" | "cloud-hypervisor" | "firecracker"
+        )
+}
+
+fn is_helper_binary(binary_name: &str) -> bool {
+    matches!(
+        binary_name,
+        "iptables"
+            | "iptables-restore"
+            | "ip6tables"
+            | "ip6tables-restore"
+            | "nft"
+            | "ip"
+            | "ipset"
+            | "tc"
+            | "mount"
+            | "umount"
+            | "modprobe"
+    )
+}
+
+fn cni_plugin_from_span_name(span_name: &str, binary_name: &str) -> String {
+    if let Some(plugin) = span_name.strip_prefix("cni.plugin.") {
+        return plugin.to_string();
+    }
+    if binary_name.starts_with("bridge")
+        || matches!(
+            binary_name,
+            "loopback" | "portmap" | "firewall" | "host-local" | "bandwidth" | "tuning"
+        )
+    {
+        return binary_name.to_string();
+    }
+    String::new()
+}
+
+fn binary_basename(binary: &str) -> &str {
+    binary
+        .split_whitespace()
+        .next()
+        .unwrap_or(binary)
+        .rsplit('/')
+        .next()
+        .unwrap_or(binary)
+}
+
 fn metric(
     timestamp: &str,
     name: &str,
@@ -849,7 +1256,7 @@ mod tests {
           "startTime": "2026-05-26T01:00:00.000Z",
           "endTime": "2026-05-26T01:00:01.000Z",
           "durationMs": 1000,
-          "summary": {"cniDurationMs": 250, "binaryExecCount": 4},
+          "summary": {"cniDurationMs": 250},
           "spans": [
             {
               "spanName": "cri.run_pod_sandbox",
@@ -872,13 +1279,20 @@ mod tests {
               "ociRuntime": "runc",
               "ociOperation": "create",
               "bundle": "/run/containerd/io.containerd.runtime.v2.task/k8s.io/cri-sandbox-a"
+            },
+            {
+              "spanName": "process.exec.iptables",
+              "startTime": "2026-05-26T01:00:00.500Z",
+              "durationMs": 25,
+              "binary": "/usr/sbin/iptables",
+              "pid": 4321
             }
           ]
         }
         "#;
 
         let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
-        assert_eq!(output.traces.len(), 4);
+        assert_eq!(output.traces.len(), 5);
         assert_eq!(output.traces[0].span_name, "sandbox.startup.callchain");
         assert!(output
             .traces
@@ -887,6 +1301,15 @@ mod tests {
                 && span.attributes["cni.plugin"] == json!("bridge")));
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.cni_duration_ms" && metric.value == 250.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.oci_duration_ms" && metric.value == 80.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.iptables_count" && metric.value == 1.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.binary_exec_count" && metric.value == 3.0
         }));
         assert_eq!(output.events[0].event_name, "startup.callchain.observed");
         assert_eq!(output.metadata.nodes.len(), 1);
