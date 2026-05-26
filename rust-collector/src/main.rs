@@ -38,6 +38,7 @@ use collectors::sources::runtime::docker::events::{
 use collectors::sources::runtime::docker::inventory::collect_docker_inventory;
 use collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
 use collectors::sources::runtime::kubelet::{output_from_cri_event, stream_cri_events};
+use collectors::sources::runtime::startup_callchain::StartupCallchainPlugin;
 use collectors::sources::sandbox::cgroupfs::DockerSandboxCgroupfsPlugin;
 use collectors::sources::sandbox::firecracker::FirecrackerSandboxPlugin;
 use collectors::sources::sandbox::gvisor::GvisorSandboxPlugin;
@@ -86,6 +87,8 @@ fn main() {
         run_host_containerd_events()
     } else if env::args().any(|arg| arg == "host-kubelet-events") {
         run_host_kubelet_events()
+    } else if env::args().any(|arg| arg == "host-startup-callchain") {
+        run_host_startup_callchain()
     } else if env::args().any(|arg| arg == "host-docker-events") {
         run_host_docker_events()
     } else if env::args().any(|arg| arg == "host-docker-cgroupfs") {
@@ -544,6 +547,62 @@ fn run_host_kubelet_events() -> Result<()> {
     })
 }
 
+fn run_host_startup_callchain() -> Result<()> {
+    let mut config = CollectorConfig::from_env()?;
+    config.collection_scope = "host".to_string();
+
+    let client = Client::new();
+    let mut plugin = StartupCallchainPlugin::from_env();
+
+    loop {
+        let started = Instant::now();
+        let now = Utc::now();
+        match plugin.collect(now, &config) {
+            Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
+                Ok(()) => println!(
+                    "{}",
+                    json!({
+                        "level": "info",
+                        "message": "host_startup_callchain_report_accepted",
+                        "url": config.local_report_url,
+                        "sandboxes": output.metadata.sandboxes.len(),
+                        "metrics": output.metrics.len(),
+                        "events": output.events.len(),
+                        "traces": output.traces.len(),
+                    })
+                ),
+                Err(error) => eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "host_startup_callchain_report_failed",
+                        "error": error.to_string(),
+                    })
+                ),
+            },
+            Err(error) => eprintln!(
+                "{}",
+                json!({
+                    "level": "error",
+                    "message": "host_startup_callchain_collect_failed",
+                    "error": error.to_string(),
+                })
+            ),
+        }
+
+        if config.once {
+            break;
+        }
+
+        let elapsed = started.elapsed();
+        if config.interval > elapsed {
+            thread::sleep(config.interval - elapsed);
+        }
+    }
+
+    Ok(())
+}
+
 fn run_host_docker_cgroupfs() -> Result<()> {
     let mut config = CollectorConfig::from_env()?;
     config.collection_scope = "host".to_string();
@@ -652,6 +711,9 @@ fn build_plugins(config: &CollectorConfig) -> Result<Vec<Box<dyn CollectorPlugin
                     config.diagnostic_report_command.clone(),
                     config.diagnostic_report_command_timeout,
                 )))
+            }
+            "startup-callchain" | "cri-callchain" | "runpod-callchain" => {
+                plugins.push(Box::new(StartupCallchainPlugin::from_env()))
             }
             "command" => {
                 if config.command_plugins.is_empty() {

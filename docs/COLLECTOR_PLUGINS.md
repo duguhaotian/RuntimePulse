@@ -33,6 +33,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-containerd-events`: runs on the host, follows containerd events, and is the preferred Kubernetes lifecycle stream.
 - `host-containerd-cgroupfs`: runs on the host, samples only containerd containers made active by task events, and resolves cgroup paths from the task PID. It is the Kubernetes/containerd fallback when the standard metrics platform does not expose a needed sandbox metric.
 - `host-kubelet-events`: runs on the host, follows CRI/Kubelet lifecycle events from a configurable JSONL command such as `crictl events --output json`, and enriches Kubernetes sandbox lifecycle records around the containerd path.
+- `host-startup-callchain`: runs on the host, reads or invokes an external RunPodSandbox/CNI/OCI/Kata uprobe exporter through `RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH` or `RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`, and pushes normalized startup spans/metrics to the outlet.
 - `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP. This is the single-node/local validation path, not the Kubernetes path.
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet for single-node Docker scenarios.
 - `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, network, and process metrics without scanning the whole cgroup tree.
@@ -100,6 +101,40 @@ For local validation without a Kubernetes node, stream the example JSONL file:
 RUNTIMEPULSE_COLLECTOR_ONCE=true \
 RUNTIMEPULSE_CRI_EVENTS_CMD='cat rust-collector/examples/cri-events.jsonl' \
 cargo run --manifest-path rust-collector/Cargo.toml -- host-kubelet-events
+```
+
+For high-fidelity CRI+containerd startup attribution, pair the lightweight CRI
+startup trace with `startup-callchain`. The call-chain source accepts either
+already-normalized spans or raw uprobe/eBPF enter/exit events from a real
+exporter. Raw events are paired by request/correlation id and converted into
+RunPodSandbox, CNI plugin binary, OCI runtime, Kata, and helper spans before
+metrics are derived:
+
+```bash
+RUNTIMEPULSE_HOST_AGENT_SOURCES=containerd-inventory,containerd-events,cri-events,cri-startup-trace,startup-callchain \
+RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
+RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='runtimepulse-startup-probe export --once' \
+runtimepulse-collector host-agent
+```
+
+Local one-shot validation can read the bundled raw-event example without a real
+uprobe exporter:
+
+```bash
+RUNTIMEPULSE_COLLECTOR_ONCE=true \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH=rust-collector/examples/startup-uprobe-events.json \
+cargo run --manifest-path rust-collector/Cargo.toml -- host-startup-callchain
+```
+
+The same normalizer is also available as an outlet-container plugin when the
+exporter runs inside the outlet namespace:
+
+```bash
+RUNTIMEPULSE_COLLECTOR_ONCE=true \
+RUNTIMEPULSE_COLLECTOR_PLUGINS=startup-callchain \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH=rust-collector/examples/startup-uprobe-events.json \
+cargo run --manifest-path rust-collector/Cargo.toml
 ```
 
 Local containerd validation can use an isolated containerd instance instead of
