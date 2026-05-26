@@ -590,8 +590,16 @@ fn merge_stage_attributes(
     if let Some(env) = &stage.env {
         attributes.insert("process.env".to_string(), json!(env));
     }
-    if let Some(plugin) = &stage.cni_plugin {
-        attributes.insert("cni.plugin".to_string(), json!(plugin));
+    let span_name = stage.span_name.to_ascii_lowercase();
+    let binary = stage
+        .binary
+        .as_deref()
+        .or_else(|| stage.command.as_deref())
+        .unwrap_or("");
+    let binary_name = binary_basename(binary).to_ascii_lowercase();
+    let cni_plugin = cni_plugin_name(stage, &span_name, &binary_name);
+    if !cni_plugin.is_empty() {
+        attributes.insert("cni.plugin".to_string(), json!(cni_plugin));
     }
     if let Some(command) = &stage.cni_command {
         attributes.insert("cni.command".to_string(), json!(command));
@@ -727,12 +735,7 @@ fn metrics_from_spans(
 
         if is_cni {
             derived.cni_duration_ms += duration;
-            let plugin = span
-                .cni_plugin
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|| cni_plugin_from_span_name(&span_name, &binary_name));
+            let plugin = cni_plugin_name(span, &span_name, &binary_name);
             if !plugin.is_empty() {
                 derived.cni_plugin_count.insert(plugin);
             }
@@ -1052,6 +1055,28 @@ fn is_helper_binary(binary_name: &str) -> bool {
     )
 }
 
+fn cni_plugin_name(span: &StartupStageReport, span_name: &str, binary_name: &str) -> String {
+    if let Some(plugin) = span
+        .cni_plugin
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return plugin.to_string();
+    }
+    if !binary_name.is_empty()
+        && (span_name.starts_with("cni.")
+            || span.cni_command.is_some()
+            || span.cni_container_id.is_some()
+            || span
+                .env
+                .as_ref()
+                .is_some_and(|env| env.contains_key("CNI_COMMAND")))
+    {
+        return binary_name.to_string();
+    }
+    cni_plugin_from_span_name(span_name, binary_name)
+}
+
 fn cni_plugin_from_span_name(span_name: &str, binary_name: &str) -> String {
     if let Some(plugin) = span_name.strip_prefix("cni.plugin.") {
         return plugin.to_string();
@@ -1287,11 +1312,10 @@ mod tests {
               "durationMs": 1000
             },
             {
-              "spanName": "cni.plugin.bridge",
+              "spanName": "cni.add",
               "startTime": "2026-05-26T01:00:00.100Z",
               "durationMs": 100,
               "binary": "/opt/cni/bin/bridge",
-              "cniPlugin": "bridge",
               "cniCommand": "ADD",
               "cniContainerId": "cri-sandbox-a"
             },
@@ -1320,7 +1344,7 @@ mod tests {
         assert!(output
             .traces
             .iter()
-            .any(|span| span.span_name == "cni.plugin.bridge"
+            .any(|span| span.span_name == "cni.add"
                 && span.attributes["cni.plugin"] == json!("bridge")));
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.cni_duration_ms" && metric.value == 250.0

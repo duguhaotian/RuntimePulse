@@ -51,19 +51,19 @@ test('analysis flags CNI-dominated startup callchain metrics', () => {
       spanId: 'span-cni-add',
       parentSpanId: 'root',
       sandboxId: 'cri-sandbox-a',
-      spanName: 'cni.ADD bridge',
+      spanName: 'cni.ADD',
       startTime: '2026-05-22T02:00:00.100Z',
       endTime: '2026-05-22T02:00:02.700Z',
       durationMs: 2600,
       status: 'ok',
-      attributes: {},
+      attributes: { 'process.binary': '/opt/cni/bin/bridge' },
     }],
     profiles: [],
   });
 
   const finding = analysis.findings.find((item) => item.id === 'cri-sandbox-a-startup-callchain-cni');
   assert.ok(finding);
-  assert.equal(finding.title, 'CNI plugin binary dominates sandbox startup');
+  assert.equal(finding.title, 'bridge is the hottest CNI plugin binary');
   assert.equal(finding.severity, 'critical');
   assert.deepEqual(finding.relatedMetricNames, ['sandbox.startup.cni_duration_ms', 'sandbox.startup.cni_plugin_count']);
   assert.deepEqual(finding.relatedSpanIds, ['span-cni-add']);
