@@ -244,6 +244,7 @@ Implemented:
 
 - Sandbox rule analysis endpoint: `GET /api/sandboxes/{id}/analysis`.
 - Rule findings combine sandbox metadata, metrics, events, trace spans, image details, and profile indexes.
+- Startup call-chain findings now identify CNI, OCI, Kata VM, helper-binary, and binary-exec bottlenecks from collector-derived `sandbox.startup.*` metrics plus matching spans.
 - Sandbox detail overview now shows rule findings with evidence, recommended actions, and trace-span drill-down links.
 
 Potential architecture:
@@ -265,7 +266,7 @@ AI Analysis Service
 Potential capabilities:
 
 - Generate run summaries.
-- Identify likely startup bottlenecks.
+- Identify likely startup bottlenecks. Implemented for trace-dominant startup spans and startup call-chain metrics including CNI/OCI/Kata/helper-binary phases.
 - Explain runtime overhead differences.
 - Compare regressions across runtime versions.
 - Suggest next metrics or traces to inspect.

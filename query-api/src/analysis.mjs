@@ -2,6 +2,7 @@ export function buildSandboxAnalysis({ sandbox, image, metrics, events, spans, p
   const findings = [
     startupDurationFinding(sandbox, spans),
     traceBottleneckFinding(sandbox, spans),
+    startupCallchainFinding(sandbox, metrics, spans),
     nodePressureFinding(metrics),
     imageAccessFinding(image, sandbox),
     eventFinding(events),
@@ -76,6 +77,156 @@ function traceBottleneckFinding(sandbox, spans) {
     ],
     relatedSpanIds: [stage.spanId],
   };
+}
+
+function startupCallchainFinding(sandbox, metrics, spans) {
+  const totalMs = startupTotalMs(sandbox, metrics, spans);
+  const candidates = startupCallchainCandidates(metrics, spans);
+  if (candidates.length === 0) return undefined;
+
+  const best = candidates
+    .filter((candidate) => candidate.durationMs > 0 || candidate.count >= candidate.countThreshold)
+    .sort((left, right) => callchainScore(right, totalMs) - callchainScore(left, totalMs))[0];
+  if (!best) return undefined;
+
+  const share = best.durationMs / Math.max(totalMs, 1);
+  if (best.durationMs < best.durationThresholdMs && share < best.shareThreshold && best.count < best.countThreshold) return undefined;
+
+  const severity = share >= 0.55 || best.durationMs >= 5_000 || best.errorSpan ? 'critical' : 'warning';
+
+  return {
+    id: `${sandbox.id}-startup-callchain-${best.key}`,
+    severity,
+    category: best.category,
+    title: best.title,
+    summary: best.durationMs > 0
+      ? `${best.label} accounts for ${formatRatio(share)} of the measured startup call chain.`
+      : `${best.label} executed ${best.count} times during startup; inspect per-command attribution for hidden latency.`,
+    evidence: [
+      best.durationMs > 0 ? `${best.durationMetricName}=${formatDuration(best.durationMs)}` : undefined,
+      totalMs > 0 ? `startup.callchain=${formatDuration(totalMs)}` : undefined,
+      best.count > 0 ? `${best.countMetricName}=${best.count}` : undefined,
+      best.errorSpan ? `span.status=error in ${best.errorSpan.spanName}` : undefined,
+    ].filter(Boolean),
+    recommendedActions: best.recommendedActions,
+    relatedMetricNames: [...new Set([best.durationMetricName, best.countMetricName].filter(Boolean))],
+    relatedSpanIds: best.relatedSpanIds,
+  };
+}
+
+function startupCallchainCandidates(metrics, spans) {
+  const phaseDefinitions = [
+    {
+      key: 'cni',
+      label: 'CNI setup',
+      title: 'CNI setup dominates sandbox startup',
+      category: 'startup',
+      durationMetricName: 'sandbox.startup.cni_duration_ms',
+      countMetricName: 'sandbox.startup.cni_plugin_count',
+      spanPatterns: [/\bcni\b/i, /network/i],
+      durationThresholdMs: 1_000,
+      shareThreshold: 0.25,
+      countThreshold: 4,
+      recommendedActions: [
+        'Inspect CNI plugin spans and compare ADD latency across bridge, IPAM, iptables/nft, and tc commands.',
+        'Check whether concurrent pod starts or node network rule churn overlap this RunPodSandbox call.',
+      ],
+    },
+    {
+      key: 'oci',
+      label: 'OCI runtime calls',
+      title: 'OCI runtime calls dominate sandbox startup',
+      category: 'runtime',
+      durationMetricName: 'sandbox.startup.oci_duration_ms',
+      countMetricName: 'sandbox.startup.oci_call_count',
+      spanPatterns: [/\boci\b/i, /runc/i, /runtime\.(create|start)/i],
+      durationThresholdMs: 800,
+      shareThreshold: 0.25,
+      countThreshold: 3,
+      recommendedActions: [
+        'Compare OCI create/start spans between runc and the configured secure runtime class.',
+        'Inspect runtime process CPU/profile artifacts that overlap the slow OCI boundary.',
+      ],
+    },
+    {
+      key: 'kata',
+      label: 'Kata VM startup',
+      title: 'Kata VM startup dominates sandbox startup',
+      category: 'runtime',
+      durationMetricName: 'sandbox.startup.kata_duration_ms',
+      countMetricName: undefined,
+      spanPatterns: [/kata/i, /vm\.(boot|start|ready)/i, /hypervisor/i],
+      durationThresholdMs: 1_500,
+      shareThreshold: 0.25,
+      countThreshold: Number.POSITIVE_INFINITY,
+      recommendedActions: [
+        'Break down Kata VM boot, agent ready, and shim/runtime spans before tuning Kubernetes or image settings.',
+        'Compare this secure sandbox with the same image on runc to isolate the VM/runtime tax.',
+      ],
+    },
+    {
+      key: 'helper-binaries',
+      label: 'startup helper binaries',
+      title: 'Helper binary execution is high during startup',
+      category: 'runtime',
+      durationMetricName: 'sandbox.startup.helper_binary_duration_ms',
+      countMetricName: 'sandbox.startup.helper_binary_count',
+      spanPatterns: [/exec/i, /iptables/i, /nft/i, /\bip\b/i, /\btc\b/i],
+      durationThresholdMs: 700,
+      shareThreshold: 0.20,
+      countThreshold: 12,
+      recommendedActions: [
+        'Inspect helper-binary spans to identify repeated iptables/nft/ip/tc invocations inside one RunPodSandbox call.',
+        'If CNI dominates, compare CNI plugin configuration and rule programming behavior before changing runtime class.',
+      ],
+    },
+    {
+      key: 'binary-exec',
+      label: 'startup binary executions',
+      title: 'Startup invokes many helper processes',
+      category: 'runtime',
+      durationMetricName: 'sandbox.startup.binary_exec_duration_ms',
+      countMetricName: 'sandbox.startup.binary_exec_count',
+      spanPatterns: [/exec/i, /process/i],
+      durationThresholdMs: 1_000,
+      shareThreshold: 0.20,
+      countThreshold: 20,
+      recommendedActions: [
+        'Review per-command exec attribution from the uprobe/eBPF exporter to find repeated helpers.',
+        'Group the binary executions by parent CNI/OCI span to confirm which RunPodSandbox phase owns the cost.',
+      ],
+    },
+  ];
+
+  return phaseDefinitions.map((definition) => {
+    const relatedSpans = spans.filter((span) => definition.spanPatterns.some((pattern) => pattern.test(span.spanName)));
+    const spanDurationMs = relatedSpans.reduce((total, span) => total + Number(span.durationMs ?? 0), 0);
+    return {
+      ...definition,
+      durationMs: maxMetricValue(metrics, definition.durationMetricName) ?? spanDurationMs,
+      count: definition.countMetricName ? maxMetricValue(metrics, definition.countMetricName) ?? 0 : 0,
+      relatedSpanIds: relatedSpans.map((span) => span.spanId),
+      errorSpan: relatedSpans.find((span) => span.status === 'error'),
+    };
+  });
+}
+
+function startupTotalMs(sandbox, metrics, spans) {
+  return Number(sandbox.startupDurationMs || 0)
+    || maxMetricValue(metrics, 'sandbox.startup.callchain_duration_ms')
+    || maxMetricValue(metrics, 'sandbox.startup.e2e_duration_ms')
+    || maxMetricValue(metrics, 'sandbox.startup.duration_ms')
+    || Math.max(0, ...spans
+      .filter((span) => ['sandbox.startup.callchain', 'sandbox.startup.e2e', 'sandbox.startup'].includes(span.spanName))
+      .map((span) => Number(span.durationMs ?? 0)));
+}
+
+function callchainScore(candidate, totalMs) {
+  const share = candidate.durationMs / Math.max(totalMs, 1);
+  const countWeight = Number.isFinite(candidate.countThreshold) && candidate.countThreshold > 0
+    ? Math.min(candidate.count / candidate.countThreshold, 2) * 0.1
+    : 0;
+  return share + (candidate.durationMs / 10_000) + countWeight + (candidate.errorSpan ? 1 : 0);
 }
 
 function nodePressureFinding(metrics) {
@@ -227,6 +378,17 @@ function dominantSpan(spans) {
 function maxPoint(series) {
   if (!series || series.points.length === 0) return undefined;
   return [...series.points].sort((left, right) => right.value - left.value)[0];
+}
+
+function maxMetricValue(metrics, name) {
+  if (!name) return undefined;
+  const values = metrics
+    .filter((series) => series.name === name)
+    .flatMap((series) => series.points ?? [])
+    .map((point) => Number(point.value))
+    .filter((value) => Number.isFinite(value));
+  if (values.length === 0) return undefined;
+  return Math.max(...values);
 }
 
 function sum(rows = [], key) {
