@@ -9,3 +9,4 @@ pub mod cri_diagnostics;
 pub mod diagnostics;
 pub mod docker;
 pub mod kubelet;
+pub mod startup_callchain;

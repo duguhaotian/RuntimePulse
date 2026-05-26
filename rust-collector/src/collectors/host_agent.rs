@@ -56,6 +56,7 @@ use crate::collectors::sources::runtime::kubelet::{
     cri_event_stable_sandbox_id as kubelet_cri_event_stable_sandbox_id, output_from_cri_event,
     stream_cri_events, CriEvent,
 };
+use crate::collectors::sources::runtime::startup_callchain::StartupCallchainPlugin;
 use crate::collectors::sources::sandbox::cgroupfs::{
     ContainerdSandboxCgroupTarget, DockerSandboxCgroupfsPlugin,
 };
@@ -98,6 +99,7 @@ struct HostAgentSources {
     containerd_events: bool,
     kubelet_events: bool,
     cri_startup_trace: bool,
+    startup_callchain: bool,
     kubernetes_metrics: bool,
     docker_sandbox_cgroupfs: bool,
     containerd_sandbox_cgroupfs: bool,
@@ -274,6 +276,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
         config.diagnostic_report_command.clone(),
         config.diagnostic_report_command_timeout,
     );
+    let mut startup_callchain = StartupCallchainPlugin::from_env();
     let mut profile_report = ProfileReportPlugin::new(config.profile_report_path.clone());
     let mut perf = PerfProfilePlugin::new(
         config.perf_report_path.clone(),
@@ -320,6 +323,7 @@ pub fn run_host_agent(mut config: CollectorConfig) -> Result<()> {
             &mut sandbox_reconcile,
             &mut image_cache,
             &mut diagnostic_report,
+            &mut startup_callchain,
             &mut profile_report,
             &mut perf,
             &mut perf_script,
@@ -388,6 +392,7 @@ fn collect_periodic(
     sandbox_reconcile: &mut SandboxReconcilePlugin,
     image_cache: &mut ImageCachePlugin,
     diagnostic_report: &mut DiagnosticReportPlugin,
+    startup_callchain: &mut StartupCallchainPlugin,
     profile_report: &mut ProfileReportPlugin,
     perf: &mut PerfProfilePlugin,
     perf_script: &mut PerfScriptProfilePlugin,
@@ -470,6 +475,11 @@ fn collect_periodic(
     if sources.diagnostic_report {
         collect_source("host-diagnostic-report", tx, stats, || {
             diagnostic_report.collect(now, config)
+        });
+    }
+    if sources.startup_callchain {
+        collect_source("host-startup-callchain", tx, stats, || {
+            startup_callchain.collect(now, config)
         });
     }
     if sources.profile_report {
@@ -2744,6 +2754,7 @@ impl HostAgentSources {
             containerd_events: false,
             kubelet_events: false,
             cri_startup_trace: false,
+            startup_callchain: false,
             kubernetes_metrics: false,
             docker_sandbox_cgroupfs: false,
             containerd_sandbox_cgroupfs: false,
@@ -2781,6 +2792,12 @@ impl HostAgentSources {
                     sources.cri_startup_trace = true;
                     sources.kubelet_events = true;
                     sources.containerd_events = true;
+                }
+                "startup-callchain"
+                | "host-startup-callchain"
+                | "cri-callchain"
+                | "runpod-callchain" => {
+                    sources.startup_callchain = true;
                 }
                 "kubernetes-metrics"
                 | "k8s-metrics"
@@ -2880,6 +2897,9 @@ impl HostAgentSources {
         }
         if self.cri_startup_trace {
             names.push("cri-startup-trace");
+        }
+        if self.startup_callchain {
+            names.push("startup-callchain");
         }
         if self.kubernetes_metrics {
             names.push("kubernetes-metrics");
@@ -3154,6 +3174,7 @@ mod tests {
             containerd_events: false,
             kubelet_events: false,
             cri_startup_trace: false,
+            startup_callchain: false,
             kubernetes_metrics: false,
             docker_sandbox_cgroupfs: true,
             containerd_sandbox_cgroupfs: true,

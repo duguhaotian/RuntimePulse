@@ -121,6 +121,16 @@ stable IDs such as `CNI_CONTAINERID`, containerd sandbox id, OCI bundle path,
 and CRI sandbox id must drive correlation. CRI socket proxying is not part of
 the preferred design.
 
+`startup-callchain` is the report-ingestion bridge for that later high-fidelity
+path. External uprobe/eBPF exporters can write JSON/JSONL or be invoked by
+`RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`; the host-agent normalizes the
+report into trace spans, startup metrics, and a `startup.callchain.observed`
+event. The expected report carries one sandbox startup trace plus spans such as
+`cri.run_pod_sandbox`, `cni.plugin.bridge`, `process.exec.iptables`,
+`oci.runc.create`, `kata.vm.boot`, or `kata.agent.connect`, with attributes for
+`CNI_CONTAINERID`, OCI bundle path, runtime handler, PID/PPID, argv/env, and
+helper-binary role.
+
 Docker sources are retained for single-node and local validation scenarios.
 They are not the preferred Kubernetes path.
 
@@ -365,7 +375,7 @@ starting each source manually.
 1. Keep the non-Kubernetes P1 path first. Kata, Firecracker, and gVisor now have baseline host-agent/outlet report sources, and `sandbox-reconcile` can remove stale live sandboxes for report-only runtimes via `snapshot.scope`/`snapshot.sandboxIds`.
 2. Deepen snapshotter/image-cache fidelity next. The generic `image-cache` report path accepts file reports, exporter commands, common snapshotter state/index JSON and JSONL, Prometheus text exposition, layer-level cache counters, prefetch records, and timeline spans; add native parsers for nydus, stargz, overlaybd, or other snapshotters once their real local formats are selected.
 3. Deepen runtime diagnostic and profile artifact workflows without moving eBPF-specific work forward yet. Generic diagnostic-report ingestion supports files, exporter commands, and artifact-index aliases, Docker diagnostics can be exported with `runtimepulse-collector docker-diagnostics`, and CRI/containerd diagnostics are available through `crictl-diagnostics` and `containerd-diagnostics`. Generic profile reports and artifact-index aliases plus native perf-script target/duration inference and perf folded-stack conversion with command input is available; eBPF backend deepening remains deferred.
-4. Complete the CRI+containerd runc/Kata path before broader Kubernetes integration: deepen `cri-startup-trace`, add RunPodSandbox/OCI-runtime uprobe profiles, then attribute CNI and helper-binary costs without introducing a CRI proxy.
+4. Complete the CRI+containerd runc/Kata path before broader Kubernetes integration: deepen `cri-startup-trace`, feed detailed uprobe/exporter data through `startup-callchain`, add RunPodSandbox/OCI-runtime uprobe profiles, then attribute CNI and helper-binary costs without introducing a CRI proxy.
 5. Complete the Kubernetes path on containerd after the CRI+containerd runtime path: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
 6. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
 7. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.
