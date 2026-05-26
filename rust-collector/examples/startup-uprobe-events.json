@@ -1,0 +1,62 @@
+{
+  "source": "uprobe-exporter",
+  "events": [
+    {
+      "eventType": "enter",
+      "requestId": "runpod-demo-1",
+      "function": "RunPodSandbox",
+      "timestamp": "2026-05-26T01:00:00.000Z",
+      "criSandboxId": "sandboxabcdef1234567890",
+      "namespace": "default",
+      "podName": "runtimepulse-demo",
+      "containerName": "POD",
+      "runtimeType": "kata",
+      "runtimeHandler": "kata"
+    },
+    {
+      "eventType": "exit",
+      "requestId": "runpod-demo-1",
+      "function": "RunPodSandbox",
+      "timestamp": "2026-05-26T01:00:01.000Z",
+      "status": "ok"
+    },
+    {
+      "eventType": "enter",
+      "requestId": "cni-bridge-demo-1",
+      "function": "execve",
+      "timestamp": "2026-05-26T01:00:00.100Z",
+      "binary": "/opt/cni/bin/bridge",
+      "cniCommand": "ADD",
+      "cniContainerId": "sandboxabcdef1234567890",
+      "netns": "/var/run/netns/cni-demo"
+    },
+    {
+      "eventType": "exit",
+      "requestId": "cni-bridge-demo-1",
+      "function": "execve",
+      "timestamp": "2026-05-26T01:00:00.420Z",
+      "binary": "/opt/cni/bin/bridge",
+      "cniCommand": "ADD",
+      "cniContainerId": "sandboxabcdef1234567890"
+    },
+    {
+      "eventType": "enter",
+      "requestId": "oci-kata-demo-1",
+      "function": "oci.runtime.create",
+      "timestamp": "2026-05-26T01:00:00.520Z",
+      "binary": "/usr/bin/kata-runtime",
+      "ociRuntime": "kata-runtime",
+      "ociOperation": "create",
+      "bundle": "/run/containerd/io.containerd.runtime.v2.task/k8s.io/sandboxabcdef1234567890"
+    },
+    {
+      "eventType": "exit",
+      "requestId": "oci-kata-demo-1",
+      "function": "oci.runtime.create",
+      "timestamp": "2026-05-26T01:00:00.760Z",
+      "binary": "/usr/bin/kata-runtime",
+      "ociRuntime": "kata-runtime",
+      "ociOperation": "create"
+    }
+  ]
+}

@@ -125,17 +125,25 @@ the preferred design.
 path. External uprobe/eBPF exporters can write JSON/JSONL or be invoked by
 `RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`; the host-agent normalizes the
 report into trace spans, startup metrics, and a `startup.callchain.observed`
-event. The expected report carries one sandbox startup trace plus spans such as
-`cri.run_pod_sandbox`, `cni.plugin.bridge`, `process.exec.iptables`,
-`oci.runc.create`, `kata.vm.boot`, or `kata.agent.connect`, with attributes for
-`CNI_CONTAINERID`, OCI bundle path, runtime handler, PID/PPID, argv/env, and
-helper-binary role. If the exporter does not provide an explicit `traceId`,
-RuntimePulse derives the same stable sandbox id as CRI/containerd events
-(`k8s-{namespace}-{pod}-{container}` when pod fields are present, otherwise the
-CRI/containerd sandbox id), uses `cri-containerd-startup-{stableSandboxId}`, and
-parents the call-chain root under the existing `sandbox.startup.e2e` root span.
-Detailed RunPod/CNI/OCI/Kata spans therefore join the lightweight
-CRI+containerd startup trace by default.
+event. The expected report can either carry one sandbox startup trace plus spans
+such as `cri.run_pod_sandbox`, `cni.plugin.bridge`, `process.exec.iptables`,
+`oci.runc.create`, `kata.vm.boot`, or `kata.agent.connect`, or carry raw
+uprobe/eBPF enter/exit events under `events`/`uprobeEvents`/`rawEvents`.
+Raw events are paired by `requestId`/`correlationId`/`callId` first, then by
+function + pid + sandbox id, and are converted into the same stage spans before
+metric derivation. The CNI plugin stage is identified from the CNI plugin binary
+that the CRI/containerd path invokes, not from helper commands executed inside
+that plugin. Helper binaries such as `iptables`, `nft`, `ip`, and `tc` remain
+secondary drill-down spans/metrics.
+Attributes should include stable correlation fields such as `CNI_CONTAINERID`,
+OCI bundle path, runtime handler, PID/PPID, argv/env, and helper-binary role. If
+the exporter does not provide an explicit `traceId`, RuntimePulse derives the
+same stable sandbox id as CRI/containerd events (`k8s-{namespace}-{pod}-{container}`
+when pod fields are present, otherwise the CRI/containerd sandbox id), uses
+`cri-containerd-startup-{stableSandboxId}`, and parents the call-chain root under
+the existing `sandbox.startup.e2e` root span. Detailed RunPod/CNI/OCI/Kata spans
+therefore join the lightweight CRI+containerd startup trace by default. See
+`rust-collector/examples/startup-uprobe-events.json` for the raw event shape.
 When summary values are absent, RuntimePulse derives first-pass aggregate
 metrics from the spans, including CNI duration/plugin count, OCI duration/call
 count, binary/helper execution count and duration, and Kata stage duration. The CNI plugin binary is identified from the plugin-stage spans themselves rather than from helper binaries inside the plugin, and per-plugin metrics such as `sandbox.startup.cni.plugin.bridge_duration_ms` provide plugin-level attribution when multiple CNI binaries run in one RunPodSandbox call.

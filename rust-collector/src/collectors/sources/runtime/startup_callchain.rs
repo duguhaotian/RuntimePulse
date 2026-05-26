@@ -9,7 +9,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 #[cfg(unix)]
@@ -34,7 +34,7 @@ pub struct StartupCallchainPlugin {
     timeout: Duration,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Default, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StartupCallchainReport {
     id: Option<String>,
@@ -79,8 +79,71 @@ struct StartupCallchainReport {
     duration_ms: Option<f64>,
     attributes: Option<Map<String, Value>>,
     summary: Option<Map<String, Value>>,
+    #[serde(default, alias = "events", alias = "uprobeEvents", alias = "rawEvents")]
+    raw_events: Vec<UprobeEventReport>,
     #[serde(default, alias = "stages")]
     spans: Vec<StartupStageReport>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UprobeEventReport {
+    #[serde(default, alias = "event", alias = "type", alias = "phase")]
+    event_type: String,
+    #[serde(alias = "timestamp_ns", alias = "timeNs")]
+    timestamp_ns: Option<u64>,
+    timestamp: Option<String>,
+    #[serde(alias = "request_id", alias = "correlationId", alias = "callId")]
+    request_id: Option<String>,
+    #[serde(alias = "function", alias = "symbol", alias = "probe", alias = "name")]
+    function_name: Option<String>,
+    #[serde(alias = "sandbox_id")]
+    sandbox_id: Option<String>,
+    #[serde(
+        alias = "cri_sandbox_id",
+        alias = "podSandboxId",
+        alias = "pod_sandbox_id"
+    )]
+    cri_sandbox_id: Option<String>,
+    #[serde(alias = "containerd_id", alias = "containerdContainerId")]
+    containerd_id: Option<String>,
+    #[serde(alias = "namespace", alias = "k8s_namespace", alias = "podNamespace")]
+    k8s_namespace: Option<String>,
+    #[serde(alias = "pod_name", alias = "podName")]
+    pod_name: Option<String>,
+    #[serde(alias = "container_name", alias = "containerName")]
+    container_name: Option<String>,
+    #[serde(alias = "pod_uid", alias = "podUid")]
+    pod_uid: Option<String>,
+    #[serde(alias = "runtime_type")]
+    runtime_type: Option<String>,
+    #[serde(alias = "runtime_handler")]
+    runtime_handler: Option<String>,
+    status: Option<String>,
+    role: Option<String>,
+    binary: Option<String>,
+    command: Option<String>,
+    #[serde(alias = "pid")]
+    process_id: Option<u64>,
+    #[serde(alias = "ppid")]
+    parent_process_id: Option<u64>,
+    argv: Option<Vec<String>>,
+    env: Option<Map<String, Value>>,
+    #[serde(alias = "cni_plugin")]
+    cni_plugin: Option<String>,
+    #[serde(alias = "cni_command")]
+    cni_command: Option<String>,
+    #[serde(alias = "cni_container_id")]
+    cni_container_id: Option<String>,
+    #[serde(alias = "netns")]
+    cni_netns: Option<String>,
+    #[serde(alias = "oci_runtime")]
+    oci_runtime: Option<String>,
+    #[serde(alias = "oci_operation")]
+    oci_operation: Option<String>,
+    #[serde(alias = "bundle")]
+    oci_bundle: Option<String>,
+    attributes: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,23 +294,25 @@ fn parse_reports(content: &str) -> Result<Vec<ParsedCallchainReport>> {
         return parse_report_value(value);
     }
 
-    let mut reports = Vec::new();
-    for line in trimmed
+    let values = trimmed
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-    {
-        reports.extend(parse_report_value(serde_json::from_str::<Value>(line)?)?);
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if values.iter().all(is_uprobe_event_value) {
+        return parse_report_value(Value::Array(values));
+    }
+
+    let mut reports = Vec::new();
+    for value in values {
+        reports.extend(parse_report_value(value)?);
     }
     Ok(reports)
 }
 
 fn parse_report_value(value: Value) -> Result<Vec<ParsedCallchainReport>> {
-    if value.get("traces").is_some()
-        || value.get("metrics").is_some()
-        || value.get("events").is_some()
-        || value.get("metadata").is_some()
-    {
+    if is_runtimepulse_output_value(&value) {
         return Ok(vec![ParsedCallchainReport::RuntimePulse(
             serde_json::from_value(value)?,
         )]);
@@ -265,7 +330,17 @@ fn parse_report_value(value: Value) -> Result<Vec<ParsedCallchainReport>> {
             .collect();
     }
 
+    if value.get("events").is_some() && value.get("spans").is_none() {
+        let report = lightweight_report_from_event_container(value)?;
+        return Ok(vec![ParsedCallchainReport::Lightweight(report)]);
+    }
+
     if let Some(items) = value.as_array() {
+        if items.iter().all(is_uprobe_event_value) {
+            return Ok(vec![ParsedCallchainReport::Lightweight(
+                lightweight_report_from_event_array(items.clone())?,
+            )]);
+        }
         return items
             .iter()
             .cloned()
@@ -282,11 +357,116 @@ fn parse_report_value(value: Value) -> Result<Vec<ParsedCallchainReport>> {
     )])
 }
 
+fn lightweight_report_from_event_container(mut value: Value) -> Result<StartupCallchainReport> {
+    let mut report = StartupCallchainReport::default();
+    if let Some(object) = value.as_object_mut() {
+        if let Some(events) = object.remove("events") {
+            report.raw_events = serde_json::from_value(events)?;
+        }
+        overlay_report_fields(&mut report, object);
+    }
+    Ok(report)
+}
+
+fn lightweight_report_from_event_array(items: Vec<Value>) -> Result<StartupCallchainReport> {
+    Ok(StartupCallchainReport {
+        raw_events: items
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<UprobeEventReport>, _>>()?,
+        ..StartupCallchainReport::default()
+    })
+}
+
+fn is_uprobe_event_value(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("eventType")
+            || object.contains_key("event_type")
+            || object.contains_key("event")
+            || object.contains_key("phase")
+            || object.contains_key("probe")
+            || object.contains_key("function")
+            || object.contains_key("symbol")
+    })
+}
+
+fn overlay_report_fields(report: &mut StartupCallchainReport, object: &Map<String, Value>) {
+    report.id = value_string_from_keys(object, &["id"]).or_else(|| report.id.clone());
+    report.trace_id = value_string_from_keys(object, &["traceId", "trace_id"])
+        .or_else(|| report.trace_id.clone());
+    report.sandbox_id =
+        value_string_from_keys(object, &["sandboxId", "sandbox_id"]).unwrap_or_default();
+    report.cri_sandbox_id = value_string_from_keys(
+        object,
+        &[
+            "criSandboxId",
+            "cri_sandbox_id",
+            "podSandboxId",
+            "pod_sandbox_id",
+        ],
+    )
+    .unwrap_or_default();
+    report.containerd_id = value_string_from_keys(
+        object,
+        &["containerdId", "containerd_id", "containerdContainerId"],
+    )
+    .unwrap_or_default();
+    report.k8s_namespace =
+        value_string_from_keys(object, &["namespace", "k8s_namespace", "podNamespace"])
+            .unwrap_or_default();
+    report.pod_name = value_string_from_keys(object, &["podName", "pod_name"]).unwrap_or_default();
+    report.container_name =
+        value_string_from_keys(object, &["containerName", "container_name"]).unwrap_or_default();
+    report.pod_uid = value_string_from_keys(object, &["podUid", "pod_uid"]).unwrap_or_default();
+    report.timestamp =
+        value_string_from_keys(object, &["timestamp"]).or_else(|| report.timestamp.clone());
+    report.source = value_string_from_keys(object, &["source"]).or_else(|| report.source.clone());
+    report.runtime_type = value_string_from_keys(object, &["runtimeType", "runtime_type"])
+        .or_else(|| report.runtime_type.clone());
+    report.runtime_handler = value_string_from_keys(object, &["runtimeHandler", "runtime_handler"])
+        .or_else(|| report.runtime_handler.clone());
+    report.status = value_string_from_keys(object, &["status"]).or_else(|| report.status.clone());
+    report.start_time = value_string_from_keys(object, &["startTime", "start_time"])
+        .or_else(|| report.start_time.clone());
+    report.end_time = value_string_from_keys(object, &["endTime", "end_time"])
+        .or_else(|| report.end_time.clone());
+    report.duration_ms = value_f64_from_keys(object, &["durationMs", "duration_ms", "duration"])
+        .or(report.duration_ms);
+    report.attributes = object
+        .get("attributes")
+        .and_then(Value::as_object)
+        .cloned()
+        .or_else(|| report.attributes.clone());
+    report.summary = object
+        .get("summary")
+        .and_then(Value::as_object)
+        .cloned()
+        .or_else(|| report.summary.clone());
+}
+
+fn is_runtimepulse_output_value(value: &Value) -> bool {
+    value.get("traces").is_some()
+        || value.get("metrics").is_some()
+        || value.get("profiles").is_some()
+        || value.get("metadata").is_some()
+        || value
+            .get("events")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(Value::as_object)
+            .is_some_and(|event| {
+                (event.contains_key("eventName") || event.contains_key("event_name"))
+                    && (event.contains_key("eventType") || event.contains_key("event_type"))
+                    && event.contains_key("id")
+            })
+}
+
 fn output_from_lightweight_report(
-    report: StartupCallchainReport,
+    mut report: StartupCallchainReport,
     fallback_timestamp: &str,
     config: &CollectorConfig,
 ) -> PluginOutput {
+    apply_event_report_defaults(&mut report, fallback_timestamp);
     let sandbox_id = stable_sandbox_id(&report);
     let runtime_sandbox_id = first_non_empty([
         report.cri_sandbox_id.as_str(),
@@ -340,6 +520,9 @@ fn output_from_lightweight_report(
             json!("cri-containerd-startup"),
         );
     }
+
+    let normalized_event_spans = normalize_uprobe_events(&report);
+    report.spans.extend(normalized_event_spans);
 
     let mut traces = Vec::new();
     if let Some(root_span) = root_span_from_report(
@@ -484,6 +667,585 @@ fn stable_sandbox_id(report: &StartupCallchainReport) -> String {
         report.pod_uid.as_str(),
     ])
     .to_string()
+}
+
+fn apply_event_report_defaults(report: &mut StartupCallchainReport, fallback_timestamp: &str) {
+    if report.raw_events.is_empty() {
+        return;
+    }
+
+    if report.sandbox_id.trim().is_empty() {
+        if let Some(value) =
+            first_event_string(&report.raw_events, |event| event.sandbox_id.as_deref())
+        {
+            report.sandbox_id = value;
+        }
+    }
+    if report.cri_sandbox_id.trim().is_empty() {
+        if let Some(value) =
+            first_event_string(&report.raw_events, |event| event.cri_sandbox_id.as_deref())
+        {
+            report.cri_sandbox_id = value;
+        }
+    }
+    if report.containerd_id.trim().is_empty() {
+        if let Some(value) =
+            first_event_string(&report.raw_events, |event| event.containerd_id.as_deref())
+        {
+            report.containerd_id = value;
+        }
+    }
+    if report.k8s_namespace.trim().is_empty() {
+        if let Some(value) =
+            first_event_string(&report.raw_events, |event| event.k8s_namespace.as_deref())
+        {
+            report.k8s_namespace = value;
+        }
+    }
+    if report.pod_name.trim().is_empty() {
+        if let Some(value) =
+            first_event_string(&report.raw_events, |event| event.pod_name.as_deref())
+        {
+            report.pod_name = value;
+        }
+    }
+    if report.container_name.trim().is_empty() {
+        if let Some(value) =
+            first_event_string(&report.raw_events, |event| event.container_name.as_deref())
+        {
+            report.container_name = value;
+        }
+    }
+    if report.pod_uid.trim().is_empty() {
+        if let Some(value) =
+            first_event_string(&report.raw_events, |event| event.pod_uid.as_deref())
+        {
+            report.pod_uid = value;
+        }
+    }
+    if report.runtime_type.is_none() {
+        report.runtime_type =
+            first_event_string(&report.raw_events, |event| event.runtime_type.as_deref());
+    }
+    if report.runtime_handler.is_none() {
+        report.runtime_handler =
+            first_event_string(&report.raw_events, |event| event.runtime_handler.as_deref());
+    }
+    if report.start_time.is_none() {
+        report.start_time = earliest_event_timestamp(&report.raw_events)
+            .or_else(|| Some(fallback_timestamp.to_string()));
+    }
+    if report.end_time.is_none() {
+        report.end_time =
+            latest_event_timestamp(&report.raw_events).or_else(|| report.start_time.clone());
+    }
+    if report.duration_ms.is_none() {
+        report.duration_ms = report
+            .start_time
+            .as_deref()
+            .zip(report.end_time.as_deref())
+            .and_then(|(start, end)| duration_between(start, end));
+    }
+}
+
+fn first_event_string<F>(events: &[UprobeEventReport], getter: F) -> Option<String>
+where
+    F: Fn(&UprobeEventReport) -> Option<&str>,
+{
+    events
+        .iter()
+        .filter_map(getter)
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn earliest_event_timestamp(events: &[UprobeEventReport]) -> Option<String> {
+    events
+        .iter()
+        .filter_map(event_timestamp)
+        .min_by_key(|timestamp| parse_time(timestamp).map(|time| time.timestamp_millis()))
+}
+
+fn latest_event_timestamp(events: &[UprobeEventReport]) -> Option<String> {
+    events
+        .iter()
+        .filter_map(event_timestamp)
+        .max_by_key(|timestamp| parse_time(timestamp).map(|time| time.timestamp_millis()))
+}
+
+#[derive(Default)]
+struct PendingUprobeEvent {
+    event: Option<UprobeEventReport>,
+    started_at: Option<String>,
+}
+
+fn normalize_uprobe_events(report: &StartupCallchainReport) -> Vec<StartupStageReport> {
+    if report.raw_events.is_empty() {
+        return Vec::new();
+    }
+
+    let mut pending = HashMap::<String, PendingUprobeEvent>::new();
+    let mut spans = Vec::new();
+    let mut events = report.raw_events.iter().collect::<Vec<_>>();
+    events.sort_by_key(|event| {
+        event_timestamp(event)
+            .and_then(|value| parse_time(&value).map(|time| time.timestamp_millis()))
+            .unwrap_or_default()
+    });
+
+    for event in events {
+        let kind = normalized_event_kind(&event.event_type);
+        let key = event_correlation_key(event);
+        match kind.as_str() {
+            "enter" | "start" => {
+                pending.insert(
+                    key,
+                    PendingUprobeEvent {
+                        event: Some(event.clone()),
+                        started_at: event_timestamp(event),
+                    },
+                );
+            }
+            "exit" | "end" | "return" => {
+                if let Some(started) = pending.remove(&key) {
+                    if let Some(span) = span_from_uprobe_pair(
+                        started.event.as_ref(),
+                        event,
+                        started.started_at.as_deref(),
+                        report,
+                    ) {
+                        spans.push(span);
+                    }
+                } else if let Some(span) = span_from_uprobe_pair(None, event, None, report) {
+                    spans.push(span);
+                }
+            }
+            "span" | "complete" | "event" | "" => {
+                if let Some(span) = span_from_uprobe_pair(None, event, None, report) {
+                    spans.push(span);
+                }
+            }
+            _ => {
+                if let Some(span) = span_from_uprobe_pair(None, event, None, report) {
+                    spans.push(span);
+                }
+            }
+        }
+    }
+
+    spans
+}
+
+fn span_from_uprobe_pair(
+    enter: Option<&UprobeEventReport>,
+    exit: &UprobeEventReport,
+    entered_at: Option<&str>,
+    report: &StartupCallchainReport,
+) -> Option<StartupStageReport> {
+    let start_time = entered_at.map(ToOwned::to_owned).or_else(|| {
+        value_string_from_event(
+            exit,
+            &["startTime", "start_time", "startTimestamp", "beginTime"],
+        )
+    });
+    let end_time = event_timestamp(exit).or_else(|| {
+        value_string_from_event(exit, &["endTime", "end_time", "endTimestamp", "finishTime"])
+    });
+    let duration_ms = value_f64_from_event(
+        exit,
+        &[
+            "durationMs",
+            "duration_ms",
+            "duration",
+            "latencyMs",
+            "latency_ms",
+        ],
+    )
+    .or_else(|| {
+        start_time
+            .as_deref()
+            .zip(end_time.as_deref())
+            .and_then(|(start, end)| duration_between(start, end))
+    });
+
+    let (start_time, end_time) = match (start_time, end_time, duration_ms) {
+        (Some(start), Some(end), _) => (Some(start), Some(end)),
+        (Some(start), None, Some(duration)) => parse_time(&start).map(|time| {
+            (
+                Some(start),
+                Some(timestamp(
+                    time + chrono::Duration::milliseconds(duration.max(1.0) as i64),
+                )),
+            )
+        })?,
+        (None, Some(end), Some(duration)) => parse_time(&end).map(|time| {
+            (
+                Some(timestamp(
+                    time - chrono::Duration::milliseconds(duration.max(1.0) as i64),
+                )),
+                Some(end),
+            )
+        })?,
+        _ => (None, None),
+    };
+
+    let start_time = start_time?;
+    let end_time = end_time?;
+    let function_name = exit
+        .function_name
+        .as_deref()
+        .or_else(|| enter.and_then(|event| event.function_name.as_deref()))
+        .unwrap_or("");
+    let binary = exit
+        .binary
+        .clone()
+        .or_else(|| enter.and_then(|event| event.binary.clone()))
+        .or_else(|| value_string_from_event(exit, &["process.binary", "binaryPath", "exe"]));
+    let command = exit
+        .command
+        .clone()
+        .or_else(|| enter.and_then(|event| event.command.clone()))
+        .or_else(|| value_string_from_event(exit, &["process.command", "cmd"]));
+    let binary_name = binary
+        .as_deref()
+        .or(command.as_deref())
+        .map(binary_basename)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let role = exit
+        .role
+        .clone()
+        .or_else(|| enter.and_then(|event| event.role.clone()))
+        .or_else(|| infer_stage_role(function_name, &binary_name));
+    let span_name = infer_span_name(function_name, role.as_deref(), &binary_name, exit, enter);
+    let sandbox_id = Some(stable_sandbox_id(report));
+
+    let mut attributes = Map::new();
+    attributes.insert("startup.event.kind".to_string(), json!("uprobe"));
+    attributes.insert(
+        "startup.event.correlation_key".to_string(),
+        json!(event_correlation_key(exit)),
+    );
+    if !function_name.is_empty() {
+        attributes.insert("uprobe.function".to_string(), json!(function_name));
+    }
+    if let Some(request_id) = exit
+        .request_id
+        .as_deref()
+        .or_else(|| enter.and_then(|event| event.request_id.as_deref()))
+    {
+        attributes.insert("uprobe.request_id".to_string(), json!(request_id));
+    }
+    merge_event_attributes(&mut attributes, enter);
+    merge_event_attributes(&mut attributes, Some(exit));
+
+    Some(StartupStageReport {
+        span_id: exit
+            .request_id
+            .as_deref()
+            .or_else(|| enter.and_then(|event| event.request_id.as_deref()))
+            .map(|request_id| {
+                format!(
+                    "uprobe-{}-{}",
+                    sanitize_id(request_id),
+                    sanitize_id(&span_name)
+                )
+            }),
+        span_name,
+        parent_span_id: None,
+        sandbox_id,
+        status: exit
+            .status
+            .clone()
+            .or_else(|| enter.and_then(|event| event.status.clone())),
+        start_time: Some(start_time),
+        end_time: Some(end_time),
+        duration_ms,
+        attributes: Some(attributes),
+        role,
+        binary,
+        command,
+        process_id: exit
+            .process_id
+            .or_else(|| enter.and_then(|event| event.process_id)),
+        parent_process_id: exit
+            .parent_process_id
+            .or_else(|| enter.and_then(|event| event.parent_process_id)),
+        argv: exit
+            .argv
+            .clone()
+            .or_else(|| enter.and_then(|event| event.argv.clone())),
+        env: exit
+            .env
+            .clone()
+            .or_else(|| enter.and_then(|event| event.env.clone())),
+        cni_plugin: exit
+            .cni_plugin
+            .clone()
+            .or_else(|| enter.and_then(|event| event.cni_plugin.clone())),
+        cni_command: exit
+            .cni_command
+            .clone()
+            .or_else(|| enter.and_then(|event| event.cni_command.clone())),
+        cni_container_id: exit
+            .cni_container_id
+            .clone()
+            .or_else(|| enter.and_then(|event| event.cni_container_id.clone())),
+        cni_netns: exit
+            .cni_netns
+            .clone()
+            .or_else(|| enter.and_then(|event| event.cni_netns.clone())),
+        oci_runtime: exit
+            .oci_runtime
+            .clone()
+            .or_else(|| enter.and_then(|event| event.oci_runtime.clone())),
+        oci_operation: exit
+            .oci_operation
+            .clone()
+            .or_else(|| enter.and_then(|event| event.oci_operation.clone())),
+        oci_bundle: exit
+            .oci_bundle
+            .clone()
+            .or_else(|| enter.and_then(|event| event.oci_bundle.clone())),
+    })
+}
+
+fn normalized_event_kind(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "enter" | "entry" | "start" | "begin" => "enter".to_string(),
+        "exit" | "return" | "ret" | "end" | "finish" => "exit".to_string(),
+        "span" | "complete" | "completed" => "span".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn event_correlation_key(event: &UprobeEventReport) -> String {
+    if let Some(request_id) = event
+        .request_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return format!("request:{}", request_id.trim());
+    }
+    let function = event
+        .function_name
+        .as_deref()
+        .unwrap_or("unknown-function")
+        .trim();
+    let pid = event
+        .process_id
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown-pid".to_string());
+    let sandbox = event
+        .sandbox_id
+        .as_deref()
+        .or(event.cri_sandbox_id.as_deref())
+        .or(event.containerd_id.as_deref())
+        .unwrap_or("unknown-sandbox")
+        .trim();
+    format!("function:{function}:pid:{pid}:sandbox:{sandbox}")
+}
+
+fn event_timestamp(event: &UprobeEventReport) -> Option<String> {
+    event
+        .timestamp
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| event.timestamp_ns.map(timestamp_from_unix_nanos))
+}
+
+fn timestamp_from_unix_nanos(value: u64) -> String {
+    let secs = (value / 1_000_000_000) as i64;
+    let nanos = (value % 1_000_000_000) as u32;
+    DateTime::<Utc>::from_timestamp(secs, nanos)
+        .map(timestamp)
+        .unwrap_or_else(|| timestamp(Utc::now()))
+}
+
+fn infer_stage_role(function_name: &str, binary_name: &str) -> Option<String> {
+    let function = function_name.to_ascii_lowercase();
+    if function.contains("runpodsandbox")
+        || function.contains("run_pod_sandbox")
+        || function.contains("run-pod-sandbox")
+    {
+        return Some("cri".to_string());
+    }
+    if function.contains("cni") || is_likely_cni_plugin_binary(binary_name) {
+        return Some("cni".to_string());
+    }
+    if function.contains("oci") || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
+    {
+        return Some("oci".to_string());
+    }
+    if !binary_name.is_empty() {
+        return Some("exec".to_string());
+    }
+    None
+}
+
+fn infer_span_name(
+    function_name: &str,
+    role: Option<&str>,
+    binary_name: &str,
+    exit: &UprobeEventReport,
+    enter: Option<&UprobeEventReport>,
+) -> String {
+    let explicit_name = value_string_from_event(exit, &["spanName", "span_name", "stage", "name"])
+        .or_else(|| {
+            enter.and_then(|event| {
+                value_string_from_event(event, &["spanName", "span_name", "stage", "name"])
+            })
+        });
+    if let Some(name) = explicit_name.filter(|value| !value.trim().is_empty()) {
+        return name;
+    }
+    let function = function_name.to_ascii_lowercase();
+    if function.contains("runpodsandbox")
+        || function.contains("run_pod_sandbox")
+        || function.contains("run-pod-sandbox")
+    {
+        return "cri.run_pod_sandbox".to_string();
+    }
+    if let Some(role) = role {
+        match role {
+            "cni" => {
+                return format!(
+                    "cni.plugin.{}",
+                    if binary_name.is_empty() {
+                        "unknown"
+                    } else {
+                        binary_name
+                    }
+                )
+            }
+            "oci" => {
+                return format!(
+                    "oci.{}",
+                    if binary_name.is_empty() {
+                        "runtime"
+                    } else {
+                        binary_name
+                    }
+                )
+            }
+            "exec" => {
+                return format!(
+                    "process.exec.{}",
+                    if binary_name.is_empty() {
+                        "unknown"
+                    } else {
+                        binary_name
+                    }
+                )
+            }
+            _ => {}
+        }
+    }
+    if !function_name.trim().is_empty() {
+        format!("uprobe.{}", sanitize_metric_key(function_name))
+    } else {
+        "uprobe.event".to_string()
+    }
+}
+
+fn merge_event_attributes(attributes: &mut Map<String, Value>, event: Option<&UprobeEventReport>) {
+    let Some(event) = event else {
+        return;
+    };
+    if let Some(extra) = &event.attributes {
+        attributes.extend(extra.clone());
+    }
+    if let Some(value) = &event.cri_sandbox_id {
+        attributes.insert("cri.sandbox_id".to_string(), json!(value));
+    }
+    if let Some(value) = &event.containerd_id {
+        attributes.insert("containerd.id".to_string(), json!(value));
+    }
+    if let Some(value) = &event.k8s_namespace {
+        attributes.insert("k8s.namespace".to_string(), json!(value));
+    }
+    if let Some(value) = &event.pod_name {
+        attributes.insert("k8s.pod".to_string(), json!(value));
+    }
+    if let Some(value) = &event.container_name {
+        attributes.insert("k8s.container".to_string(), json!(value));
+    }
+    if let Some(value) = &event.pod_uid {
+        attributes.insert("k8s.pod_uid".to_string(), json!(value));
+    }
+}
+
+fn value_string_from_event(event: &UprobeEventReport, keys: &[&str]) -> Option<String> {
+    let attributes = event.attributes.as_ref()?;
+    keys.iter()
+        .filter_map(|key| value_string_from_keys(attributes, &[*key]))
+        .next()
+}
+
+fn value_string_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = object.get(*key) {
+            if let Some(text) = value.as_str() {
+                if !text.trim().is_empty() {
+                    return Some(text.trim().to_string());
+                }
+            } else if value.is_number() || value.is_boolean() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn value_f64_from_keys(object: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    for key in keys {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        if let Some(number) = value.as_f64() {
+            return Some(number);
+        }
+        if let Some(text) = value.as_str().and_then(|text| text.parse::<f64>().ok()) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn value_f64_from_event(event: &UprobeEventReport, keys: &[&str]) -> Option<f64> {
+    let attributes = event.attributes.as_ref()?;
+    for key in keys {
+        let Some(value) = attributes.get(*key) else {
+            continue;
+        };
+        if let Some(number) = value.as_f64() {
+            return Some(number);
+        }
+        if let Some(text) = value.as_str().and_then(|text| text.parse::<f64>().ok()) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn is_likely_cni_plugin_binary(binary_name: &str) -> bool {
+    binary_name.starts_with("bridge")
+        || matches!(
+            binary_name,
+            "loopback"
+                | "portmap"
+                | "firewall"
+                | "host-local"
+                | "bandwidth"
+                | "tuning"
+                | "calico"
+                | "calico-ipam"
+                | "cilium-cni"
+                | "multus"
+                | "flannel"
+                | "weave-net"
+        )
 }
 
 fn root_span_from_report(
@@ -1018,8 +1780,14 @@ fn push_cni_plugin_metric_if_positive(
 
     let mut plugin_attributes = attributes.clone();
     plugin_attributes.insert("cni.plugin".to_string(), json!(plugin_name));
-    plugin_attributes.insert("startup.metric.kind".to_string(), json!("cni_plugin_breakdown"));
-    let metric_prefix = format!("sandbox.startup.cni.plugin.{}", sanitize_metric_key(plugin_name));
+    plugin_attributes.insert(
+        "startup.metric.kind".to_string(),
+        json!("cni_plugin_breakdown"),
+    );
+    let metric_prefix = format!(
+        "sandbox.startup.cni.plugin.{}",
+        sanitize_metric_key(plugin_name)
+    );
     push_metric_if_positive(
         metrics,
         timestamp,
@@ -1504,6 +2272,125 @@ mod tests {
             output.events[0].sandbox_id.as_deref(),
             Some("k8s-default-runtimepulse-demo-pod")
         );
+    }
+
+    #[test]
+    fn normalizes_uprobe_enter_exit_events_into_startup_callchain() {
+        let config = test_config();
+        let content = r#"
+        {
+          "source": "uprobe-exporter",
+          "events": [
+            {
+              "eventType": "enter",
+              "requestId": "runpod-1",
+              "function": "RunPodSandbox",
+              "timestamp": "2026-05-26T01:00:00.000Z",
+              "criSandboxId": "sandboxabcdef1234567890",
+              "namespace": "default",
+              "podName": "demo",
+              "containerName": "POD",
+              "runtimeType": "kata",
+              "runtimeHandler": "kata"
+            },
+            {
+              "eventType": "exit",
+              "requestId": "runpod-1",
+              "function": "RunPodSandbox",
+              "timestamp": "2026-05-26T01:00:01.000Z",
+              "status": "ok"
+            },
+            {
+              "eventType": "enter",
+              "requestId": "cni-bridge-1",
+              "function": "libc.execve",
+              "timestamp": "2026-05-26T01:00:00.100Z",
+              "binary": "/opt/cni/bin/bridge",
+              "cniCommand": "ADD",
+              "cniContainerId": "sandboxabcdef1234567890"
+            },
+            {
+              "eventType": "exit",
+              "requestId": "cni-bridge-1",
+              "function": "libc.execve",
+              "timestamp": "2026-05-26T01:00:00.400Z",
+              "binary": "/opt/cni/bin/bridge",
+              "cniCommand": "ADD",
+              "cniContainerId": "sandboxabcdef1234567890"
+            },
+            {
+              "eventType": "enter",
+              "requestId": "oci-runc-1",
+              "function": "oci.runtime.create",
+              "timestamp": "2026-05-26T01:00:00.500Z",
+              "binary": "/usr/bin/kata-runtime",
+              "ociRuntime": "kata-runtime",
+              "ociOperation": "create",
+              "bundle": "/run/containerd/io.containerd.runtime.v2.task/k8s.io/sandboxabcdef1234567890"
+            },
+            {
+              "eventType": "exit",
+              "requestId": "oci-runc-1",
+              "function": "oci.runtime.create",
+              "timestamp": "2026-05-26T01:00:00.700Z",
+              "binary": "/usr/bin/kata-runtime",
+              "ociRuntime": "kata-runtime",
+              "ociOperation": "create"
+            }
+          ]
+        }
+        "#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert!(output.traces.iter().all(|span| {
+            span.trace_id == "cri-containerd-startup-k8s-default-demo-pod"
+                && span.sandbox_id.as_deref() == Some("k8s-default-demo-pod")
+        }));
+        assert!(output
+            .traces
+            .iter()
+            .any(|span| { span.span_name == "cri.run_pod_sandbox" && span.duration_ms == 1000.0 }));
+        assert!(output.traces.iter().any(|span| {
+            span.span_name == "cni.plugin.bridge"
+                && span.duration_ms == 300.0
+                && span.attributes["cni.plugin"] == json!("bridge")
+        }));
+        assert!(output
+            .traces
+            .iter()
+            .any(|span| { span.span_name == "oci.kata-runtime" && span.duration_ms == 200.0 }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.cni.plugin.bridge_duration_ms" && metric.value == 300.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.oci_duration_ms" && metric.value == 200.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.kata_duration_ms" && metric.value == 200.0
+        }));
+        assert_eq!(
+            output.metadata.sandboxes[0]["id"],
+            json!("k8s-default-demo-pod")
+        );
+    }
+
+    #[test]
+    fn groups_jsonl_uprobe_events_into_one_callchain_report() {
+        let config = test_config();
+        let content = r#"
+{"eventType":"enter","requestId":"runpod-jsonl","function":"RunPodSandbox","timestamp":"2026-05-26T01:00:00.000Z","sandboxId":"sandbox-jsonl","runtimeType":"runc"}
+{"eventType":"exit","requestId":"runpod-jsonl","function":"RunPodSandbox","timestamp":"2026-05-26T01:00:00.500Z"}
+        "#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert_eq!(output.metadata.sandboxes.len(), 1);
+        assert!(output.traces.iter().any(|span| {
+            span.span_name == "cri.run_pod_sandbox"
+                && span.trace_id == "cri-containerd-startup-sandbox-jsonl"
+                && span.duration_ms == 500.0
+        }));
     }
 
     #[test]
