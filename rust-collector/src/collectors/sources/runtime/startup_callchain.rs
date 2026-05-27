@@ -93,6 +93,8 @@ struct UprobeEventReport {
     #[serde(alias = "timestamp_ns", alias = "timeNs")]
     timestamp_ns: Option<u64>,
     timestamp: Option<String>,
+    #[serde(alias = "duration_ms", alias = "duration")]
+    duration_ms: Option<f64>,
     #[serde(alias = "request_id", alias = "correlationId", alias = "callId")]
     request_id: Option<String>,
     #[serde(alias = "function", alias = "symbol", alias = "probe", alias = "name")]
@@ -146,7 +148,7 @@ struct UprobeEventReport {
     attributes: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StartupStageReport {
     #[serde(alias = "span_id")]
@@ -521,8 +523,8 @@ fn output_from_lightweight_report(
         );
     }
 
-    let normalized_event_spans = normalize_uprobe_events(&report);
-    report.spans.extend(normalized_event_spans);
+    let normalized_events = normalize_uprobe_events(&report);
+    report.spans.extend(normalized_events.spans.clone());
 
     let mut traces = Vec::new();
     if let Some(root_span) = root_span_from_report(
@@ -576,6 +578,14 @@ fn output_from_lightweight_report(
         &base_attributes,
         config,
     ));
+    metrics.extend(metrics_from_uprobe_normalization(
+        &normalized_events,
+        &observed_at,
+        &sandbox_id,
+        &runtime_type,
+        &base_attributes,
+        config,
+    ));
     if let Some(duration_ms) = report.duration_ms {
         metrics.push(metric(
             &observed_at,
@@ -612,6 +622,31 @@ fn output_from_lightweight_report(
         "attributes": base_attributes.clone(),
     }));
 
+    let mut event_attributes = base_attributes.clone();
+    if normalized_events.event_count > 0 {
+        event_attributes.insert(
+            "startup.uprobe.event_count".to_string(),
+            json!(normalized_events.event_count),
+        );
+        event_attributes.insert(
+            "startup.uprobe.span_count".to_string(),
+            json!(normalized_events.span_count),
+        );
+        event_attributes.insert(
+            "startup.uprobe.matched_event_count".to_string(),
+            json!(normalized_events.matched_event_count),
+        );
+        event_attributes.insert(
+            "startup.uprobe.unmatched_event_count".to_string(),
+            json!(normalized_events.unmatched_event_count()),
+        );
+    }
+    let event_severity = if status == "ok" && normalized_events.unmatched_event_count() == 0 {
+        "info"
+    } else {
+        "warning"
+    };
+
     PluginOutput {
         source: None,
         metadata,
@@ -623,7 +658,7 @@ fn output_from_lightweight_report(
                 sanitize_id(&observed_at)
             ),
             timestamp: observed_at,
-            severity: if status == "ok" { "info" } else { "warning" }.to_string(),
+            severity: event_severity.to_string(),
             event_type: "startup".to_string(),
             event_name: "startup.callchain.observed".to_string(),
             message: format!(
@@ -635,7 +670,7 @@ fn output_from_lightweight_report(
                 "runtimepulse-rust-collector/{}/startup-callchain",
                 config.node_id
             ),
-            attributes: base_attributes,
+            attributes: event_attributes,
             sandbox_id: Some(sandbox_id),
             image_id: None,
             node_id: Some(config.node_id.clone()),
@@ -780,13 +815,38 @@ struct PendingUprobeEvent {
     started_at: Option<String>,
 }
 
-fn normalize_uprobe_events(report: &StartupCallchainReport) -> Vec<StartupStageReport> {
+#[derive(Clone, Default)]
+struct UprobeNormalization {
+    spans: Vec<StartupStageReport>,
+    event_count: u64,
+    matched_event_count: u64,
+    span_count: u64,
+}
+
+impl UprobeNormalization {
+    fn unmatched_event_count(&self) -> u64 {
+        self.event_count.saturating_sub(self.matched_event_count)
+    }
+
+    fn pairing_ratio(&self) -> f64 {
+        if self.event_count == 0 {
+            1.0
+        } else {
+            self.matched_event_count as f64 / self.event_count as f64
+        }
+    }
+}
+
+fn normalize_uprobe_events(report: &StartupCallchainReport) -> UprobeNormalization {
     if report.raw_events.is_empty() {
-        return Vec::new();
+        return UprobeNormalization::default();
     }
 
     let mut pending = HashMap::<String, PendingUprobeEvent>::new();
-    let mut spans = Vec::new();
+    let mut normalized = UprobeNormalization {
+        event_count: report.raw_events.len() as u64,
+        ..UprobeNormalization::default()
+    };
     let mut events = report.raw_events.iter().collect::<Vec<_>>();
     events.sort_by_key(|event| {
         event_timestamp(event)
@@ -815,26 +875,31 @@ fn normalize_uprobe_events(report: &StartupCallchainReport) -> Vec<StartupStageR
                         started.started_at.as_deref(),
                         report,
                     ) {
-                        spans.push(span);
+                        normalized.spans.push(span);
+                        normalized.matched_event_count += 2;
                     }
                 } else if let Some(span) = span_from_uprobe_pair(None, event, None, report) {
-                    spans.push(span);
+                    normalized.spans.push(span);
+                    normalized.matched_event_count += 1;
                 }
             }
             "span" | "complete" | "event" | "" => {
                 if let Some(span) = span_from_uprobe_pair(None, event, None, report) {
-                    spans.push(span);
+                    normalized.spans.push(span);
+                    normalized.matched_event_count += 1;
                 }
             }
             _ => {
                 if let Some(span) = span_from_uprobe_pair(None, event, None, report) {
-                    spans.push(span);
+                    normalized.spans.push(span);
+                    normalized.matched_event_count += 1;
                 }
             }
         }
     }
 
-    spans
+    normalized.span_count = normalized.spans.len() as u64;
+    normalized
 }
 
 fn span_from_uprobe_pair(
@@ -852,22 +917,27 @@ fn span_from_uprobe_pair(
     let end_time = event_timestamp(exit).or_else(|| {
         value_string_from_event(exit, &["endTime", "end_time", "endTimestamp", "finishTime"])
     });
-    let duration_ms = value_f64_from_event(
-        exit,
-        &[
-            "durationMs",
-            "duration_ms",
-            "duration",
-            "latencyMs",
-            "latency_ms",
-        ],
-    )
-    .or_else(|| {
-        start_time
-            .as_deref()
-            .zip(end_time.as_deref())
-            .and_then(|(start, end)| duration_between(start, end))
-    });
+    let duration_ms = exit
+        .duration_ms
+        .or_else(|| enter.and_then(|event| event.duration_ms))
+        .or_else(|| {
+            value_f64_from_event(
+                exit,
+                &[
+                    "durationMs",
+                    "duration_ms",
+                    "duration",
+                    "latencyMs",
+                    "latency_ms",
+                ],
+            )
+        })
+        .or_else(|| {
+            start_time
+                .as_deref()
+                .zip(end_time.as_deref())
+                .and_then(|(start, end)| duration_between(start, end))
+        });
 
     let (start_time, end_time) = match (start_time, end_time, duration_ms) {
         (Some(start), Some(end), _) => (Some(start), Some(end)),
@@ -1763,6 +1833,74 @@ fn metrics_from_spans(
     metrics
 }
 
+fn metrics_from_uprobe_normalization(
+    normalized: &UprobeNormalization,
+    timestamp: &str,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) -> Vec<MetricSample> {
+    if normalized.event_count == 0 {
+        return Vec::new();
+    }
+
+    let mut metric_attributes = attributes.clone();
+    metric_attributes.insert("startup.metric.kind".to_string(), json!("uprobe_quality"));
+    let mut metrics = Vec::new();
+    metrics.push(metric(
+        timestamp,
+        "sandbox.startup.uprobe_event_count",
+        normalized.event_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &metric_attributes,
+        config,
+    ));
+    metrics.push(metric(
+        timestamp,
+        "sandbox.startup.uprobe_matched_event_count",
+        normalized.matched_event_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &metric_attributes,
+        config,
+    ));
+    metrics.push(metric(
+        timestamp,
+        "sandbox.startup.uprobe_span_count",
+        normalized.span_count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &metric_attributes,
+        config,
+    ));
+    metrics.push(metric(
+        timestamp,
+        "sandbox.startup.uprobe_unmatched_event_count",
+        normalized.unmatched_event_count() as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &metric_attributes,
+        config,
+    ));
+    metrics.push(metric(
+        timestamp,
+        "sandbox.startup.uprobe_pairing_ratio",
+        normalized.pairing_ratio(),
+        "ratio",
+        sandbox_id,
+        runtime_type,
+        &metric_attributes,
+        config,
+    ));
+    metrics
+}
+
 fn push_cni_plugin_metric_if_positive(
     metrics: &mut Vec<MetricSample>,
     timestamp: &str,
@@ -2369,10 +2507,68 @@ mod tests {
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.kata_duration_ms" && metric.value == 200.0
         }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.uprobe_event_count" && metric.value == 6.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.uprobe_unmatched_event_count" && metric.value == 0.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.uprobe_pairing_ratio" && metric.value == 1.0
+        }));
+        assert_eq!(output.events[0].severity, "info");
         assert_eq!(
             output.metadata.sandboxes[0]["id"],
             json!("k8s-default-demo-pod")
         );
+    }
+
+    #[test]
+    fn flags_unmatched_uprobe_events_for_exporter_quality() {
+        let config = test_config();
+        let content = r#"
+        {
+          "sandboxId": "sandbox-quality",
+          "runtimeType": "runc",
+          "events": [
+            {
+              "eventType": "enter",
+              "requestId": "runpod-quality",
+              "function": "RunPodSandbox",
+              "timestamp": "2026-05-26T01:00:00.000Z"
+            },
+            {
+              "eventType": "exit",
+              "requestId": "cni-exit-only",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.120Z",
+              "durationMs": 20,
+              "binary": "/opt/cni/bin/bridge",
+              "cniCommand": "ADD"
+            }
+          ]
+        }
+        "#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert_eq!(output.events[0].severity, "warning");
+        assert_eq!(
+            output.events[0].attributes["startup.uprobe.unmatched_event_count"],
+            json!(1)
+        );
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.uprobe_event_count" && metric.value == 2.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.uprobe_matched_event_count" && metric.value == 1.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.uprobe_unmatched_event_count" && metric.value == 1.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.uprobe_pairing_ratio" && metric.value == 0.5
+        }));
     }
 
     #[test]

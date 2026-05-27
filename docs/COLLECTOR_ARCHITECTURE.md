@@ -131,7 +131,9 @@ such as `cri.run_pod_sandbox`, `cni.plugin.bridge`, `process.exec.iptables`,
 uprobe/eBPF enter/exit events under `events`/`uprobeEvents`/`rawEvents`.
 Raw events are paired by `requestId`/`correlationId`/`callId` first, then by
 function + pid + sandbox id, and are converted into the same stage spans before
-metric derivation. The CNI plugin stage is identified from the CNI plugin binary
+metric derivation. Pairing quality is emitted as `sandbox.startup.uprobe_*`
+metrics plus event attributes, so missing enter/exit records from an exporter are
+visible instead of silently skewing the call-chain. The CNI plugin stage is identified from the CNI plugin binary
 that the CRI/containerd path invokes, not from helper commands executed inside
 that plugin. Helper binaries such as `iptables`, `nft`, `ip`, and `tc` remain
 secondary drill-down spans/metrics.
