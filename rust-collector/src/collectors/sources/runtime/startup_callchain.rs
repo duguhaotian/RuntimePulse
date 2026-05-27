@@ -494,6 +494,13 @@ fn output_from_lightweight_report(
     let runtime_type = report
         .runtime_type
         .clone()
+        .filter(|value| !value.trim().is_empty() && value != "unknown")
+        .or_else(|| {
+            report
+                .runtime_handler
+                .as_ref()
+                .map(|handler| runtime_type_from_name(handler))
+        })
         .unwrap_or_else(|| "unknown".to_string());
     let source = report
         .source
@@ -534,6 +541,7 @@ fn output_from_lightweight_report(
         &root_span_id,
         (!explicit_trace_id).then_some(cri_startup_root_span_id.as_str()),
         &status,
+        &runtime_type,
         base_attributes.clone(),
     ) {
         traces.push(root_span);
@@ -679,6 +687,19 @@ fn output_from_lightweight_report(
         }],
         traces,
         profiles: Vec::new(),
+    }
+}
+
+fn runtime_type_from_name(value: &str) -> String {
+    let value = value.to_ascii_lowercase();
+    if value.contains("runsc") || value.contains("gvisor") {
+        "gvisor".to_string()
+    } else if value.contains("kata") {
+        "kata".to_string()
+    } else if value.contains("firecracker") {
+        "firecracker".to_string()
+    } else {
+        "runc".to_string()
     }
 }
 
@@ -1325,6 +1346,7 @@ fn root_span_from_report(
     root_span_id: &str,
     parent_span_id: Option<&str>,
     status: &str,
+    runtime_type: &str,
     attributes: Map<String, Value>,
 ) -> Option<TraceSpan> {
     let (start, end, duration_ms) = resolve_times(
@@ -1343,7 +1365,7 @@ fn root_span_from_report(
         attributes,
         sandbox_id: Some(sandbox_id.to_string()),
         image_id: None,
-        runtime_type: None,
+        runtime_type: Some(runtime_type.to_string()),
         parent_span_id: parent_span_id.map(ToOwned::to_owned),
     })
 }
@@ -1386,7 +1408,7 @@ fn span_from_stage(
                 .unwrap_or_else(|| fallback_sandbox_id.to_string()),
         ),
         image_id: None,
-        runtime_type: None,
+        runtime_type: Some(runtime_type.to_string()),
         parent_span_id: stage
             .parent_span_id
             .clone()
@@ -2571,6 +2593,32 @@ mod tests {
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.uprobe_pairing_ratio" && metric.value == 0.5
         }));
+    }
+
+    #[test]
+    fn callchain_spans_carry_runtime_type_from_handler() {
+        let config = test_config();
+        let content = r#"{
+          "id":"handler-only",
+          "sandboxId":"handler-sandbox",
+          "runtimeHandler":"kata",
+          "startTime":"2026-05-26T01:00:00.000Z",
+          "endTime":"2026-05-26T01:00:00.100Z",
+          "spans":[{
+            "spanName":"oci.kata-runtime",
+            "startTime":"2026-05-26T01:00:00.010Z",
+            "endTime":"2026-05-26T01:00:00.090Z",
+            "binary":"/usr/bin/kata-runtime"
+          }]
+        }"#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config)
+            .expect("callchain output");
+        assert_eq!(output.metadata.sandboxes[0]["runtimeType"], "kata");
+        assert!(output
+            .traces
+            .iter()
+            .all(|span| span.runtime_type.as_deref() == Some("kata")));
     }
 
     #[test]
