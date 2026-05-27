@@ -442,14 +442,32 @@ test('derives sandbox startup duration from cri startup trace spans and callchai
       endTime: '2026-05-22T02:00:01.200Z',
       durationMs: 1200,
       status: 'ok',
-      attributes: { plugin: 'cri-startup-trace' },
+      attributes: { plugin: 'cri-startup-trace', 'runtime.type': 'kata' },
       sandboxId: 'cri-sandbox-a',
+      runtimeType: 'kata',
     }],
     profiles: [],
   });
 
   assert.equal(liveSandboxes(store)[0].startupDurationMs, 1200);
+  assert.equal(liveSandboxes(store)[0].runtimeType, 'kata');
+  assert.equal(liveSandboxes(store)[0].attributes['runtime.type'], 'kata');
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
+
+  recordLiveBatch(store, {
+    source: 'late-metadata',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{ id: 'cri-sandbox-a', nodeId: 'node-a', imageRef: 'pause:latest', runtimeType: 'runc' }],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+  assert.equal(liveSandboxes(store)[0].runtimeType, 'kata');
 
   recordLiveBatch(store, {
     source: 'startup-callchain',

@@ -518,6 +518,7 @@ fn vm_boot_span(
         attributes,
         sandbox_id: Some(sandbox_id.to_string()),
         image_id: None,
+        runtime_type: None,
         parent_span_id: None,
     }
 }

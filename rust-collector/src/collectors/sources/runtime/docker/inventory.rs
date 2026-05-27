@@ -165,6 +165,7 @@ pub fn collect_docker_inventory(
                 attributes: trace_attributes,
                 sandbox_id: Some(sandbox_id),
                 image_id: None,
+                runtime_type: None,
                 parent_span_id: None,
             });
         }

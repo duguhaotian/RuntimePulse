@@ -231,6 +231,7 @@ function rememberRecentPayload(status, payload, batch) {
       parentSpanId: row.parentSpanId,
       sandboxId: row.sandboxId,
       imageId: row.imageId,
+      runtimeType: row.runtimeType,
       spanName: row.spanName,
       startTime: row.startTime,
       endTime: row.endTime,
@@ -353,6 +354,7 @@ function validateTraceSpan(row, index, errors) {
   requireObject(row, 'attributes', errors, prefix);
   optionalString(row, 'sandboxId', errors, prefix);
   optionalString(row, 'imageId', errors, prefix);
+  optionalString(row, 'runtimeType', errors, prefix);
   optionalString(row, 'parentSpanId', errors, prefix);
 }
 

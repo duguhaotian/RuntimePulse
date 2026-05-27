@@ -51,6 +51,7 @@ use crate::collectors::sources::runtime::docker::inventory::collect_docker_inven
 use crate::collectors::sources::runtime::docker::lifecycle::output_from_event as lifecycle_output_from_event;
 use crate::collectors::sources::runtime::kubelet::{
     cri_event_action as kubelet_cri_event_action,
+    cri_event_runtime_handler as kubelet_cri_event_runtime_handler,
     cri_event_runtime_object_id as kubelet_cri_event_runtime_object_id,
     cri_event_runtime_sandbox_id as kubelet_cri_event_runtime_sandbox_id,
     cri_event_stable_sandbox_id as kubelet_cri_event_stable_sandbox_id, output_from_cri_event,
@@ -1757,6 +1758,7 @@ fn docker_startup_trace_output(
             attributes,
             sandbox_id: Some(sandbox_id),
             image_id: None,
+            runtime_type: None,
             parent_span_id: None,
         }],
         profiles: Vec::new(),
@@ -1876,6 +1878,8 @@ fn containerd_startup_trace_output(
     attributes.insert("containerd.short_id".to_string(), json!(short_id));
     attributes.insert("containerd.namespace".to_string(), json!(create.namespace));
     attributes.insert("containerd.runtime".to_string(), json!(create.runtime_name));
+    let runtime_type = runtime_type_from_containerd_name(&create.runtime_name);
+    attributes.insert("runtime.type".to_string(), json!(runtime_type));
     attributes.insert("image.ref".to_string(), json!(create.image_ref));
     attributes.insert(
         "k8s.namespace".to_string(),
@@ -1902,6 +1906,7 @@ fn containerd_startup_trace_output(
             attributes,
             sandbox_id: Some(sandbox_id),
             image_id: None,
+            runtime_type: Some(runtime_type),
             parent_span_id: None,
         }],
         profiles: Vec::new(),
@@ -2125,6 +2130,11 @@ fn merge_cri_startup_state_from_cri_event(
         state.runtime_sandbox_id.as_str(),
         kubelet_cri_event_runtime_sandbox_id(event).as_str(),
     ]);
+    state.runtime_name = first_non_empty_owned([
+        state.runtime_name.as_str(),
+        kubelet_cri_event_runtime_handler(event).as_str(),
+    ]);
+    state.runtime_type = runtime_type_from_containerd_name(&state.runtime_name);
     state.image_ref = first_non_empty_owned([
         state.image_ref.as_str(),
         event.image_ref.as_str(),
@@ -2325,6 +2335,7 @@ fn cri_containerd_startup_trace_output(
         attributes: attributes.clone(),
         sandbox_id: Some(sandbox_id.clone()),
         image_id: None,
+        runtime_type: Some(runtime_type.to_string()),
         parent_span_id: None,
     }];
 
@@ -2484,6 +2495,10 @@ fn push_child_span(
         end_time: timestamp(end),
         duration_ms: duration_ms(start, end),
         status: status.to_string(),
+        runtime_type: attributes
+            .get("runtime.type")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned),
         attributes,
         sandbox_id: Some(sandbox_id.to_string()),
         image_id: None,
@@ -3115,6 +3130,7 @@ mod tests {
             labels: labels.clone(),
             metadata: HashMap::new(),
             annotations: HashMap::new(),
+            runtime_handler: String::new(),
         };
         assert!(tracker.outputs_from_cri_event(&created, &config).is_empty());
 

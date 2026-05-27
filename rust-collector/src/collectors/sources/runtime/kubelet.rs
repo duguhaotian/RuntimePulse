@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use crate::collectors::core::config::CollectorConfig;
 use crate::collectors::core::error::{CollectorError, Result};
 use crate::collectors::core::model::{EventRecord, Metadata, PluginOutput};
+use crate::collectors::sources::runtime::containerd::runtime_type_from_containerd_name;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +47,8 @@ pub struct CriEvent {
     pub metadata: HashMap<String, String>,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
+    #[serde(default, alias = "runtime_handler")]
+    pub runtime_handler: String,
 }
 
 fn deserialize_i64_string<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
@@ -150,6 +153,8 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
         event.image_ref.clone()
     };
     let image_id = image_id_from_ref(&image_ref);
+    let runtime_handler = cri_event_runtime_handler(&event);
+    let runtime_type = cri_event_runtime_type(&event);
     let status = sandbox_status_from_action(action);
     let current = matches!(status, "running");
     let removed = matches!(action, "CONTAINER_DELETED" | "SANDBOX_DELETED" | "REMOVE");
@@ -162,6 +167,8 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
     attributes.insert("cri.reason".to_string(), json!(event.reason));
     attributes.insert("cri.container_id".to_string(), json!(container_id));
     attributes.insert("cri.sandbox_id".to_string(), json!(event.sandbox_id));
+    attributes.insert("cri.runtime_handler".to_string(), json!(runtime_handler));
+    attributes.insert("runtime.type".to_string(), json!(runtime_type));
     attributes.insert("k8s.namespace".to_string(), json!(namespace));
     attributes.insert("k8s.pod".to_string(), json!(pod_name));
     attributes.insert("k8s.container".to_string(), json!(container_name));
@@ -176,8 +183,8 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
         "workloadName": workload_name,
         "imageId": image_id,
         "imageRef": image_ref,
-        "runtimeType": "kubernetes",
-        "runtimeVersion": "cri-events",
+        "runtimeType": runtime_type,
+        "runtimeVersion": runtime_handler,
         "status": status,
         "createdAt": timestamp,
         "startupDurationMs": 0,
@@ -193,6 +200,7 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
             "runtime.source": "cri",
             "cri.container_id": container_id,
             "cri.sandbox_id": event.sandbox_id,
+            "cri.runtime_handler": runtime_handler,
             "cri.short_id": short_id,
             "k8s.namespace": namespace,
             "k8s.pod": pod_name,
@@ -262,7 +270,7 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
             sandbox_id: Some(sandbox_id),
             image_id: None,
             node_id: Some(config.node_id.clone()),
-            runtime_type: Some("kubernetes".to_string()),
+            runtime_type: Some(runtime_type),
             reason: if event.reason.is_empty() {
                 None
             } else {
@@ -327,6 +335,7 @@ fn normalize_event_value(value: Value) -> Value {
         copy_if_missing(&mut normalized, status, "id", "sandboxId");
         copy_if_missing(&mut normalized, status, "id", "containerId");
         copy_if_missing(&mut normalized, status, "createdAt", "createdAt");
+        copy_if_missing(&mut normalized, status, "runtimeHandler", "runtimeHandler");
         if let Some(Value::String(state)) = status.get("state") {
             normalized.insert("type".to_string(), json!(state));
         }
@@ -458,6 +467,20 @@ pub fn cri_event_runtime_object_id(event: &CriEvent) -> String {
         event.sandbox_id.as_str(),
         label(event, "io.kubernetes.cri.sandbox-id"),
     ]))
+}
+
+pub fn cri_event_runtime_handler(event: &CriEvent) -> String {
+    first_non_empty(&[
+        event.runtime_handler.as_str(),
+        label(event, "io.kubernetes.cri.runtime-handler"),
+        label(event, "io.kubernetes.runtime.handler"),
+        label(event, "runtimeHandler"),
+        "runc",
+    ])
+}
+
+pub fn cri_event_runtime_type(event: &CriEvent) -> String {
+    runtime_type_from_containerd_name(&cri_event_runtime_handler(event))
 }
 
 pub fn cri_event_stable_sandbox_id(event: &CriEvent) -> Option<String> {
@@ -639,6 +662,7 @@ mod tests {
             ]),
             metadata: HashMap::new(),
             annotations: HashMap::new(),
+            runtime_handler: String::new(),
         };
 
         let output = output_from_cri_event(event, &config).expect("lifecycle output");
@@ -678,6 +702,7 @@ mod tests {
               "attempt": 1
             },
             "state": "SANDBOX_READY",
+            "runtimeHandler": "kata",
             "createdAt": "1779846067274109932",
             "labels": {
               "io.kubernetes.container.name": "POD",
@@ -692,6 +717,8 @@ mod tests {
         assert_eq!(event.sandbox_id, "sandboxabcdef1234567890");
         assert_eq!(event.container_id, "sandboxabcdef1234567890");
         assert_eq!(cri_event_action(&event), "SANDBOX_READY");
+        assert_eq!(cri_event_runtime_handler(&event), "kata");
+        assert_eq!(cri_event_runtime_type(&event), "kata");
         assert_eq!(
             event.metadata.get("name").map(String::as_str),
             Some("runtimepulse-cri-demo")
@@ -703,6 +730,12 @@ mod tests {
                 .get("id")
                 .and_then(serde_json::Value::as_str),
             Some("k8s-default-runtimepulse-cri-demo-pod")
+        );
+        assert_eq!(
+            output.metadata.sandboxes[0]
+                .get("runtimeType")
+                .and_then(serde_json::Value::as_str),
+            Some("kata")
         );
     }
 

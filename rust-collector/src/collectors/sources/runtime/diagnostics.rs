@@ -1189,6 +1189,7 @@ fn diagnostic_span(
         attributes: span_attributes,
         sandbox_id: sandbox_id.map(ToOwned::to_owned),
         image_id: image_id.map(ToOwned::to_owned),
+        runtime_type: None,
         parent_span_id: None,
     }
 }

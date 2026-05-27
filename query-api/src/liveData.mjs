@@ -451,6 +451,7 @@ function mergeSandbox(existing, incoming) {
   if (!existing) return incoming;
   const lifecycleAction = incoming.attributes?.['lifecycle.action'];
   const keepTraceStartup = startupDurationSource(existing) === 'trace' && startupDurationSource(incoming) !== 'trace';
+  const traceRuntimeType = stringValue(existing.attributes?.['runtime.type']);
   const incomingCpu = numberOr(incoming.cpuAvg, 0);
   const existingCpu = numberOr(existing.cpuAvg, 0);
   const metadataCpu = incomingCpu > 0 ? incomingCpu : existingCpu;
@@ -458,6 +459,7 @@ function mergeSandbox(existing, incoming) {
   return {
     ...existing,
     ...incoming,
+    runtimeType: traceRuntimeType ?? incoming.runtimeType ?? existing.runtimeType,
     createdAt: keepTraceStartup ? existing.createdAt : lifecycleAction ? existing.createdAt : incoming.createdAt ?? existing.createdAt,
     startedAt: keepTraceStartup ? existing.startedAt : incoming.startedAt ?? existing.startedAt,
     stoppedAt: incoming.stoppedAt ?? existing.stoppedAt,
@@ -818,12 +820,28 @@ function refreshSandboxFromTraceSpan(store, span) {
 
   const sandbox = store.sandboxes.get(sandboxId);
   const historicalSandbox = store.sandboxHistory.get(sandboxId);
-  if (sandbox) applySandboxStartupDuration(sandbox, durationMs, span, 'trace');
-  if (historicalSandbox) applySandboxStartupDuration(historicalSandbox, durationMs, span, 'trace');
+  if (sandbox) {
+    applySandboxStartupDuration(sandbox, durationMs, span, 'trace');
+    applySandboxRuntimeTypeFromTrace(sandbox, span);
+  }
+  if (historicalSandbox) {
+    applySandboxStartupDuration(historicalSandbox, durationMs, span, 'trace');
+    applySandboxRuntimeTypeFromTrace(historicalSandbox, span);
+  }
 }
 
 function startupTraceSpan(span) {
   return ['container.startup', 'sandbox.startup', 'sandbox.startup.e2e', 'sandbox.startup.callchain'].includes(String(span?.spanName ?? ''));
+}
+
+function applySandboxRuntimeTypeFromTrace(sandbox, span) {
+  const runtimeType = stringValue(span?.runtimeType) ?? stringValue(span?.attributes?.['runtime.type']);
+  if (!runtimeType) return;
+  sandbox.runtimeType = runtimeType;
+  sandbox.attributes = {
+    ...(sandbox.attributes ?? {}),
+    'runtime.type': runtimeType,
+  };
 }
 
 function startupDurationMetric(metric) {

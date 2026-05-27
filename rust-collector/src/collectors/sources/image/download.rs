@@ -306,6 +306,7 @@ fn image_trace_span(
         attributes: trace_attributes,
         sandbox_id: None,
         image_id: Some(image_id.to_string()),
+        runtime_type: None,
         parent_span_id: None,
     }
 }

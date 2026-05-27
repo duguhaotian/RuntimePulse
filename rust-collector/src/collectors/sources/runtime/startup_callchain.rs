@@ -1343,6 +1343,7 @@ fn root_span_from_report(
         attributes,
         sandbox_id: Some(sandbox_id.to_string()),
         image_id: None,
+        runtime_type: None,
         parent_span_id: parent_span_id.map(ToOwned::to_owned),
     })
 }
@@ -1385,6 +1386,7 @@ fn span_from_stage(
                 .unwrap_or_else(|| fallback_sandbox_id.to_string()),
         ),
         image_id: None,
+        runtime_type: None,
         parent_span_id: stage
             .parent_span_id
             .clone()

@@ -94,6 +94,8 @@ pub struct TraceSpan {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_span_id: Option<String>,
 }
 
