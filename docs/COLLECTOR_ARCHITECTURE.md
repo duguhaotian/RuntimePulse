@@ -121,6 +121,14 @@ stable IDs such as `CNI_CONTAINERID`, containerd sandbox id, OCI bundle path,
 and CRI sandbox id must drive correlation. CRI socket proxying is not part of
 the preferred design.
 
+The first concrete exporter bridge is available as
+`tools/runtimepulse-startup-probe/runtimepulse-startup-probe`. It uses real
+`bpftrace` `execve`/process-exit tracepoints to emit raw call-chain events for
+CNI plugin binaries, OCI/Kata runtime binaries, containerd shims, and optional
+helper binaries. It is intentionally an exec-level minimum viable exporter; the
+future native backend should add containerd CRI `RunPodSandbox` Go uprobe request
+context while preserving the same startup-callchain JSON contract.
+
 `startup-callchain` is the report-ingestion bridge for that later high-fidelity
 path. External uprobe/eBPF exporters can write JSON/JSONL or be invoked by
 `RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`; the host-agent normalizes the

@@ -1,0 +1,710 @@
+#!/usr/bin/env python3
+"""Minimal RuntimePulse CRI/containerd startup probe exporter.
+
+The probe intentionally emits the raw event shape accepted by the Rust
+`startup-callchain` collector.  The current implementation uses real kernel
+exec/exit tracepoints through bpftrace to attribute CNI plugin binaries, OCI
+runtime binaries, Kata/runtime helpers, and selected helper binaries to a
+sandbox id whenever that id is present in CNI env or OCI/containerd paths.
+
+It is a small bridge, not a CRI proxy.  Precise Go-function RunPodSandbox
+uprobes can be added as a later backend while keeping this JSON contract.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+DEFAULT_CNI_BIN_DIRS = [
+    "/opt/cni/bin",
+    "/usr/lib/cni",
+    "/usr/libexec/cni",
+    "/tmp/runtimepulse-containerd-cri-test/cni/bin",
+]
+DEFAULT_RUNTIME_BINARIES = [
+    "/usr/bin/runc",
+    "/usr/local/bin/runc",
+    "/usr/bin/crun",
+    "/usr/local/bin/crun",
+    "/usr/bin/kata-runtime",
+    "/usr/local/bin/kata-runtime",
+    "/opt/kata/bin/kata-runtime",
+    "/usr/bin/runsc",
+    "/usr/local/bin/runsc",
+    "/opt/kata/bin/qemu-system-x86_64",
+    "/opt/kata/bin/qemu-system-aarch64",
+    "/opt/kata/libexec/virtiofsd",
+    "/usr/local/bin/containerd-shim-kata-v2",
+    "/opt/kata/bin/containerd-shim-kata-v2",
+    "/usr/local/bin/containerd-shim-runc-v2",
+    "/usr/bin/containerd-shim-runc-v2",
+]
+DEFAULT_HELPER_BINARIES = [
+    "/usr/sbin/iptables",
+    "/usr/bin/iptables",
+    "/usr/sbin/iptables-restore",
+    "/usr/bin/iptables-restore",
+    "/usr/sbin/ip6tables",
+    "/usr/bin/ip6tables",
+    "/usr/sbin/ip6tables-restore",
+    "/usr/bin/ip6tables-restore",
+    "/usr/sbin/nft",
+    "/usr/bin/nft",
+    "/usr/sbin/ip",
+    "/usr/bin/ip",
+    "/usr/sbin/tc",
+    "/usr/bin/tc",
+    "/usr/bin/mount",
+    "/usr/bin/umount",
+]
+CNI_ENV_KEYS = ["CNI_COMMAND", "CNI_CONTAINERID", "CNI_NETNS", "CNI_IFNAME", "CNI_PATH", "CNI_ARGS"]
+OCI_OPS = {"create", "start", "state", "delete", "run", "exec", "kill", "pause", "resume"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def basename(value: str | None) -> str:
+    if not value:
+        return ""
+    return os.path.basename(value.split()[0])
+
+
+def sanitize_id(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-").lower() or "unknown"
+
+
+def split_csv(values: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        for item in value.split(","):
+            item = item.strip()
+            if item:
+                result.append(item)
+    return result
+
+
+def existing_files(paths: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in paths:
+        if not path or path in seen:
+            continue
+        if os.path.exists(path):
+            seen.add(path)
+            result.append(path)
+    return result
+
+
+def discover_cni_binaries(dirs: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    for directory in dirs:
+        try:
+            for item in Path(directory).iterdir():
+                if item.is_file() and os.access(item, os.X_OK):
+                    result.append(str(item))
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            continue
+    return existing_files(result)
+
+
+def candidate_names(paths: Iterable[str]) -> set[str]:
+    names: set[str] = set()
+    for path in paths:
+        names.add(path)
+        base = basename(path)
+        if base:
+            names.add(base)
+    return names
+
+
+def bpftrace_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def build_bpftrace_program(candidates: set[str], duration_ms: int, argv_slots: int, env_slots: int) -> str:
+    predicate = ""
+    if candidates:
+        comparisons = [f"str(args->filename) == {bpftrace_string(item)}" for item in sorted(candidates)]
+        predicate = "/" + " || ".join(comparisons) + "/"
+
+    argv_exprs = ", ".join([f"str(args->argv[{idx}])" for idx in range(argv_slots)])
+    env_exprs = ", ".join([f"str(args->envp[{idx}])" for idx in range(env_slots)])
+    format_fields = ["%s"] * (argv_slots + env_slots)
+    format_string = "RP_EXEC_ENTER\t%d\t%d\t%d\t%d\t%s\t%s\t" + "\t".join(format_fields) + "\n"
+    values = ["pid", "ppid", "uid", "gid", "comm", "str(args->filename)", "str(args->argv[0])"]
+    values.extend([f"str(args->argv[{idx}])" for idx in range(1, argv_slots)])
+    values.extend([f"str(args->envp[{idx}])" for idx in range(env_slots)])
+    # The first argv slot is included explicitly above to make the column layout stable.
+    printf_values = ", ".join(values)
+
+    return f"""
+BEGIN
+{{
+  printf("RP_STARTUP_PROBE_READY\\n");
+}}
+
+tracepoint:syscalls:sys_enter_execve
+{predicate}
+{{
+  printf({bpftrace_string(format_string)}, {printf_values});
+}}
+
+tracepoint:sched:sched_process_exit
+{{
+  printf("RP_PROC_EXIT\\t%d\\t%s\\n", args->pid, args->comm);
+}}
+
+interval:ms:{max(duration_ms, 100)}
+{{
+  exit();
+}}
+"""
+
+
+@dataclass
+class ExecObservation:
+    pid: int
+    ppid: int
+    uid: int
+    gid: int
+    comm: str
+    binary: str
+    argv: list[str]
+    env: dict[str, str]
+    observed_at: str
+    role: str
+    sandbox_id: str
+    cri_sandbox_id: str
+    containerd_id: str
+    runtime_type: str
+    cni_plugin: str = ""
+    cni_command: str = ""
+    cni_netns: str = ""
+    oci_runtime: str = ""
+    oci_operation: str = ""
+    oci_bundle: str = ""
+    containerd_namespace: str = ""
+    attributes: dict[str, object] = field(default_factory=dict)
+
+    @property
+    def request_id(self) -> str:
+        key = self.cri_sandbox_id or self.containerd_id or self.sandbox_id or "unknown"
+        return f"exec-{self.pid}-{sanitize_id(basename(self.binary))}-{sanitize_id(key)}"
+
+
+def parse_env(items: Iterable[str]) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for item in items:
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        if key:
+            env[key] = value
+    return env
+
+
+def parse_cni_args(value: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for item in value.split(";"):
+        if "=" not in item:
+            continue
+        key, val = item.split("=", 1)
+        if key:
+            parsed[key] = val
+    return parsed
+
+
+def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str, default_runtime_type: str, forced_sandbox_id: str) -> ExecObservation | None:
+    parts = line.rstrip("\n").split("\t")
+    expected = 6 + argv_slots + env_slots
+    if len(parts) < expected or parts[0] != "RP_EXEC_ENTER":
+        return None
+    try:
+        pid = int(parts[1])
+        ppid = int(parts[2])
+        uid = int(parts[3])
+        gid = int(parts[4])
+    except ValueError:
+        return None
+    comm = parts[5]
+    binary = parts[6]
+    argv_start = 7
+    argv = [item for item in parts[argv_start:argv_start + argv_slots] if item]
+    env_items = parts[argv_start + argv_slots:argv_start + argv_slots + env_slots]
+    env = parse_env(env_items)
+    cni_args = parse_cni_args(env.get("CNI_ARGS", ""))
+
+    role = infer_role(binary, argv, env)
+    cni_container_id = env.get("CNI_CONTAINERID", "") or cni_args.get("K8S_POD_INFRA_CONTAINER_ID", "")
+    bundle = infer_oci_bundle(argv)
+    shim_info = infer_containerd_shim_info(argv)
+    namespace = namespace_from_bundle(bundle)
+    namespace = namespace or shim_info.get("namespace", "")
+    containerd_id = cni_container_id or sandbox_id_from_bundle(bundle) or shim_info.get("id", "")
+    sandbox_id = forced_sandbox_id or containerd_id
+    runtime_type = infer_runtime_type(binary, argv, default_runtime_type)
+    oci_runtime = basename(binary) if role in {"oci", "kata"} and basename(binary).startswith("containerd-shim-") else (basename(binary) if role == "oci" else "")
+    oci_operation = infer_oci_operation(argv) if role in {"oci", "kata"} else ""
+    cni_plugin = basename(binary) if role == "cni" else ""
+
+    attributes: dict[str, object] = {
+        "startup.probe.backend": "bpftrace-execve",
+        "process.uid": uid,
+        "process.gid": gid,
+    }
+    if bundle:
+        attributes["oci.bundle"] = bundle
+    if namespace:
+        attributes["containerd.namespace"] = namespace
+    if shim_info.get("bundle"):
+        attributes["containerd.bundle"] = shim_info["bundle"]
+    if env.get("CNI_IFNAME"):
+        attributes["cni.ifname"] = env["CNI_IFNAME"]
+    if env.get("CNI_PATH"):
+        attributes["cni.path"] = env["CNI_PATH"]
+    for key in ("K8S_POD_NAMESPACE", "K8S_POD_NAME", "K8S_POD_UID"):
+        if cni_args.get(key):
+            attributes[f"cni.args.{key}"] = cni_args[key]
+
+    return ExecObservation(
+        pid=pid,
+        ppid=ppid,
+        uid=uid,
+        gid=gid,
+        comm=comm,
+        binary=binary,
+        argv=argv,
+        env={key: env[key] for key in CNI_ENV_KEYS if key in env},
+        observed_at=observed_at,
+        role=role,
+        sandbox_id=sandbox_id,
+        cri_sandbox_id=cni_container_id or containerd_id,
+        containerd_id=containerd_id,
+        runtime_type=runtime_type,
+        cni_plugin=cni_plugin,
+        cni_command=env.get("CNI_COMMAND", ""),
+        cni_netns=env.get("CNI_NETNS", ""),
+        oci_runtime=oci_runtime,
+        oci_operation=oci_operation,
+        oci_bundle=bundle,
+        containerd_namespace=namespace,
+        attributes=attributes,
+    )
+
+
+def infer_role(binary: str, argv: list[str], env: dict[str, str]) -> str:
+    base = basename(binary).lower()
+    if is_helper_binary(base):
+        return "helper"
+    if env.get("CNI_COMMAND") or env.get("CNI_CONTAINERID") or is_likely_cni_binary(base):
+        return "cni"
+    if base in {"runc", "crun", "kata-runtime", "runsc"}:
+        return "oci"
+    if "kata" in base or base.startswith("qemu-system") or base in {"cloud-hypervisor", "firecracker", "virtiofsd"}:
+        return "kata"
+    if base.startswith("containerd-shim-"):
+        return "oci"
+    return "exec"
+
+
+def is_likely_cni_binary(base: str) -> bool:
+    return base in {
+        "bridge", "loopback", "portmap", "firewall", "host-local", "bandwidth", "tuning",
+        "calico", "calico-ipam", "cilium-cni", "multus", "flannel", "weave-net",
+    }
+
+
+def is_helper_binary(base: str) -> bool:
+    return base in {
+        "iptables", "iptables-restore", "ip6tables", "ip6tables-restore", "nft",
+        "ip", "ipset", "tc", "mount", "umount", "modprobe",
+    }
+
+
+def infer_runtime_type(binary: str, argv: list[str], default: str) -> str:
+    text = " ".join([binary, *argv]).lower()
+    if "kata" in text:
+        return "kata"
+    if "runsc" in text or "gvisor" in text:
+        return "gvisor"
+    if "firecracker" in text:
+        return "firecracker"
+    if basename(binary).lower() in {"runc", "crun"}:
+        return "runc"
+    return default or "unknown"
+
+
+def infer_oci_operation(argv: list[str]) -> str:
+    if argv and basename(argv[0]).startswith("containerd-shim-"):
+        return "shim.start"
+    for item in argv[1:]:
+        value = item.strip().lower()
+        if value in OCI_OPS:
+            return value
+    return ""
+
+
+def infer_containerd_shim_info(argv: list[str]) -> dict[str, str]:
+    info: dict[str, str] = {}
+    for idx, item in enumerate(argv):
+        if item == "-namespace" and idx + 1 < len(argv):
+            info["namespace"] = argv[idx + 1]
+        elif item.startswith("-namespace="):
+            info["namespace"] = item.split("=", 1)[1]
+        elif item == "-id" and idx + 1 < len(argv):
+            info["id"] = argv[idx + 1]
+        elif item.startswith("-id="):
+            info["id"] = item.split("=", 1)[1]
+        elif item == "-bundle" and idx + 1 < len(argv):
+            info["bundle"] = argv[idx + 1]
+        elif item.startswith("-bundle="):
+            info["bundle"] = item.split("=", 1)[1]
+    return info
+
+
+def infer_oci_bundle(argv: list[str]) -> str:
+    for idx, item in enumerate(argv):
+        if item in {"--bundle", "-b"} and idx + 1 < len(argv):
+            return argv[idx + 1]
+        if item.startswith("--bundle="):
+            return item.split("=", 1)[1]
+    for item in argv:
+        if "/io.containerd.runtime" in item or "/run/containerd/" in item:
+            bundle = containerd_task_bundle_from_path(item)
+            if bundle:
+                return bundle
+    return ""
+
+
+def containerd_task_bundle_from_path(path: str) -> str:
+    parts = [part for part in Path(path).parts if part and part != os.sep]
+    for idx, part in enumerate(parts):
+        if part.startswith("io.containerd.runtime") and idx + 2 < len(parts):
+            prefix = [os.sep, *parts[:idx + 3]]
+            return os.path.join(*prefix)
+    return ""
+
+
+def sandbox_id_from_bundle(bundle: str) -> str:
+    if not bundle:
+        return ""
+    parts = [part for part in Path(bundle).parts if part and part != os.sep]
+    # Common path: .../io.containerd.runtime.v2.task/k8s.io/<container-id>
+    for idx, part in enumerate(parts):
+        if part.startswith("io.containerd.runtime") and idx + 2 < len(parts):
+            return parts[idx + 2]
+    return ""
+
+
+def namespace_from_bundle(bundle: str) -> str:
+    if not bundle:
+        return ""
+    parts = [part for part in Path(bundle).parts if part and part != os.sep]
+    for idx, part in enumerate(parts):
+        if part.startswith("io.containerd.runtime") and idx + 1 < len(parts):
+            return parts[idx + 1]
+    return ""
+
+
+def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str, status: str = "ok") -> dict[str, object]:
+    event: dict[str, object] = {
+        "eventType": event_type,
+        "requestId": obs.request_id,
+        "function": "execve",
+        "timestamp": timestamp,
+        "sandboxId": obs.sandbox_id,
+        "criSandboxId": obs.cri_sandbox_id,
+        "containerdId": obs.containerd_id,
+        "runtimeType": obs.runtime_type,
+        "status": status,
+        "role": obs.role,
+        "binary": obs.binary,
+        "command": obs.argv[0] if obs.argv else basename(obs.binary),
+        "pid": obs.pid,
+        "ppid": obs.ppid,
+        "argv": obs.argv,
+        "attributes": dict(obs.attributes),
+    }
+    if obs.env:
+        event["env"] = obs.env
+    if obs.cni_plugin:
+        event["cniPlugin"] = obs.cni_plugin
+    if obs.cni_command:
+        event["cniCommand"] = obs.cni_command
+    if obs.cri_sandbox_id and obs.role == "cni":
+        event["cniContainerId"] = obs.cri_sandbox_id
+    if obs.cni_netns:
+        event["cniNetns"] = obs.cni_netns
+    if obs.oci_runtime:
+        event["ociRuntime"] = obs.oci_runtime
+    if obs.oci_operation:
+        event["ociOperation"] = obs.oci_operation
+    if obs.oci_bundle:
+        event["ociBundle"] = obs.oci_bundle
+    if obs.containerd_namespace:
+        event.setdefault("attributes", {})["containerd.namespace"] = obs.containerd_namespace
+    return event
+
+
+def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, default_runtime_type: str, forced_sandbox_id: str, namespaces: set[str] | None = None) -> tuple[list[dict[str, object]], dict[str, float], str, str, str]:
+    pending: dict[int, ExecObservation] = {}
+    events: list[dict[str, object]] = []
+    runtime_type = default_runtime_type or "unknown"
+    sandbox_id = forced_sandbox_id
+    cri_sandbox_id = ""
+    containerd_id = ""
+
+    for raw in lines:
+        now = utc_now()
+        if raw.startswith("RP_EXEC_ENTER\t"):
+            obs = parse_exec_line(raw, argv_slots, env_slots, now, default_runtime_type, forced_sandbox_id)
+            if not obs:
+                continue
+            if obs.role != "helper" and not observation_matches_namespace(obs, namespaces):
+                continue
+            if obs.role == "helper" and not observation_matches_namespace(obs, namespaces):
+                parent = pending.get(obs.ppid)
+                if parent and (not namespaces or observation_matches_namespace(parent, namespaces)):
+                    inherit_parent_context(obs, parent)
+                else:
+                    continue
+            pending[obs.pid] = obs
+            runtime_type = choose_runtime_type(runtime_type, obs.runtime_type)
+            sandbox_id = sandbox_id or obs.sandbox_id
+            cri_sandbox_id = cri_sandbox_id or obs.cri_sandbox_id
+            containerd_id = containerd_id or obs.containerd_id
+            events.append(event_from_observation(obs, "enter", obs.observed_at))
+        elif raw.startswith("RP_PROC_EXIT\t"):
+            parts = raw.rstrip("\n").split("\t")
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[1])
+            except ValueError:
+                continue
+            obs = pending.pop(pid, None)
+            if obs:
+                events.append(event_from_observation(obs, "exit", now))
+
+    # If a short capture window ends before process exit, emit complete events with a
+    # minimal duration so the startup-callchain normalizer still surfaces the binary.
+    for obs in pending.values():
+        exit_time = utc_now()
+        event = event_from_observation(obs, "exit", exit_time)
+        event["durationMs"] = 1
+        event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
+        events.append(event)
+
+    summary = summarize_events(events)
+    return events, summary, runtime_type, sandbox_id, cri_sandbox_id or containerd_id
+
+
+def inherit_parent_context(obs: ExecObservation, parent: ExecObservation) -> None:
+    obs.sandbox_id = obs.sandbox_id or parent.sandbox_id
+    obs.cri_sandbox_id = obs.cri_sandbox_id or parent.cri_sandbox_id
+    obs.containerd_id = obs.containerd_id or parent.containerd_id
+    obs.containerd_namespace = obs.containerd_namespace or parent.containerd_namespace
+    obs.runtime_type = choose_runtime_type(parent.runtime_type, obs.runtime_type)
+    if parent.containerd_namespace:
+        obs.attributes.setdefault("containerd.namespace", parent.containerd_namespace)
+    if parent.role == "cni":
+        obs.cni_plugin = obs.cni_plugin or parent.cni_plugin
+        obs.cni_command = obs.cni_command or parent.cni_command
+        obs.cni_netns = obs.cni_netns or parent.cni_netns
+        for key in ("cni.ifname", "cni.path", "cni.args.K8S_POD_NAMESPACE", "cni.args.K8S_POD_NAME", "cni.args.K8S_POD_UID"):
+            if key in parent.attributes:
+                obs.attributes.setdefault(key, parent.attributes[key])
+
+
+def observation_matches_namespace(obs: ExecObservation, namespaces: set[str] | None) -> bool:
+    if not namespaces:
+        return True
+    if obs.containerd_namespace:
+        return obs.containerd_namespace in namespaces
+    # CNI plugin execve carries CNI_CONTAINERID rather than a containerd namespace;
+    # keep it so the startup-callchain normalizer can still join by sandbox id.
+    if obs.role == "cni" and obs.cri_sandbox_id:
+        return True
+    return False
+
+
+def choose_runtime_type(current: str, candidate: str) -> str:
+    if current in {"", "unknown"}:
+        return candidate or "unknown"
+    if current == "runc" and candidate in {"kata", "gvisor", "firecracker"}:
+        return candidate
+    return current
+
+
+def summarize_events(events: list[dict[str, object]]) -> dict[str, float]:
+    enter_events = [event for event in events if event.get("eventType") == "enter"]
+    cni = [event for event in enter_events if event.get("role") == "cni"]
+    oci = [event for event in enter_events if event.get("role") == "oci"]
+    helper = [event for event in enter_events if event.get("role") == "helper" or is_helper_binary(basename(str(event.get("binary", ""))))]
+    return {
+        "observedExecCount": float(len(enter_events)),
+        "observedCniExecCount": float(len(cni)),
+        "observedOciExecCount": float(len(oci)),
+        "observedHelperExecCount": float(len(helper)),
+    }
+
+
+def run_bpftrace(args: argparse.Namespace, candidates: set[str]) -> list[str]:
+    program = build_bpftrace_program(candidates, args.duration_ms, args.argv_slots, args.env_slots)
+    bpftrace = shutil.which(args.bpftrace) or args.bpftrace
+    if not bpftrace or not os.path.exists(bpftrace):
+        raise SystemExit(f"bpftrace not found: {args.bpftrace}")
+
+    with tempfile.NamedTemporaryFile("w", prefix="runtimepulse-startup-probe-", suffix=".bt", delete=False) as handle:
+        handle.write(program)
+        script_path = handle.name
+
+    env = os.environ.copy()
+    env.setdefault("BPFTRACE_STRLEN", str(args.strlen))
+    cmd = [bpftrace, "-q", script_path]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env)
+    lines: list[str] = []
+    try:
+        assert proc.stdout is not None
+        deadline = time.time() + max(args.duration_ms / 1000.0 + 5.0, 6.0)
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if line:
+                if line.startswith("RP_STARTUP_PROBE_READY") and args.ready_file:
+                    Path(args.ready_file).write_text(str(proc.pid))
+                if line.startswith("RP_"):
+                    lines.append(line)
+                continue
+            if proc.poll() is not None:
+                break
+            time.sleep(0.01)
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        if proc.returncode not in (0, None) and not lines:
+            raise SystemExit(f"bpftrace failed with {proc.returncode}: {stderr.strip()}")
+    finally:
+        try:
+            os.unlink(script_path)
+        except FileNotFoundError:
+            pass
+    return lines
+
+
+def emit_report(events: list[dict[str, object]], summary: dict[str, float], runtime_type: str, sandbox_id: str, cri_sandbox_id: str, source: str) -> None:
+    report = {
+        "source": source,
+        "timestamp": utc_now(),
+        "runtimeType": runtime_type or "unknown",
+        "sandboxId": sandbox_id or cri_sandbox_id,
+        "criSandboxId": cri_sandbox_id,
+        "containerdId": cri_sandbox_id,
+        "summary": summary,
+        "events": events,
+    }
+    print(json.dumps(report, separators=(",", ":")))
+
+
+def export_command(args: argparse.Namespace) -> None:
+    candidates = candidate_names(existing_files(args.include_binary))
+    cni_dirs = args.cni_bin_dir or DEFAULT_CNI_BIN_DIRS
+    cni_binaries = discover_cni_binaries(cni_dirs)
+    runtime_binaries = existing_files(args.runtime_binary or DEFAULT_RUNTIME_BINARIES)
+    helper_binaries = existing_files(DEFAULT_HELPER_BINARIES if args.include_helpers else [])
+    candidates.update(candidate_names(cni_binaries))
+    candidates.update(candidate_names(runtime_binaries))
+    candidates.update(candidate_names(helper_binaries))
+
+    if args.from_bpftrace_log:
+        lines = Path(args.from_bpftrace_log).read_text().splitlines(True)
+    else:
+        lines = run_bpftrace(args, candidates)
+
+    namespaces = set(split_csv(args.containerd_namespace)) if args.containerd_namespace else None
+    events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(
+        lines,
+        args.argv_slots,
+        args.env_slots,
+        args.runtime_type,
+        args.sandbox_id,
+        namespaces,
+    )
+    emit_report(events, summary, runtime_type, sandbox_id, cri_sandbox_id, args.source)
+
+
+def self_test() -> None:
+    lines = [
+        "RP_EXEC_ENTER\t100\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
+        "RP_PROC_EXIT\t100\tbridge\n",
+        "RP_EXEC_ENTER\t102\t100\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
+        "RP_PROC_EXIT\t102\tiptables\n",
+        "RP_EXEC_ENTER\t101\t1\t0\t0\tcontainerd\t/usr/local/bin/kata-runtime\tkata-runtime\t--bundle\t/run/containerd/io.containerd.runtime.v2.task/k8s.io/abc123\tcreate\tabc123\t\t\t\t\n",
+        "RP_PROC_EXIT\t101\tkata-runtime\n",
+    ]
+    events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(lines, 6, 4, "", "", None)
+    assert len([e for e in events if e.get("eventType") == "enter"]) == 3
+    assert runtime_type == "kata"
+    assert sandbox_id == "abc123"
+    assert cri_sandbox_id == "abc123"
+    assert summary["observedCniExecCount"] == 1.0
+    assert summary["observedHelperExecCount"] == 1.0
+    assert summary["observedOciExecCount"] == 1.0
+    print("self-test ok")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="runtimepulse-startup-probe")
+    sub = parser.add_subparsers(dest="command", required=True)
+    export = sub.add_parser("export", help="export one RuntimePulse startup-callchain raw-event report")
+    export.add_argument("--once", action="store_true", help="compatibility flag; export already captures one window")
+    export.add_argument("--duration-ms", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_DURATION_MS", "1000")))
+    export.add_argument("--bpftrace", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_BPFTRACE", "bpftrace"))
+    export.add_argument("--cni-bin-dir", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_BIN_DIRS", "")]))
+    export.add_argument("--runtime-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_BINARIES", "")]))
+    export.add_argument("--include-binary", action="append", default=[])
+    export.add_argument("--include-helpers", action="store_true", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS", "false").lower() == "true")
+    export.add_argument("--sandbox-id", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SANDBOX_ID", ""))
+    export.add_argument("--containerd-namespace", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES", "")]), help="only keep OCI/runtime execs from these containerd namespaces; CNI execs are kept by CNI_CONTAINERID")
+    export.add_argument("--runtime-type", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_TYPE", ""))
+    export.add_argument("--source", default="runtimepulse-startup-probe")
+    export.add_argument("--argv-slots", type=int, default=16)
+    export.add_argument("--env-slots", type=int, default=32)
+    export.add_argument("--strlen", type=int, default=256)
+    export.add_argument("--from-bpftrace-log", help=argparse.SUPPRESS)
+    export.add_argument("--ready-file", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_READY_FILE", ""), help="write this file after bpftrace reports probes are attached")
+    export.set_defaults(func=export_command)
+
+    test_cmd = sub.add_parser("self-test", help="run parser self-test")
+    test_cmd.set_defaults(func=lambda _args: self_test())
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

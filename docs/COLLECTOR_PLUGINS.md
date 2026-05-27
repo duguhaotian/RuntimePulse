@@ -114,9 +114,16 @@ metrics are derived:
 RUNTIMEPULSE_HOST_AGENT_SOURCES=containerd-inventory,containerd-events,cri-events,cri-startup-trace,startup-callchain \
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
 RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='runtimepulse-startup-probe export --once' \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='sudo runtimepulse-startup-probe export --once --duration-ms 3000 --containerd-namespace k8s.io --include-helpers' \
 runtimepulse-collector host-agent
 ```
+
+The repository includes a minimal exporter at
+`tools/runtimepulse-startup-probe/runtimepulse-startup-probe`. It uses real
+`bpftrace` exec/exit tracepoints to emit raw startup-callchain events for CNI
+plugin binaries, OCI/Kata runtime binaries, containerd shims, and optional helper
+binaries. This is the first concrete exporter bridge; native containerd
+`RunPodSandbox` Go uprobes can be added behind the same JSON contract later.
 
 Local one-shot validation can read the bundled raw-event example without a real
 uprobe exporter:
