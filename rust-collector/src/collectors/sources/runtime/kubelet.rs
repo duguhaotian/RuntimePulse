@@ -341,6 +341,7 @@ fn normalize_event_value(value: Value) -> Value {
         }
         copy_string_map_if_present(&mut normalized, status, "labels");
         copy_string_map_if_present(&mut normalized, status, "metadata");
+        copy_string_map_if_present(&mut normalized, status, "annotations");
     }
     if let Some(Value::String(event_type)) = object.get("containerEventType") {
         normalized.insert(
@@ -475,6 +476,10 @@ pub fn cri_event_runtime_handler(event: &CriEvent) -> String {
         label(event, "io.kubernetes.cri.runtime-handler"),
         label(event, "io.kubernetes.runtime.handler"),
         label(event, "runtimeHandler"),
+        annotation(event, "io.kubernetes.cri.runtime-handler"),
+        annotation(event, "io.kubernetes.runtime.handler"),
+        annotation(event, "io.kubernetes.cri-o.RuntimeHandler"),
+        annotation(event, "runtimeHandler"),
         "runc",
     ])
 }
@@ -569,6 +574,10 @@ fn label<'a>(event: &'a CriEvent, key: &str) -> &'a str {
 
 fn metadata<'a>(event: &'a CriEvent, key: &str) -> &'a str {
     event.metadata.get(key).map(String::as_str).unwrap_or("")
+}
+
+fn annotation<'a>(event: &'a CriEvent, key: &str) -> &'a str {
+    event.annotations.get(key).map(String::as_str).unwrap_or("")
 }
 
 fn short_id(value: &str) -> String {
@@ -762,6 +771,41 @@ mod tests {
         let event = event_from_line(content).unwrap().expect("event");
         assert_eq!(cri_event_action(&event), "SANDBOX_CREATED");
         assert_eq!(event.reason, "CONTAINER_CREATED");
+    }
+
+    #[test]
+    fn runtime_handler_falls_back_to_annotations() {
+        let content = r#"{
+          "containerId": "sandboxkata123",
+          "containerEventType": "CONTAINER_STARTED_EVENT",
+          "createdAt": "1779846067309998570",
+          "podSandboxStatus": {
+            "id": "sandboxkata123",
+            "metadata": {"name": "runtimepulse-kata", "namespace": "default", "uid": "uid", "attempt": 1},
+            "state": "SANDBOX_READY",
+            "createdAt": "1779846067274109932",
+            "labels": {
+              "io.kubernetes.container.name": "POD",
+              "io.kubernetes.pod.name": "runtimepulse-kata",
+              "io.kubernetes.pod.namespace": "default",
+              "io.kubernetes.pod.uid": "uid"
+            },
+            "annotations": {
+              "io.kubernetes.cri.runtime-handler": "kata"
+            }
+          }
+        }"#;
+
+        let event = event_from_line(content).unwrap().expect("event");
+        assert_eq!(cri_event_runtime_handler(&event), "kata");
+        assert_eq!(cri_event_runtime_type(&event), "kata");
+        assert_eq!(
+            event
+                .annotations
+                .get("io.kubernetes.cri.runtime-handler")
+                .map(String::as_str),
+            Some("kata")
+        );
     }
 
     fn test_config() -> CollectorConfig {
