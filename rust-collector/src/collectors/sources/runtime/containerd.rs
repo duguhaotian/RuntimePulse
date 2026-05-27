@@ -36,6 +36,8 @@ pub struct ContainerdEvent {
     pub container_id: String,
     pub image: Option<String>,
     pub runtime_name: Option<String>,
+    pub runtime_options_type_url: Option<String>,
+    pub runtime_binary_name: Option<String>,
     pub labels: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub exit_status: Option<u32>,
@@ -181,12 +183,17 @@ pub fn output_from_event(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "containerd/unknown:latest".to_string());
     let image_id = containerd_image_id(&event.namespace, &image_ref);
-    let runtime_version = event
-        .runtime_name
-        .clone()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "containerd-events".to_string());
-    let runtime_type = runtime_type_from_name(&runtime_version);
+    let runtime_version = runtime_version_from_parts(
+        event.runtime_name.as_deref(),
+        event.runtime_binary_name.as_deref(),
+        event.runtime_options_type_url.as_deref(),
+    )
+    .unwrap_or_else(|| "containerd-events".to_string());
+    let runtime_type = runtime_type_from_parts(
+        event.runtime_name.as_deref(),
+        event.runtime_binary_name.as_deref(),
+        event.runtime_options_type_url.as_deref(),
+    );
     let lifecycle_status = sandbox_status_from_action(&event.action, event.exit_status);
     let current = is_current_action(&event.action);
     let removed = is_removed_action(&event.action);
@@ -218,6 +225,9 @@ pub fn output_from_event(
             "containerd.namespace": event.namespace,
             "containerd.id": event.container_id,
             "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
+            "containerd.runtime": runtime_version,
+            "containerd.runtime.options_type_url": event.runtime_options_type_url,
+            "containerd.runtime.binary_name": event.runtime_binary_name,
             "containerd.topic": event.topic,
             "containerd.action": event.action,
             "k8s.namespace": identity.kubernetes_namespace,
@@ -503,9 +513,20 @@ async fn collect_containerd_inventory_async(
             let image_id = containerd_image_id(&namespace, &image_ref);
             let identity =
                 containerd_identity_from_labels(&namespace, &container.id, &container.labels);
-            let runtime_type = runtime_type_from_containerd(&container);
-            let runtime_version = runtime_name_from_containerd(&container)
-                .unwrap_or_else(|| "containerd".to_string());
+            let runtime_name = runtime_name_from_containerd(&container);
+            let runtime_options_type_url = runtime_options_type_url_from_containerd(&container);
+            let runtime_binary_name = runtime_binary_name_from_containerd(&container);
+            let runtime_type = runtime_type_from_parts(
+                runtime_name.as_deref(),
+                runtime_binary_name.as_deref(),
+                runtime_options_type_url.as_deref(),
+            );
+            let runtime_version = runtime_version_from_parts(
+                runtime_name.as_deref(),
+                runtime_binary_name.as_deref(),
+                runtime_options_type_url.as_deref(),
+            )
+            .unwrap_or_else(|| "containerd".to_string());
             let workload_name = identity.workload_name.clone();
             let created_at = container
                 .created_at
@@ -577,6 +598,9 @@ async fn collect_containerd_inventory_async(
                     "containerd.pid": task_pid,
                     "containerd.exitedAt": exited_at,
                     "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
+                    "containerd.runtime": runtime_version,
+                    "containerd.runtime.options_type_url": runtime_options_type_url,
+                    "containerd.runtime.binary_name": runtime_binary_name,
                     "containerd.snapshotter": container.snapshotter,
                     "containerd.snapshotKey": container.snapshot_key,
                     "containerd.sandbox": container.sandbox,
@@ -665,7 +689,7 @@ async fn collect_containerd_task_targets_async(
                 } else {
                     container.image.clone()
                 },
-                runtime_name: runtime_name_from_containerd(container)
+                runtime_name: runtime_version_from_containerd(container)
                     .unwrap_or_else(|| "containerd".to_string()),
                 labels: container.labels.clone(),
                 pid: task.pid,
@@ -800,7 +824,17 @@ async fn event_from_envelope(
                 action: "create".to_string(),
                 container_id: payload.id,
                 image: Some(payload.image),
-                runtime_name: payload.runtime.map(|runtime| runtime.name),
+                runtime_name: payload.runtime.as_ref().map(|runtime| runtime.name.clone()),
+                runtime_options_type_url: payload
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.options.as_ref())
+                    .map(|options| options.type_url.clone()),
+                runtime_binary_name: payload
+                    .runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.options.as_ref())
+                    .and_then(runtime_binary_name_from_any),
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -816,6 +850,8 @@ async fn event_from_envelope(
                 container_id: payload.id,
                 image: Some(payload.image),
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -831,6 +867,8 @@ async fn event_from_envelope(
                 container_id: payload.id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -846,6 +884,8 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -861,6 +901,8 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -876,6 +918,8 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: Some(payload.exit_status),
@@ -891,6 +935,8 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: Some(payload.exit_status),
@@ -906,6 +952,8 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -921,6 +969,8 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -936,6 +986,8 @@ async fn event_from_envelope(
                 container_id: payload.container_id,
                 image: None,
                 runtime_name: None,
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
                 labels: HashMap::new(),
                 timestamp,
                 exit_status: None,
@@ -1045,6 +1097,13 @@ async fn event_from_envelope(
                 }
                 if event.runtime_name.is_none() {
                     event.runtime_name = runtime_name_from_containerd(&container);
+                }
+                if event.runtime_options_type_url.is_none() {
+                    event.runtime_options_type_url =
+                        runtime_options_type_url_from_containerd(&container);
+                }
+                if event.runtime_binary_name.is_none() {
+                    event.runtime_binary_name = runtime_binary_name_from_containerd(&container);
                 }
                 if event.labels.is_empty() {
                     event.labels = container.labels;
@@ -1225,8 +1284,8 @@ fn containerd_diagnostic_target_from_container(
         container.image.clone()
     };
     let runtime_name =
-        runtime_name_from_containerd(container).unwrap_or_else(|| "containerd".to_string());
-    let runtime_type = runtime_type_from_name(&runtime_name);
+        runtime_version_from_containerd(container).unwrap_or_else(|| "containerd".to_string());
+    let runtime_type = runtime_type_from_containerd(container);
     let image_digest = image
         .and_then(|image| image.target.as_ref())
         .map(|target| target.digest.clone())
@@ -1476,11 +1535,127 @@ fn runtime_name_from_containerd(container: &Container) -> Option<String> {
     })
 }
 
+fn runtime_options_type_url_from_containerd(container: &Container) -> Option<String> {
+    container
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.options.as_ref())
+        .map(|options| options.type_url.clone())
+        .filter(|value| !value.is_empty())
+}
+
+fn runtime_binary_name_from_containerd(container: &Container) -> Option<String> {
+    container
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.options.as_ref())
+        .and_then(runtime_binary_name_from_any)
+}
+
+fn runtime_version_from_containerd(container: &Container) -> Option<String> {
+    runtime_version_from_parts(
+        runtime_name_from_containerd(container).as_deref(),
+        runtime_binary_name_from_containerd(container).as_deref(),
+        runtime_options_type_url_from_containerd(container).as_deref(),
+    )
+}
+
 fn runtime_type_from_containerd(container: &Container) -> String {
-    let runtime = runtime_name_from_containerd(container)
-        .unwrap_or_else(|| "runc".to_string())
-        .to_ascii_lowercase();
+    runtime_type_from_parts(
+        runtime_name_from_containerd(container).as_deref(),
+        runtime_binary_name_from_containerd(container).as_deref(),
+        runtime_options_type_url_from_containerd(container).as_deref(),
+    )
+}
+
+fn runtime_version_from_parts(
+    runtime_name: Option<&str>,
+    binary_name: Option<&str>,
+    options_type_url: Option<&str>,
+) -> Option<String> {
+    first_non_empty([binary_name, runtime_name, options_type_url])
+}
+
+fn runtime_type_from_parts(
+    runtime_name: Option<&str>,
+    binary_name: Option<&str>,
+    options_type_url: Option<&str>,
+) -> String {
+    let runtime = [runtime_name, binary_name, options_type_url]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
     runtime_type_from_name(&runtime)
+}
+
+fn runtime_binary_name_from_any(value: &prost_types::Any) -> Option<String> {
+    decode_binary_name_from_runtime_options(&value.type_url, &value.value)
+}
+
+fn decode_binary_name_from_runtime_options(type_url: &str, bytes: &[u8]) -> Option<String> {
+    let binary_name_field = if type_url.contains("containerd.runc")
+        || type_url.contains("containerd.runhcs")
+        || type_url.contains("containerd.kata")
+        || type_url.contains("containerd.runtime")
+        || type_url.contains("options")
+    {
+        decode_proto_string_field(bytes, 4)
+    } else {
+        None
+    };
+    binary_name_field.filter(|value| !value.trim().is_empty())
+}
+
+fn decode_proto_string_field(bytes: &[u8], field_number: u32) -> Option<String> {
+    let mut cursor = bytes;
+    while !cursor.is_empty() {
+        let key = prost::encoding::decode_varint(&mut cursor).ok()?;
+        let current_field = (key >> 3) as u32;
+        let wire_type = key & 0x07;
+        match wire_type {
+            0 => {
+                let _ = prost::encoding::decode_varint(&mut cursor).ok()?;
+            }
+            1 => {
+                if cursor.len() < 8 {
+                    return None;
+                }
+                cursor = &cursor[8..];
+            }
+            2 => {
+                let len = prost::encoding::decode_varint(&mut cursor).ok()? as usize;
+                if cursor.len() < len {
+                    return None;
+                }
+                let value = &cursor[..len];
+                cursor = &cursor[len..];
+                if current_field == field_number {
+                    return String::from_utf8(value.to_vec()).ok();
+                }
+            }
+            5 => {
+                if cursor.len() < 4 {
+                    return None;
+                }
+                cursor = &cursor[4..];
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn first_non_empty<'a, I>(values: I) -> Option<String>
+where
+    I: IntoIterator<Item = Option<&'a str>>,
+{
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn runtime_type_from_name(runtime: &str) -> String {
@@ -1821,6 +1996,84 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn runtime_type_uses_runc_binary_name_from_options() {
+        let mut bytes = Vec::new();
+        prost::encoding::string::encode(4, &"/usr/bin/kata-runtime".to_string(), &mut bytes);
+        assert_eq!(
+            decode_binary_name_from_runtime_options(
+                "type.googleapis.com/containerd.runc.v1.Options",
+                &bytes
+            )
+            .as_deref(),
+            Some("/usr/bin/kata-runtime")
+        );
+        assert_eq!(
+            runtime_type_from_parts(
+                Some("io.containerd.runc.v2"),
+                Some("/usr/bin/kata-runtime"),
+                Some("type.googleapis.com/containerd.runc.v1.Options"),
+            ),
+            "kata"
+        );
+    }
+
+    #[test]
+    fn runtime_type_uses_options_type_url_when_name_is_generic() {
+        assert_eq!(
+            runtime_type_from_parts(
+                Some("io.containerd.runc.v2"),
+                None,
+                Some("type.googleapis.com/io.containerd.kata.v2.options"),
+            ),
+            "kata"
+        );
+    }
+
+    #[test]
+    fn output_from_event_uses_runtime_binary_for_kata_type() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "io.kubernetes.pod.namespace".to_string(),
+            "default".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.pod.name".to_string(),
+            "runtimepulse-kata".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.container.name".to_string(),
+            "POD".to_string(),
+        );
+        let event = ContainerdEvent {
+            namespace: "k8s.io".to_string(),
+            action: "create".to_string(),
+            container_id: "sandboxabcdef1234567890".to_string(),
+            image: Some("registry.k8s.io/pause:3.10".to_string()),
+            runtime_name: Some("io.containerd.runc.v2".to_string()),
+            runtime_options_type_url: Some(
+                "type.googleapis.com/containerd.runc.v1.Options".to_string(),
+            ),
+            runtime_binary_name: Some("/usr/bin/kata-runtime".to_string()),
+            labels,
+            timestamp: Utc::now(),
+            exit_status: None,
+            pid: None,
+            topic: "/containers/create".to_string(),
+        };
+
+        let output = output_from_event(event, &test_config())
+            .unwrap()
+            .expect("containerd output");
+        let sandbox = &output.metadata.sandboxes[0];
+        assert_eq!(sandbox["runtimeType"], "kata");
+        assert_eq!(sandbox["runtimeVersion"], "/usr/bin/kata-runtime");
+        assert_eq!(
+            sandbox["attributes"]["containerd.runtime.binary_name"],
+            "/usr/bin/kata-runtime"
+        );
+    }
+
+    #[test]
     fn containerd_inventory_does_not_fabricate_started_at() {
         assert_eq!(containerd_inventory_started_at("running"), None);
         assert_eq!(containerd_inventory_started_at("stopped"), None);
@@ -1885,5 +2138,39 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("k8s-default-runtimepulse-demo-app")
         );
+    }
+    fn test_config() -> CollectorConfig {
+        CollectorConfig {
+            ingest_url: "http://query-api/api/ingest/batch".to_string(),
+            node_id: "node-a".to_string(),
+            cluster_id: "cluster-a".to_string(),
+            interval: Duration::from_secs(1),
+            local_report_addr: "127.0.0.1:9091".to_string(),
+            local_report_url: "http://127.0.0.1:9091/api/local/ingest".to_string(),
+            collection_scope: "host".to_string(),
+            once: true,
+            cgroup_root: PathBuf::from("/sys/fs/cgroup"),
+            cgroup_max_entries: 200,
+            image_cache_report_path: None,
+            image_cache_report_command: None,
+            image_cache_report_command_timeout: Duration::from_secs(5),
+            profile_report_path: None,
+            diagnostic_report_path: None,
+            diagnostic_report_command: None,
+            diagnostic_report_command_timeout: Duration::from_secs(1),
+            perf_report_path: None,
+            perf_script_path: None,
+            perf_script_command: None,
+            perf_script_command_timeout: Duration::from_secs(1),
+            perf_folded_path: None,
+            ebpf_report_path: None,
+            ebpf_folded_path: None,
+            perf_profile_command: None,
+            ebpf_profile_command: None,
+            profile_command_timeout: Duration::from_secs(1),
+            plugins: Vec::new(),
+            command_plugins: Vec::new(),
+            http_plugins: Vec::new(),
+        }
     }
 }
