@@ -32,7 +32,11 @@ pub struct CriEvent {
     pub event_type: String,
     #[serde(default, alias = "reason")]
     pub reason: String,
-    #[serde(default, alias = "timestamp")]
+    #[serde(
+        default,
+        alias = "timestamp",
+        deserialize_with = "deserialize_i64_string"
+    )]
     pub created_at: i64,
     #[serde(default, alias = "image")]
     pub image_ref: String,
@@ -42,6 +46,20 @@ pub struct CriEvent {
     pub metadata: HashMap<String, String>,
     #[serde(default)]
     pub annotations: HashMap<String, String>,
+}
+
+fn deserialize_i64_string<'de, D>(deserializer: D) -> std::result::Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    if let Some(number) = value.as_i64() {
+        return Ok(number);
+    }
+    if let Some(text) = value.as_str() {
+        return text.parse::<i64>().map_err(serde::de::Error::custom);
+    }
+    Ok(0)
 }
 
 pub fn stream_cri_events<F>(_config: &CollectorConfig, mut on_event: F) -> Result<()>
@@ -267,12 +285,23 @@ fn event_from_line(line: &str) -> Result<Option<CriEvent>> {
         return Ok(None);
     }
 
-    if let Ok(event) = serde_json::from_str::<CriEvent>(line) {
-        return Ok(Some(event));
+    let value = serde_json::from_str::<Value>(line)?;
+    if event_needs_normalization(&value) {
+        return Ok(Some(serde_json::from_value(normalize_event_value(value))?));
     }
 
-    let value = serde_json::from_str::<Value>(line)?;
-    Ok(Some(serde_json::from_value(normalize_event_value(value))?))
+    match serde_json::from_value::<CriEvent>(value.clone()) {
+        Ok(event) => Ok(Some(event)),
+        Err(_) => Ok(Some(serde_json::from_value(normalize_event_value(value))?)),
+    }
+}
+
+fn event_needs_normalization(value: &Value) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.contains_key("target")
+            || object.contains_key("podSandboxStatus")
+            || object.contains_key("containerEventType")
+    })
 }
 
 fn normalize_event_value(value: Value) -> Value {
@@ -280,7 +309,9 @@ fn normalize_event_value(value: Value) -> Value {
         return value;
     };
 
-    if object.contains_key("containerId") || object.contains_key("sandboxId") {
+    if (object.contains_key("containerId") || object.contains_key("sandboxId"))
+        && !event_needs_normalization(&value)
+    {
         return Value::Object(object.clone());
     }
 
@@ -289,14 +320,84 @@ fn normalize_event_value(value: Value) -> Value {
         copy_if_missing(&mut normalized, target, "id", "containerId");
         copy_if_missing(&mut normalized, target, "podSandboxId", "sandboxId");
         copy_if_missing(&mut normalized, target, "image", "image");
-        if let Some(labels) = target.get("labels") {
-            normalized.insert("labels".to_string(), labels.clone());
+        copy_string_map_if_present(&mut normalized, target, "labels");
+        copy_string_map_if_present(&mut normalized, target, "metadata");
+    }
+    if let Some(Value::Object(status)) = object.get("podSandboxStatus") {
+        copy_if_missing(&mut normalized, status, "id", "sandboxId");
+        copy_if_missing(&mut normalized, status, "id", "containerId");
+        copy_if_missing(&mut normalized, status, "createdAt", "createdAt");
+        if let Some(Value::String(state)) = status.get("state") {
+            normalized.insert("type".to_string(), json!(state));
         }
-        if let Some(metadata) = target.get("metadata") {
-            normalized.insert("metadata".to_string(), metadata.clone());
+        copy_string_map_if_present(&mut normalized, status, "labels");
+        copy_string_map_if_present(&mut normalized, status, "metadata");
+    }
+    if let Some(Value::String(event_type)) = object.get("containerEventType") {
+        normalized.insert(
+            "reason".to_string(),
+            json!(normalize_crictl_container_event_type(event_type)),
+        );
+        if object.contains_key("podSandboxStatus") {
+            let state = object
+                .get("podSandboxStatus")
+                .and_then(Value::as_object)
+                .and_then(|status| status.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            normalized.insert(
+                "type".to_string(),
+                json!(normalize_crictl_sandbox_event_type(event_type, state)),
+            );
         }
     }
     Value::Object(normalized)
+}
+
+fn normalize_crictl_container_event_type(value: &str) -> &str {
+    match value {
+        "CONTAINER_CREATED_EVENT" => "CONTAINER_CREATED",
+        "CONTAINER_STARTED_EVENT" => "CONTAINER_STARTED",
+        "CONTAINER_STOPPED_EVENT" => "CONTAINER_STOPPED",
+        "CONTAINER_DELETED_EVENT" => "CONTAINER_DELETED",
+        other => other.trim_end_matches("_EVENT"),
+    }
+}
+
+fn normalize_crictl_sandbox_event_type<'a>(event_type: &str, state: &'a str) -> &'a str {
+    match event_type {
+        "CONTAINER_CREATED_EVENT" => "SANDBOX_CREATED",
+        "CONTAINER_STARTED_EVENT" => "SANDBOX_READY",
+        "CONTAINER_STOPPED_EVENT" => {
+            if state.is_empty() {
+                "SANDBOX_NOTREADY"
+            } else {
+                state
+            }
+        }
+        "CONTAINER_DELETED_EVENT" => "SANDBOX_DELETED",
+        _ => state,
+    }
+}
+
+fn copy_string_map_if_present(
+    target: &mut serde_json::Map<String, Value>,
+    source: &serde_json::Map<String, Value>,
+    key: &str,
+) {
+    let Some(Value::Object(values)) = source.get(key) else {
+        return;
+    };
+
+    let string_values = values
+        .iter()
+        .filter_map(|(entry_key, entry_value)| {
+            entry_value
+                .as_str()
+                .map(|entry_text| (entry_key.clone(), Value::String(entry_text.to_string())))
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    target.insert(key.to_string(), Value::Object(string_values));
 }
 
 fn copy_if_missing(
@@ -559,6 +660,75 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("runtimepulse")
         );
+    }
+
+    #[test]
+    fn parses_crictl_pod_sandbox_status_event() {
+        let config = test_config();
+        let content = r#"{
+          "containerId": "sandboxabcdef1234567890",
+          "containerEventType": "CONTAINER_STARTED_EVENT",
+          "createdAt": "1779846067309998570",
+          "podSandboxStatus": {
+            "id": "sandboxabcdef1234567890",
+            "metadata": {
+              "name": "runtimepulse-cri-demo",
+              "uid": "runtimepulse-cri-demo-uid",
+              "namespace": "default",
+              "attempt": 1
+            },
+            "state": "SANDBOX_READY",
+            "createdAt": "1779846067274109932",
+            "labels": {
+              "io.kubernetes.container.name": "POD",
+              "io.kubernetes.pod.name": "runtimepulse-cri-demo",
+              "io.kubernetes.pod.namespace": "default",
+              "io.kubernetes.pod.uid": "runtimepulse-cri-demo-uid"
+            }
+          }
+        }"#;
+
+        let event = event_from_line(content).unwrap().expect("event");
+        assert_eq!(event.sandbox_id, "sandboxabcdef1234567890");
+        assert_eq!(event.container_id, "sandboxabcdef1234567890");
+        assert_eq!(cri_event_action(&event), "SANDBOX_READY");
+        assert_eq!(
+            event.metadata.get("name").map(String::as_str),
+            Some("runtimepulse-cri-demo")
+        );
+
+        let output = output_from_cri_event(event, &config).expect("lifecycle output");
+        assert_eq!(
+            output.metadata.sandboxes[0]
+                .get("id")
+                .and_then(serde_json::Value::as_str),
+            Some("k8s-default-runtimepulse-cri-demo-pod")
+        );
+    }
+
+    #[test]
+    fn maps_crictl_created_event_to_sandbox_created() {
+        let content = r#"{
+          "containerId": "sandboxcreated123",
+          "containerEventType": "CONTAINER_CREATED_EVENT",
+          "createdAt": "1779846067309998570",
+          "podSandboxStatus": {
+            "id": "sandboxcreated123",
+            "metadata": {"name": "runtimepulse-cri-demo", "namespace": "default", "uid": "uid", "attempt": 1},
+            "state": "SANDBOX_READY",
+            "createdAt": "1779846067274109932",
+            "labels": {
+              "io.kubernetes.container.name": "POD",
+              "io.kubernetes.pod.name": "runtimepulse-cri-demo",
+              "io.kubernetes.pod.namespace": "default",
+              "io.kubernetes.pod.uid": "uid"
+            }
+          }
+        }"#;
+
+        let event = event_from_line(content).unwrap().expect("event");
+        assert_eq!(cri_event_action(&event), "SANDBOX_CREATED");
+        assert_eq!(event.reason, "CONTAINER_CREATED");
     }
 
     fn test_config() -> CollectorConfig {

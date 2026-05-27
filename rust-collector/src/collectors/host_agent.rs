@@ -6,7 +6,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use reqwest::blocking::Client;
 use serde_json::{json, Map};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -1912,6 +1912,7 @@ fn containerd_startup_trace_output(
 struct CriContainerdStartupTraceTracker {
     pending: HashMap<String, CriContainerdStartupState>,
     aliases: HashMap<String, String>,
+    completed: HashSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1928,6 +1929,8 @@ struct CriContainerdStartupState {
     k8s_container: String,
     k8s_pod_uid: String,
     cri_created_at: Option<DateTime<Utc>>,
+    cri_ready_at: Option<DateTime<Utc>>,
+    cri_notready_at: Option<DateTime<Utc>>,
     containerd_create_at: Option<DateTime<Utc>>,
     containerd_task_create_at: Option<DateTime<Utc>>,
     containerd_task_start_at: Option<DateTime<Utc>>,
@@ -1977,16 +1980,28 @@ impl CriContainerdStartupTraceTracker {
             state.sandbox_id = sandbox_id.clone();
         }
 
+        if self.completed.contains(&key) {
+            return Vec::new();
+        }
+
+        let ready_to_complete = self
+            .pending
+            .get(&key)
+            .map(cri_startup_state_has_containerd_timing)
+            .unwrap_or(false);
+
         match action {
             "SANDBOX_CREATED" => Vec::new(),
-            "SANDBOX_READY" => self
+            "SANDBOX_READY" if ready_to_complete => self
                 .complete_trace(&key, timestamp, "ok", "cri.sandbox.ready", config)
                 .into_iter()
                 .collect(),
-            "SANDBOX_NOTREADY" => self
+            "SANDBOX_READY" => Vec::new(),
+            "SANDBOX_NOTREADY" if ready_to_complete => self
                 .complete_trace(&key, timestamp, "error", "cri.sandbox.notready", config)
                 .into_iter()
                 .collect(),
+            "SANDBOX_NOTREADY" => Vec::new(),
             _ => Vec::new(),
         }
     }
@@ -2026,12 +2041,20 @@ impl CriContainerdStartupTraceTracker {
             ],
         );
 
-        {
+        let ready_at = {
             let state = self.pending.entry(key.clone()).or_default();
             merge_cri_startup_state_from_containerd_event(state, event, &identity);
-        }
+            state.cri_ready_at.filter(|_| {
+                !self.completed.contains(&key) && cri_startup_state_has_containerd_timing(state)
+            })
+        };
 
-        Vec::new()
+        ready_at
+            .and_then(|ready_at| {
+                self.complete_trace(&key, ready_at, "ok", "cri.sandbox.ready", _config)
+            })
+            .into_iter()
+            .collect()
     }
 
     fn complete_trace(
@@ -2043,6 +2066,7 @@ impl CriContainerdStartupTraceTracker {
         config: &CollectorConfig,
     ) -> Option<PluginOutput> {
         let state = self.pending.remove(key)?;
+        self.completed.insert(key.to_string());
         Some(cri_containerd_startup_trace_output(
             config,
             state,
@@ -2161,14 +2185,29 @@ fn merge_cri_startup_state_from_cri_event(
             .unwrap_or(""),
     ]);
 
-    if matches!(kubelet_cri_event_action(event), "SANDBOX_CREATED") {
-        state.cri_created_at = Some(
-            state
-                .cri_created_at
-                .map(|existing| existing.min(event_at))
-                .unwrap_or(event_at),
-        );
+    match kubelet_cri_event_action(event) {
+        "SANDBOX_CREATED" => {
+            state.cri_created_at = Some(
+                state
+                    .cri_created_at
+                    .map(|existing| existing.min(event_at))
+                    .unwrap_or(event_at),
+            );
+        }
+        "SANDBOX_READY" => {
+            state.cri_ready_at = Some(event_at);
+        }
+        "SANDBOX_NOTREADY" => {
+            state.cri_notready_at = Some(event_at);
+        }
+        _ => {}
     }
+}
+
+fn cri_startup_state_has_containerd_timing(state: &CriContainerdStartupState) -> bool {
+    state.containerd_create_at.is_some()
+        || state.containerd_task_create_at.is_some()
+        || state.containerd_task_start_at.is_some()
 }
 
 fn merge_cri_startup_state_from_containerd_event(
