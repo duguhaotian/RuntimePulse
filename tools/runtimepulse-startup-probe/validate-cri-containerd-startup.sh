@@ -39,6 +39,7 @@ CNI_GO_UPROBE_SYMBOLS="${CNI_GO_UPROBE_SYMBOLS:-}"
 ENABLE_RUNTIME_GO_UPROBES="${ENABLE_RUNTIME_GO_UPROBES:-false}"
 RUNTIME_UPROBE_BINARIES="${RUNTIME_UPROBE_BINARIES:-}"
 RUNTIME_GO_UPROBE_SYMBOLS="${RUNTIME_GO_UPROBE_SYMBOLS:-}"
+ENABLE_GO_URETPROBES="${ENABLE_GO_URETPROBES:-false}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
@@ -87,6 +88,7 @@ Common env:
   ENABLE_RUNTIME_GO_UPROBES=true Also attach OCI/Kata runtime shim Go uprobes.
   RUNTIME_UPROBE_BINARIES=/usr/bin/containerd-shim-runc-v2 Optional comma-separated runtime shim binaries.
   RUNTIME_GO_UPROBE_SYMBOLS=pattern Optional comma-separated runtime Go symbol/pattern list.
+  ENABLE_GO_URETPROBES=true Experimental: attach Go return probes for real exits.
 USAGE
 }
 
@@ -212,6 +214,9 @@ capture_probe() {
       for _symbol in "${_runtime_go_uprobe_symbols[@]}"; do
         [[ -n "$_symbol" ]] && uprobe_args+=(--runtime-go-uprobe-symbol "$_symbol")
       done
+    fi
+    if [[ "$ENABLE_GO_URETPROBES" == "true" ]]; then
+      uprobe_args+=(--enable-go-uretprobes)
     fi
   fi
 

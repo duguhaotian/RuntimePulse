@@ -3,8 +3,9 @@
 `runtimepulse-startup-probe` is the minimal host-side exporter for the
 RuntimePulse CRI/containerd startup call-chain path. It does **not** proxy CRI.
 It captures real kernel `execve`/process-exit tracepoints through `bpftrace`,
-optionally attaches high-precision containerd Go uprobes for CRI
-`RunPodSandbox`, and emits the raw JSON event shape consumed by the Rust
+optionally attaches high-precision containerd/runtime-shim Go uprobes for CRI
+`RunPodSandbox`, CNI setup, and runtime boundaries, and emits the raw JSON event
+shape consumed by the Rust
 `startup-callchain` source.
 
 Current coverage:
@@ -18,10 +19,12 @@ Current coverage:
   (`--enable-go-uprobes`), containerd/go-cni setup boundaries
   (`--enable-cni-go-uprobes`), and OCI/Kata runtime shim boundaries
   (`--enable-runtime-go-uprobes`), discovered from Go pclntab symbols even when
-  the ELF is stripped.
-- Correlation by `CNI_CONTAINERID`, Kubernetes CNI args, containerd shim `-id`,
-  or OCI/containerd bundle path; RunPodSandbox uprobe observations are joined to
-  the sandbox report by the observed startup event window.
+  the ELF is stripped. Go return probes are available behind the explicit
+  experimental `--enable-go-uretprobes` flag only.
+- Correlation by `CNI_CONTAINERID`, CNI netns inode id, Kubernetes CNI args,
+  containerd shim `-id`, or OCI/containerd bundle path; RunPodSandbox uprobe
+  observations are joined to the sandbox report by the observed startup event
+  window, while runtime-shim uprobes are joined by exact shim PID.
 - Per-sandbox report grouping when one capture window observes multiple sandbox
   ids, so concurrent pod starts do not merge their CNI/helper/runtime metrics.
 
@@ -117,7 +120,11 @@ and individual CNI plugin binary exec spans. With `--enable-runtime-go-uprobes`,
 it also emits `oci.shim.*`, `oci.runc.*`, `kata.shim.*`, and
 `kata.sandbox.*` boundary spans from runtime shim binaries. Runtime-shim uprobe
 events are attributed by exact shim PID first to avoid pulling unrelated host
-runtime activity into the active RunPodSandbox window. Extra symbols can be
+runtime activity into the active RunPodSandbox window. The default is
+entry-only capture with visible synthetic exits. `--enable-go-uretprobes` can
+also attach Go return probes for real return timestamps, but it is explicit and
+experimental because some Go/runtime combinations cannot unwind safely with
+uretprobes attached. Extra symbols can be
 supplied with repeated `--go-uprobe-symbol` / `--cni-go-uprobe-symbol` /
 `--runtime-go-uprobe-symbol` (or the matching
 `RUNTIMEPULSE_STARTUP_PROBE_*_SYMBOLS` env vars) when investigating specific
@@ -126,10 +133,12 @@ containerd builds.
 Limitations:
 
 - The bundled uprobe mode captures RunPodSandbox/CNI setup/runtime-shim entries
-  and currently synthesizes span ends from the last observed sandbox startup event in the
-  capture window. This avoids CRI proxying and unsafe Go return probes, but
-  request/response field decoding is still future work.
+  by default and synthesizes minimal exits so missing return data is visible
+  instead of dropping spans. Go uretprobes can capture real returns, but remain
+  an opt-in experimental mode until request decoding provides exact end
+  attribution without perturbing Go stacks.
 - Concurrent sandbox starts are correlated by stable sandbox ids when those ids
-  are available in CNI env, shim args, or bundle paths. RunPodSandbox uprobe
-  events are joined by the sandbox event time window; deeper request-object
-  decoding should make that correlation exact in a later native profile.
+  are available in CNI env, CNI netns inode id, shim args, or bundle paths.
+  RunPodSandbox uprobe events are still joined by the sandbox event time window;
+  deeper request-object decoding should make that correlation exact in a later
+  native profile.

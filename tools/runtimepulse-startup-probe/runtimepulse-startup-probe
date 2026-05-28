@@ -117,6 +117,7 @@ class GoUprobeSpec:
     address: int
     attach_offset: int
     function: str
+    attach_return: bool = True
 
 
 
@@ -385,7 +386,7 @@ def go_uprobe_span_name(function: str) -> str:
         return "kata.sandbox.start"
     return ""
 
-def discover_go_uprobes(binary: str, patterns: Iterable[str]) -> list[GoUprobeSpec]:
+def discover_go_uprobes(binary: str, patterns: Iterable[str], attach_return: bool = True) -> list[GoUprobeSpec]:
     resolved = resolve_binary(binary)
     if not resolved or not os.path.exists(resolved):
         return []
@@ -399,7 +400,7 @@ def discover_go_uprobes(binary: str, patterns: Iterable[str]) -> list[GoUprobeSp
             if name in used:
                 continue
             address, attach_offset = functions[name]
-            specs.append(GoUprobeSpec(resolved, name, address, attach_offset, short_go_function(name)))
+            specs.append(GoUprobeSpec(resolved, name, address, attach_offset, short_go_function(name), attach_return))
             used.add(name)
             break
     return specs
@@ -1269,6 +1270,12 @@ int trace_entry_{idx}(struct pt_regs *ctx) {{
     bpf_trace_printk("RP_GO_UPROBE_ENTER {idx} %llu %u %u\\n", bpf_ktime_get_ns(), id >> 32, (u32)id);
     return 0;
 }}
+
+int trace_return_{idx}(struct pt_regs *ctx) {{
+    u64 id = bpf_get_current_pid_tgid();
+    bpf_trace_printk("RP_GO_UPROBE_EXIT {idx} %llu %u %u\\n", bpf_ktime_get_ns(), id >> 32, (u32)id);
+    return 0;
+}}
 """)
     return "\n".join(functions)
 
@@ -1284,6 +1291,8 @@ def attach_bcc_go_uprobes(go_uprobes: list[GoUprobeSpec]):
     symbol_by_index: dict[int, GoUprobeSpec] = {}
     for idx, spec in enumerate(go_uprobes):
         bpf.attach_uprobe(name=spec.binary.encode(), addr=spec.attach_offset, fn_name=f"trace_entry_{idx}".encode())
+        if spec.attach_return:
+            bpf.attach_uretprobe(name=spec.binary.encode(), addr=spec.attach_offset, fn_name=f"trace_return_{idx}".encode())
         symbol_by_index[idx] = spec
     trace = bpf.trace_open(nonblocking=True)
     fd = trace.fileno()
@@ -1297,7 +1306,7 @@ def read_bcc_go_uprobe_lines(bpf, symbol_by_index: dict[int, GoUprobeSpec]) -> l
         return []
     trace = bpf.trace_open(nonblocking=True)
     lines: list[str] = []
-    pattern = re.compile(r"^\s*(?P<comm>.*?)\s*[-]\s*\d+\s+\[.*?\]\s+[^:]+:\s+(?:(?P<ip>0x[0-9a-fA-F]+):\s+)?(?:bpf_trace_printk:\s+)?(?P<kind>RP_GO_UPROBE_ENTER)\s+(?P<idx>\d+)\s+(?P<ts>\d+)\s+(?P<pid>\d+)\s+(?P<tid>\d+)")
+    pattern = re.compile(r"^\s*(?P<comm>.*?)\s*[-]\s*\d+\s+\[.*?\]\s+[^:]+:\s+(?:(?P<ip>0x[0-9a-fA-F]+):\s+)?(?:bpf_trace_printk:\s+)?(?P<kind>RP_GO_UPROBE_(?:ENTER|EXIT))\s+(?P<idx>\d+)\s+(?P<ts>\d+)\s+(?P<pid>\d+)\s+(?P<tid>\d+)")
     monotonic_epoch_ns = time.time_ns() - time.monotonic_ns()
     while True:
         try:
@@ -1520,14 +1529,15 @@ def export_command(args: argparse.Namespace) -> None:
     if args.enable_go_uprobes:
         explicit_patterns = bool(args.go_uprobe_symbol)
         patterns = args.go_uprobe_symbol or DEFAULT_GO_UPROBE_SYMBOL_PATTERNS
-        go_uprobes = discover_go_uprobes(args.containerd_binary, patterns)
+        attach_return = args.enable_go_uretprobes
+        go_uprobes = discover_go_uprobes(args.containerd_binary, patterns, attach_return)
         if args.enable_cni_go_uprobes:
-            go_uprobes.extend(discover_go_uprobes(args.containerd_binary, args.cni_go_uprobe_symbol or DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS))
+            go_uprobes.extend(discover_go_uprobes(args.containerd_binary, args.cni_go_uprobe_symbol or DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS, attach_return))
         if args.enable_runtime_go_uprobes:
             runtime_patterns = args.runtime_go_uprobe_symbol or DEFAULT_GO_RUNTIME_UPROBE_SYMBOL_PATTERNS
             runtime_binaries = unique_realpaths(existing_files(args.runtime_uprobe_binary or DEFAULT_RUNTIME_UPROBE_BINARIES))
             for runtime_binary in runtime_binaries:
-                go_uprobes.extend(discover_go_uprobes(runtime_binary, runtime_patterns))
+                go_uprobes.extend(discover_go_uprobes(runtime_binary, runtime_patterns, attach_return))
         if go_uprobes and not explicit_patterns:
             runpod = go_uprobes[:1]
             extra = [spec for spec in go_uprobes[1:] if go_uprobe_role(spec.function) != "cri"]
@@ -1658,6 +1668,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--enable-runtime-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_RUNTIME_GO_UPROBES"), help="also attach OCI/Kata runtime shim Go uprobes")
     export.add_argument("--runtime-uprobe-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_UPROBE_BINARIES", "")]), help="runtime shim binary for Go uprobe discovery; may be repeated")
     export.add_argument("--runtime-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_GO_UPROBE_SYMBOLS", "")]), help="OCI/Kata runtime Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
+    export.add_argument("--enable-go-uretprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_URETPROBES"), help="experimental: also attach Go return probes for real function exit timestamps; disabled by default because some Go/runtime combinations cannot unwind safely")
     export.add_argument("--sandbox-id", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SANDBOX_ID", ""))
     export.add_argument("--containerd-namespace", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES", "")]), help="only keep OCI/runtime execs from these containerd namespaces; CNI execs are kept by CNI_CONTAINERID")
     export.add_argument("--runtime-type", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_TYPE", ""))
