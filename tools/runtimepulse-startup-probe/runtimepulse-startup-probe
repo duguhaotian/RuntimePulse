@@ -1685,17 +1685,29 @@ def report_from_events(
     return report
 
 
-def attach_pending_go_uprobes_to_reports(reports: list[dict[str, object]], pending_events: list[dict[str, object]]) -> None:
+def pending_go_uprobe_summary(pending_events: list[dict[str, object]], assigned_count: int) -> dict[str, object]:
+    functions = sorted({str(event.get("function") or "unknown") for event in pending_events})
+    return {
+        "pendingGoUprobeEventCount": float(len(pending_events)),
+        "assignedPendingGoUprobeEventCount": float(assigned_count),
+        "unassignedPendingGoUprobeEventCount": float(max(0, len(pending_events) - assigned_count)),
+        "pendingGoUprobeFunctions": functions[:16],
+    }
+
+
+def attach_pending_go_uprobes_to_reports(reports: list[dict[str, object]], pending_events: list[dict[str, object]]) -> int:
     if not reports or not pending_events:
-        return
+        return 0
+    assigned_count = 0
     concrete_reports = [report for report in reports if report.get("sandboxId") or report.get("criSandboxId")]
     if len(concrete_reports) == 1:
         concrete_reports[0].setdefault("events", []).extend(pending_events)
+        assigned_count = len(pending_events)
         concrete_reports[0]["summary"] = summarize_events(concrete_reports[0].get("events") or [])
         window = report_time_window_for_events(concrete_reports[0].get("events") or [])
         if window:
             concrete_reports[0]["startTime"], concrete_reports[0]["endTime"], concrete_reports[0]["durationMs"] = window
-        return
+        return assigned_count
 
     concrete_windows: list[tuple[datetime, datetime, dict[str, object]]] = []
     for report in concrete_reports:
@@ -1708,12 +1720,14 @@ def attach_pending_go_uprobes_to_reports(reports: list[dict[str, object]], pendi
         matches = [report for start, end, report in concrete_windows if ts and start <= ts <= end]
         if len(matches) == 1:
             matches[0].setdefault("events", []).append(event)
+            assigned_count += 1
 
     for report in concrete_reports:
         report["summary"] = summarize_events(report.get("events") or [])
         window = report_time_window_for_events(report.get("events") or [])
         if window:
             report["startTime"], report["endTime"], report["durationMs"] = window
+    return assigned_count
 
 
 def grouped_reports(
@@ -1736,8 +1750,15 @@ def grouped_reports(
         report_from_events(group_events, runtime_type, "", "", source)
         for _key, group_events in sorted(groups.items())
     ]
-    attach_pending_go_uprobes_to_reports(reports, pending_go_events)
-    return [report for report in reports if report.get("events") or report.get("sandboxId") or report.get("criSandboxId")]
+    assigned_pending_go = attach_pending_go_uprobes_to_reports(reports, pending_go_events)
+    filtered = [report for report in reports if report.get("events") or report.get("sandboxId") or report.get("criSandboxId")]
+    if pending_go_events:
+        quality = pending_go_uprobe_summary(pending_go_events, assigned_pending_go)
+        for report in filtered:
+            summary = dict(report.get("summary") or {})
+            summary.update(quality)
+            report["summary"] = summary
+    return filtered
 
 
 def emit_report(
