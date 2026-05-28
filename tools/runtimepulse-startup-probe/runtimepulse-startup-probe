@@ -1057,7 +1057,10 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
         events.append(event)
 
     events = correlate_cni_netns_events(events)
+    events = correlate_oci_bundle_metadata_events(events)
     events = correlate_go_uprobe_events(events)
+    sandbox_id = first_event_value(events, "sandboxId", "criSandboxId", "containerdId") or sandbox_id
+    cri_sandbox_id = first_event_value(events, "criSandboxId", "sandboxId", "containerdId") or cri_sandbox_id
     summary = summarize_events(events)
     return events, summary, runtime_type, sandbox_id, cri_sandbox_id or containerd_id
 
@@ -1093,6 +1096,18 @@ def event_attribute(event: dict[str, object], key: str) -> object:
     attrs = event.get("attributes") or {}
     if isinstance(attrs, dict):
         return attrs.get(key, "")
+    return ""
+
+
+def event_runtime_identity(event: dict[str, object]) -> str:
+    for key in ("containerdId", "criSandboxId", "sandboxId"):
+        value = str(event.get(key, "") or "").strip()
+        if value:
+            return value
+    for key in ("containerd.container_id", "containerd.raw_id", "cri.sandbox_container_id"):
+        value = str(event_attribute(event, key) or "").strip()
+        if value:
+            return value
     return ""
 
 
@@ -1161,6 +1176,67 @@ def correlate_cni_netns_events(events: list[dict[str, object]]) -> list[dict[str
             continue
         sandbox, cri_id, containerd_id, runtime_type = identity
         result.append(assign_event_to_sandbox(event, sandbox, cri_id, containerd_id, runtime_type, "netns"))
+    return result
+
+
+def correlate_oci_bundle_metadata_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Propagate OCI bundle metadata to shim/uprobe events with the same task id.
+
+    runc execs often include --bundle and can read config.json. Shim execs and
+    shim Go uprobes usually only carry the containerd task id/PID.  This pass
+    copies the stable CRI/K8s identity from bundle-aware runtime exec events to
+    those task-level events before PID uprobe correlation runs.
+    """
+    identity_by_raw_id: dict[str, dict[str, object]] = {}
+    for event in events:
+        attrs = event.get("attributes") or {}
+        if not isinstance(attrs, dict):
+            continue
+        raw_id = str(attrs.get("containerd.raw_id") or event.get("containerdId") or "").strip()
+        stable_id = str(attrs.get("startup.stable_sandbox_id") or event.get("sandboxId") or "").strip()
+        if not raw_id or not stable_id or raw_id == stable_id:
+            continue
+        identity_by_raw_id.setdefault(raw_id, {
+            "sandboxId": stable_id,
+            "criSandboxId": str(event.get("criSandboxId") or stable_id),
+            "runtimeType": str(event.get("runtimeType") or "unknown"),
+            "attributes": {
+                key: value
+                for key, value in attrs.items()
+                if key.startswith("k8s.")
+                or key.startswith("cri.")
+                or key in {
+                    "containerd.raw_id",
+                    "containerd.sandbox_container_id",
+                    "startup.phase",
+                    "startup.phase.source",
+                    "startup.stable_sandbox_id",
+                }
+            },
+        })
+    if not identity_by_raw_id:
+        return events
+
+    result: list[dict[str, object]] = []
+    for event in events:
+        raw_id = event_runtime_identity(event)
+        identity = identity_by_raw_id.get(raw_id)
+        if not identity:
+            result.append(event)
+            continue
+        updated = dict(event)
+        updated["sandboxId"] = identity["sandboxId"]
+        updated["criSandboxId"] = identity["criSandboxId"]
+        # Keep containerdId as the raw task/container id for runtime debugging.
+        updated["containerdId"] = raw_id
+        updated["runtimeType"] = identity["runtimeType"] or str(event.get("runtimeType") or "unknown")
+        attrs = dict(updated.get("attributes") or {})
+        for key, value in identity["attributes"].items():
+            attrs.setdefault(key, value)
+        attrs["startup.probe.correlation"] = "oci-bundle-config"
+        attrs["startup.probe.correlation_sandbox_id"] = identity["sandboxId"]
+        updated["attributes"] = attrs
+        result.append(updated)
     return result
 
 
@@ -1726,6 +1802,9 @@ def self_test() -> None:
             },
         }))
         bundle_lines = [
+            "RP_GO_UPROBE_ENTER\t1779940000300000000\t500\t501\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
+            "RP_GO_UPROBE_EXIT\t1779940000310000000\t500\t501\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
+            "RP_EXEC_ENTER\t500\t1\t0\t0\tcontainerd\t/usr/bin/containerd-shim-runc-v2\t/usr/bin/containerd-shim-runc-v2\t-namespace\tk8s.io\t-id\traw-sandbox-id\t\t\t\t\n",
             f"RP_EXEC_ENTER\t500\t1\t0\t0\tcontainerd\t/usr/local/bin/kata-runtime\tkata-runtime\t--bundle\t{bundle}\tcreate\traw-sandbox-id\t\t\t\t\n",
             "RP_PROC_EXIT\t500\tkata-runtime\n",
         ]
@@ -1733,10 +1812,18 @@ def self_test() -> None:
         assert bundle_sandbox == "k8s-default-bundle-demo-pod"
         assert bundle_cri == "k8s-default-bundle-demo-pod"
         assert grouped_reports(bundle_events, "kata", "", "", "self-test")[0]["sandboxId"] == "k8s-default-bundle-demo-pod"
-        bundle_attrs = bundle_events[0]["attributes"]
+        bundle_attrs = next(event["attributes"] for event in bundle_events if event.get("binary") == "/usr/local/bin/kata-runtime")
         assert bundle_attrs["containerd.raw_id"] == "raw-sandbox-id"
         assert bundle_attrs["k8s.pod"] == "bundle-demo"
         assert bundle_attrs["startup.phase"] == "sandbox"
+        shim_event = next(event for event in bundle_events if event.get("binary") == "/usr/bin/containerd-shim-runc-v2" and event.get("function") == "execve")
+        assert shim_event["sandboxId"] == "k8s-default-bundle-demo-pod"
+        assert shim_event["containerdId"] == "raw-sandbox-id"
+        assert shim_event["attributes"]["k8s.pod"] == "bundle-demo"
+        uprobe_event = next(event for event in bundle_events if event.get("function") == "OCIRuncCreate")
+        assert uprobe_event["sandboxId"] == "k8s-default-bundle-demo-pod"
+        assert uprobe_event["containerdId"] == "raw-sandbox-id"
+        assert uprobe_event["attributes"]["startup.probe.correlation"] == "pid"
     print("self-test ok")
 
 
