@@ -24,6 +24,7 @@ VALIDATE_QUERY_API="${VALIDATE_QUERY_API:-false}"
 CRI_ENDPOINT="${CRI_ENDPOINT:-}"
 IMAGE_ENDPOINT="${IMAGE_ENDPOINT:-$CRI_ENDPOINT}"
 POD_CONFIG="${POD_CONFIG:-}"
+CONCURRENT_RUNPODS="${CONCURRENT_RUNPODS:-1}"
 CRI_RUNTIME_HANDLER="${CRI_RUNTIME_HANDLER:-$RUNTIME_TYPE}"
 CLEANUP_POD="${CLEANUP_POD:-true}"
 EXPECT_RUNTIME_TYPE="${EXPECT_RUNTIME_TYPE:-$RUNTIME_TYPE}"
@@ -70,6 +71,7 @@ Common env:
   CONTAINERD_NAMESPACE=k8s.io  Namespace filter for runtime/shim events.
   INCLUDE_HELPERS=true|false   Include helper binaries such as iptables/nft/ip/tc.
   POD_CONFIG=/path/pod.json    Optional crictl runp pod config for automatic E2E.
+  CONCURRENT_RUNPODS=3         Run this many POD_CONFIG variants during one capture.
   CRI_ENDPOINT=unix://...      Runtime endpoint used by crictl.
   CRI_RUNTIME_HANDLER=kata     Optional --runtime passed to crictl runp.
   CLEANUP_POD=true|false       Stop/remove the sandbox after automatic RunPod.
@@ -133,10 +135,69 @@ cleanup_sandbox() {
   [[ "$CLEANUP_POD" == "true" ]] || return 0
   [[ -s "$SANDBOX_ID_FILE" ]] || return 0
   local sandbox_id
-  sandbox_id="$(cat "$SANDBOX_ID_FILE")"
-  [[ -n "$sandbox_id" ]] || return 0
-  run_crictl stopp "$sandbox_id" >/dev/null 2>&1 || true
-  run_crictl rmp "$sandbox_id" >/dev/null 2>&1 || true
+  while IFS= read -r sandbox_id; do
+    [[ -n "$sandbox_id" ]] || continue
+    run_crictl stopp "$sandbox_id" >/dev/null 2>&1 || true
+    run_crictl rmp "$sandbox_id" >/dev/null 2>&1 || true
+  done < "$SANDBOX_ID_FILE"
+}
+
+pod_config_variant() {
+  local source="$1"
+  local index="$2"
+  if [[ "$index" -le 1 ]]; then
+    printf '%s' "$source"
+    return 0
+  fi
+  local target="$OUT_DIR/pod-config-$index.json"
+  python3 - "$source" "$target" "$index" <<'PY'
+import json, sys
+source, target, index = sys.argv[1:4]
+with open(source, encoding='utf-8') as handle:
+    pod = json.load(handle)
+suffix = f"concurrent-{index}"
+metadata = pod.setdefault('metadata', {})
+base_name = metadata.get('name') or 'runtimepulse-runpod'
+metadata['name'] = f"{base_name}-{suffix}"
+metadata['uid'] = f"{metadata.get('uid') or base_name}-{suffix}"
+metadata['attempt'] = int(metadata.get('attempt') or 1)
+pod['log_directory'] = f"{pod.get('log_directory') or '/tmp/runtimepulse-runpod'}/{suffix}"
+labels = pod.setdefault('labels', {})
+labels['io.kubernetes.pod.name'] = metadata['name']
+labels['io.kubernetes.pod.uid'] = metadata['uid']
+with open(target, 'w', encoding='utf-8') as handle:
+    json.dump(pod, handle)
+PY
+  printf '%s' "$target"
+}
+
+run_one_pod_sandbox() {
+  local config="$1"
+  local index="$2"
+  local log_file="$OUT_DIR/crictl-runp-$index.log"
+  local runtime_args=()
+  if [[ -n "$CRI_RUNTIME_HANDLER" ]]; then
+    runtime_args+=(--runtime "$CRI_RUNTIME_HANDLER")
+  fi
+
+  echo "running crictl runp[$index]: $config" >&2
+  set +e
+  run_crictl runp "${runtime_args[@]}" "$config" > "$log_file" 2>&1
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    cat "$log_file" >&2 || true
+    return $rc
+  fi
+  local sandbox_id
+  sandbox_id="$(tail -n 1 "$log_file" | tr -d '[:space:]')"
+  if [[ -z "$sandbox_id" ]]; then
+    echo "crictl runp[$index] did not return a sandbox id" >&2
+    cat "$log_file" >&2 || true
+    return 1
+  fi
+  echo "$sandbox_id" >> "$SANDBOX_ID_FILE"
+  echo "created sandbox[$index]: $sandbox_id" >&2
 }
 
 run_pod_sandbox() {
@@ -147,33 +208,40 @@ run_pod_sandbox() {
     exit 1
   fi
 
-  local runtime_args=()
-  if [[ -n "$CRI_RUNTIME_HANDLER" ]]; then
-    runtime_args+=(--runtime "$CRI_RUNTIME_HANDLER")
-  fi
-
-  echo "running crictl runp: $POD_CONFIG" >&2
-  set +e
-  run_crictl runp "${runtime_args[@]}" "$POD_CONFIG" > "$RUNP_LOG" 2>&1
-  local rc=$?
-  set -e
-  if [[ $rc -ne 0 ]]; then
-    cat "$RUNP_LOG" >&2 || true
-    exit $rc
-  fi
-  local sandbox_id
-  sandbox_id="$(tail -n 1 "$RUNP_LOG" | tr -d '[:space:]')"
-  if [[ -z "$sandbox_id" ]]; then
-    echo "crictl runp did not return a sandbox id" >&2
-    cat "$RUNP_LOG" >&2 || true
+  local count="$CONCURRENT_RUNPODS"
+  if ! [[ "$count" =~ ^[0-9]+$ ]] || [[ "$count" -lt 1 ]]; then
+    echo "CONCURRENT_RUNPODS must be a positive integer: $CONCURRENT_RUNPODS" >&2
     exit 1
   fi
-  echo "$sandbox_id" > "$SANDBOX_ID_FILE"
-  if [[ -z "$EXPECT_SANDBOX_ID" ]]; then
-    EXPECT_SANDBOX_ID="$sandbox_id"
+
+  : > "$SANDBOX_ID_FILE"
+  : > "$RUNP_LOG"
+  local pids=()
+  local idx config
+  for idx in $(seq 1 "$count"); do
+    config="$(pod_config_variant "$POD_CONFIG" "$idx")"
+    ( run_one_pod_sandbox "$config" "$idx" ) &
+    pids+=("$!")
+  done
+
+  local rc=0
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      rc=1
+    fi
+  done
+  cat "$OUT_DIR"/crictl-runp-*.log > "$RUNP_LOG" 2>/dev/null || true
+  if [[ $rc -ne 0 ]]; then
+    exit $rc
+  fi
+  if [[ ! -s "$SANDBOX_ID_FILE" ]]; then
+    echo "crictl runp did not create any sandboxes" >&2
+    exit 1
+  fi
+  if [[ -z "$EXPECT_SANDBOX_ID" && "$count" -eq 1 ]]; then
+    EXPECT_SANDBOX_ID="$(head -n 1 "$SANDBOX_ID_FILE")"
     export EXPECT_SANDBOX_ID
   fi
-  echo "created sandbox: $sandbox_id" >&2
 }
 
 capture_probe() {
@@ -282,12 +350,14 @@ validate_report_shape() {
   EXPECT_RUNTIME_TYPE="$EXPECT_RUNTIME_TYPE" \
   EXPECT_ROLES="$EXPECT_ROLES" \
   EXPECT_SANDBOX_ID="$EXPECT_SANDBOX_ID" \
+  CONCURRENT_RUNPODS="$CONCURRENT_RUNPODS" \
   python3 - "$REPORT_PATH" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 expect_runtime = os.environ.get('EXPECT_RUNTIME_TYPE', '').strip().lower()
 expect_roles = {item.strip().lower() for item in os.environ.get('EXPECT_ROLES', '').split(',') if item.strip()}
 expect_sandbox = os.environ.get('EXPECT_SANDBOX_ID', '').strip()
+expected_report_count = int(os.environ.get('CONCURRENT_RUNPODS', '1') or '1')
 with open(path, encoding='utf-8') as handle:
     payload = json.load(handle)
 reports = payload.get('reports') if isinstance(payload, dict) else None
@@ -295,6 +365,8 @@ if reports is None:
     reports = [payload]
 if not reports:
     raise SystemExit('no reports found')
+if expected_report_count > 1 and len(reports) < expected_report_count:
+    raise SystemExit(f'expected at least {expected_report_count} reports for concurrent runpods, observed {len(reports)}')
 all_roles = set()
 runtime_types = set()
 sandboxes = []

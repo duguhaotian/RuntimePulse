@@ -1135,6 +1135,18 @@ def event_time_range(events: list[dict[str, object]]) -> tuple[datetime | None, 
     return min(times), max(times)
 
 
+def report_time_window_for_events(events: list[dict[str, object]]) -> tuple[str, str, float] | None:
+    start, end = event_time_range(events)
+    if not start or not end:
+        return None
+    duration_ms = max(1.0, (end - start).total_seconds() * 1000.0)
+    return (
+        start.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        end.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        duration_ms,
+    )
+
+
 def is_window_correlated_go_uprobe(event: dict[str, object]) -> bool:
     attrs = event.get("attributes") or {}
     return isinstance(attrs, dict) and attrs.get("startup.probe.backend") == "bpftrace-go-uprobe"
@@ -1673,6 +1685,37 @@ def report_from_events(
     return report
 
 
+def attach_pending_go_uprobes_to_reports(reports: list[dict[str, object]], pending_events: list[dict[str, object]]) -> None:
+    if not reports or not pending_events:
+        return
+    concrete_reports = [report for report in reports if report.get("sandboxId") or report.get("criSandboxId")]
+    if len(concrete_reports) == 1:
+        concrete_reports[0].setdefault("events", []).extend(pending_events)
+        concrete_reports[0]["summary"] = summarize_events(concrete_reports[0].get("events") or [])
+        window = report_time_window_for_events(concrete_reports[0].get("events") or [])
+        if window:
+            concrete_reports[0]["startTime"], concrete_reports[0]["endTime"], concrete_reports[0]["durationMs"] = window
+        return
+
+    concrete_windows: list[tuple[datetime, datetime, dict[str, object]]] = []
+    for report in concrete_reports:
+        start = parse_iso8601(str(report.get("startTime", "") or ""))
+        end = parse_iso8601(str(report.get("endTime", "") or ""))
+        if start and end:
+            concrete_windows.append((start - timedelta(seconds=2), end + timedelta(seconds=2), report))
+    for event in pending_events:
+        ts = event_time(event)
+        matches = [report for start, end, report in concrete_windows if ts and start <= ts <= end]
+        if len(matches) == 1:
+            matches[0].setdefault("events", []).append(event)
+
+    for report in concrete_reports:
+        report["summary"] = summarize_events(report.get("events") or [])
+        window = report_time_window_for_events(report.get("events") or [])
+        if window:
+            report["startTime"], report["endTime"], report["durationMs"] = window
+
+
 def grouped_reports(
     events: list[dict[str, object]],
     runtime_type: str,
@@ -1681,14 +1724,20 @@ def grouped_reports(
     source: str,
 ) -> list[dict[str, object]]:
     groups: dict[str, list[dict[str, object]]] = {}
+    pending_go_events: list[dict[str, object]] = []
     for event in events:
+        if event_sandbox_key(event) == "unknown" and is_window_correlated_go_uprobe(event):
+            pending_go_events.append(event)
+            continue
         groups.setdefault(event_sandbox_key(event), []).append(event)
     if not groups:
         return [report_from_events([], runtime_type, sandbox_id, cri_sandbox_id, source)]
-    return [
+    reports = [
         report_from_events(group_events, runtime_type, "", "", source)
         for _key, group_events in sorted(groups.items())
     ]
+    attach_pending_go_uprobes_to_reports(reports, pending_go_events)
+    return [report for report in reports if report.get("events") or report.get("sandboxId") or report.get("criSandboxId")]
 
 
 def emit_report(
