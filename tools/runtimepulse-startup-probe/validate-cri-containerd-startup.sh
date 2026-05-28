@@ -31,6 +31,8 @@ EXPECT_ROLES="${EXPECT_ROLES:-}"
 EXPECT_SANDBOX_ID="${EXPECT_SANDBOX_ID:-}"
 EXPECT_ANALYSIS="${EXPECT_ANALYSIS:-false}"
 EXPECT_PARENT_LINKS="${EXPECT_PARENT_LINKS:-false}"
+EXPECT_PROCESS_BINARY_METRICS="${EXPECT_PROCESS_BINARY_METRICS:-false}"
+EXPECT_HELPER_BINARY_METRICS="${EXPECT_HELPER_BINARY_METRICS:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
@@ -75,6 +77,8 @@ Common env:
   EXPECT_ROLES=cni,kata        Optional required enter-event roles.
   EXPECT_SANDBOX_ID=...        Optional required sandbox id; auto-filled from runp.
   EXPECT_PARENT_LINKS=true     Require at least one non-root trace span parent link.
+  EXPECT_PROCESS_BINARY_METRICS=true Require per-process-binary startup metrics.
+  EXPECT_HELPER_BINARY_METRICS=true Require helper process-binary metrics.
   EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
@@ -329,9 +333,13 @@ PY
 }
 
 validate_collector_output() {
-  python3 - "$COLLECTOR_LOG" <<'PY'
-import json, sys
-path = sys.argv[1]
+  EXPECT_PROCESS_BINARY_METRICS="$EXPECT_PROCESS_BINARY_METRICS" \
+  EXPECT_HELPER_BINARY_METRICS="$EXPECT_HELPER_BINARY_METRICS" \
+  python3 - "$COLLECTOR_LOG" "$REPORT_PATH" <<'PY'
+import json, os, sys
+path, report_path = sys.argv[1:3]
+expect_process_binary_metrics = os.environ.get('EXPECT_PROCESS_BINARY_METRICS', '').lower() == 'true'
+expect_helper_binary_metrics = os.environ.get('EXPECT_HELPER_BINARY_METRICS', '').lower() == 'true'
 accepted = []
 with open(path, encoding='utf-8') as handle:
     for line in handle:
@@ -351,6 +359,31 @@ if int(last.get('traces') or 0) <= 0:
     raise SystemExit(f'collector emitted no traces: {last}')
 if int(last.get('metrics') or 0) <= 0:
     raise SystemExit(f'collector emitted no metrics: {last}')
+if expect_process_binary_metrics or expect_helper_binary_metrics:
+    with open(report_path, encoding='utf-8') as handle:
+        payload = json.load(handle)
+    reports = payload.get('reports') if isinstance(payload, dict) else None
+    if reports is None:
+        reports = [payload]
+    process_binary_names = set()
+    helper_binary_names = set()
+    for report in reports:
+        for event in report.get('events') or []:
+            if event.get('eventType') != 'enter':
+                continue
+            binary = str(event.get('binary') or event.get('command') or '').split('/')[-1].split()[0]
+            role = str(event.get('role') or '').lower()
+            if binary:
+                process_binary_names.add(binary)
+            if role == 'helper' and binary:
+                helper_binary_names.add(binary)
+    if expect_process_binary_metrics and not process_binary_names:
+        raise SystemExit('report has no process binaries to derive process-binary metrics')
+    if expect_helper_binary_metrics and not helper_binary_names:
+        raise SystemExit('report has no helper binaries to derive helper process-binary metrics')
+    last = dict(last)
+    last['validatedProcessBinaryInputs'] = sorted(process_binary_names)[:8] if expect_process_binary_metrics else []
+    last['validatedHelperBinaryInputs'] = sorted(helper_binary_names)[:8] if expect_helper_binary_metrics else []
 print(json.dumps(last, separators=(',', ':')))
 PY
 }
@@ -410,6 +443,8 @@ validate_query_api_output() {
     EXPECT_ROLES="$EXPECT_ROLES" \
     EXPECT_RUNTIME_TYPE="$EXPECT_RUNTIME_TYPE" \
     EXPECT_PARENT_LINKS="$EXPECT_PARENT_LINKS" \
+    EXPECT_PROCESS_BINARY_METRICS="$EXPECT_PROCESS_BINARY_METRICS" \
+    EXPECT_HELPER_BINARY_METRICS="$EXPECT_HELPER_BINARY_METRICS" \
     EXPECT_ANALYSIS="$EXPECT_ANALYSIS" \
     python3 - "$trace_file" "$metrics_file" "$analysis_file" "$sandbox_id" <<'PY'
 import json, os, sys
@@ -418,6 +453,8 @@ expect_roles = {item.strip().lower() for item in os.environ.get('EXPECT_ROLES', 
 expect_runtime = os.environ.get('EXPECT_RUNTIME_TYPE', '').strip().lower()
 expect_parent_links = os.environ.get('EXPECT_PARENT_LINKS', '').lower() == 'true'
 expect_analysis = os.environ.get('EXPECT_ANALYSIS', '').lower() == 'true'
+expect_process_binary_metrics = os.environ.get('EXPECT_PROCESS_BINARY_METRICS', '').lower() == 'true'
+expect_helper_binary_metrics = os.environ.get('EXPECT_HELPER_BINARY_METRICS', '').lower() == 'true'
 with open(trace_path, encoding='utf-8') as handle:
     traces = json.load(handle).get('data') or []
 with open(metrics_path, encoding='utf-8') as handle:
@@ -444,6 +481,16 @@ if expect_parent_links and not any(span.get('parentSpanId') for span in traces):
 metric_names = {series.get('name') for series in metrics}
 if 'sandbox.startup.callchain_duration_ms' not in metric_names:
     raise SystemExit(f'missing sandbox.startup.callchain_duration_ms metric for {sandbox_id}')
+if expect_process_binary_metrics and not any(str(name or '').startswith('sandbox.startup.process.binary.') for name in metric_names):
+    raise SystemExit(f'missing process binary metrics for {sandbox_id}')
+if expect_helper_binary_metrics:
+    helper_metrics = [
+        series for series in metrics
+        if str(series.get('name') or '').startswith('sandbox.startup.process.binary.')
+        and 'helper' in ((series.get('attributes') or {}).get('process.roles') or [])
+    ]
+    if not helper_metrics:
+        raise SystemExit(f'missing helper process binary metrics for {sandbox_id}')
 finding_count = 0
 if expect_analysis:
     findings = (analysis or {}).get('findings') or []
@@ -458,6 +505,7 @@ print(json.dumps({
     'runtimeTypes': sorted(runtime_types),
     'parentLinks': sum(1 for span in traces if span.get('parentSpanId')),
     'analysisFindings': finding_count,
+    'processBinaryMetrics': sum(1 for name in metric_names if str(name or '').startswith('sandbox.startup.process.binary.')),
 }, separators=(',', ':')))
 PY
   done < <(query_api_sandboxes)
