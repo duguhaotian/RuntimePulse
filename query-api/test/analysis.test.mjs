@@ -127,3 +127,33 @@ test('analysis names hottest startup process binary from breakdown metrics', () 
     'sandbox.startup.process.binary.bridge_count',
   ]);
 });
+
+test('analysis names hottest helper binary from role-filtered process metrics', () => {
+  const iptablesDuration = metric('sandbox.startup.process.binary.iptables_duration_ms', 90);
+  iptablesDuration.attributes = { 'process.binary.name': 'iptables', 'process.roles': ['helper'] };
+  const iptablesCount = metric('sandbox.startup.process.binary.iptables_count', 18);
+  iptablesCount.attributes = { 'process.binary.name': 'iptables', 'process.roles': ['helper'] };
+
+  const analysis = buildSandboxAnalysis({
+    sandbox: { ...baseSandbox, runtimeType: 'runc', startupDurationMs: 1800 },
+    image: undefined,
+    metrics: [
+      metric('sandbox.startup.callchain_duration_ms', 1800),
+      metric('sandbox.startup.helper_binary_duration_ms', 120),
+      metric('sandbox.startup.helper_binary_count', 18),
+      iptablesDuration,
+      iptablesCount,
+    ],
+    events: [],
+    spans: [],
+    profiles: [],
+  });
+
+  const finding = analysis.findings.find((item) => item.id === 'cri-sandbox-a-startup-callchain-helper-binaries');
+  assert.ok(finding);
+  assert.equal(finding.title, 'iptables is the hottest helper binary');
+  assert.deepEqual(finding.relatedMetricNames, [
+    'sandbox.startup.process.binary.iptables_duration_ms',
+    'sandbox.startup.process.binary.iptables_count',
+  ]);
+});

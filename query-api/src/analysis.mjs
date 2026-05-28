@@ -94,16 +94,20 @@ function startupCallchainFinding(sandbox, metrics, spans) {
 
   const title = best.key === 'cni' && best.binary
     ? `${best.binary} is the hottest CNI plugin binary`
-    : best.key === 'binary-exec' && best.binary
-      ? `${best.binary} is the hottest startup process binary`
-      : best.title;
+    : best.key === 'helper-binaries' && best.binary
+      ? `${best.binary} is the hottest helper binary`
+      : best.key === 'binary-exec' && best.binary
+        ? `${best.binary} is the hottest startup process binary`
+        : best.title;
   const summary = best.key === 'cni' && best.binary
     ? `${best.binary} accounts for ${formatRatio(share)} of the measured startup call chain.`
-    : best.key === 'binary-exec' && best.binary
-      ? `${best.binary} accounts for ${formatRatio(share)} of startup process execution cost.`
-      : best.durationMs > 0
-        ? `${best.label} accounts for ${formatRatio(share)} of the measured startup call chain.`
-        : `${best.label} executed ${best.count} times during startup; inspect per-command attribution for hidden latency.`;
+    : best.key === 'helper-binaries' && best.binary
+      ? `${best.binary} accounts for ${formatRatio(share)} of helper/process startup cost.`
+      : best.key === 'binary-exec' && best.binary
+        ? `${best.binary} accounts for ${formatRatio(share)} of startup process execution cost.`
+        : best.durationMs > 0
+          ? `${best.label} accounts for ${formatRatio(share)} of the measured startup call chain.`
+          : `${best.label} executed ${best.count} times during startup; inspect per-command attribution for hidden latency.`;
   const severity = share >= 0.55 || best.durationMs >= 5_000 || best.errorSpan ? 'critical' : 'warning';
 
   return {
@@ -214,7 +218,11 @@ function startupCallchainCandidates(metrics, spans) {
       : spans.filter((span) => definition.spanPatterns.some((pattern) => pattern.test(span.spanName)));
     const spanDurationMs = relatedSpans.reduce((total, span) => total + Number(span.durationMs ?? 0), 0);
     const pluginBreakdown = definition.perPlugin ? dominantCniPluginMetrics(metrics) : undefined;
-    const processBreakdown = definition.key === 'binary-exec' ? dominantProcessBinaryMetrics(metrics) : undefined;
+    const processBreakdown = definition.key === 'binary-exec'
+      ? dominantProcessBinaryMetrics(metrics)
+      : definition.key === 'helper-binaries'
+        ? dominantProcessBinaryMetrics(metrics, 'helper')
+        : undefined;
     const breakdown = pluginBreakdown ?? processBreakdown;
     return {
       ...definition,
@@ -255,12 +263,15 @@ function dominantCniPluginMetrics(metrics) {
   return [...plugins.values()].sort((left, right) => right.durationMs - left.durationMs || right.count - left.count)[0];
 }
 
-function dominantProcessBinaryMetrics(metrics) {
+function dominantProcessBinaryMetrics(metrics, roleFilter) {
   const binaries = new Map();
 
   for (const series of metrics) {
     const match = String(series?.name ?? '').match(/^sandbox\.startup\.process\.binary\.(.+)_(count|duration_ms)$/);
     if (!match) continue;
+
+    const roles = stringArrayAttribute(series.attributes, 'process.roles');
+    if (roleFilter && !roles.includes(roleFilter)) continue;
 
     const [, metricBinary, kind] = match;
     const binary = stringAttribute(series.attributes, 'process.binary.name') ?? metricBinary;
@@ -270,10 +281,12 @@ function dominantProcessBinaryMetrics(metrics) {
       durationMs: 0,
       countMetricName: `sandbox.startup.process.binary.${metricBinary}_count`,
       durationMetricName: `sandbox.startup.process.binary.${metricBinary}_duration_ms`,
+      roles,
     };
     const value = maxPoint(series)?.value ?? 0;
     if (kind === 'count') candidate.count = Math.max(candidate.count, value);
     if (kind === 'duration_ms') candidate.durationMs = Math.max(candidate.durationMs, value);
+    candidate.roles = uniqueStrings([...(candidate.roles ?? []), ...roles]);
     binaries.set(binary, candidate);
   }
 
@@ -341,6 +354,17 @@ function binaryFromSpanName(span) {
 function stringAttribute(attributes, name) {
   const value = attributes?.[name];
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function stringArrayAttribute(attributes, name) {
+  const value = attributes?.[name];
+  if (Array.isArray(value)) return value.filter((item) => typeof item === 'string' && Boolean(item.trim()));
+  if (typeof value === 'string' && value.trim()) return value.split(',').map((item) => item.trim()).filter(Boolean);
+  return [];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function spanMatchesBinary(span, binary) {
