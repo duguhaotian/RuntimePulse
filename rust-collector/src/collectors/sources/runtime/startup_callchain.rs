@@ -1673,10 +1673,18 @@ struct CniPluginMetrics {
 }
 
 #[derive(Default)]
+struct ProcessBinaryMetrics {
+    count: u64,
+    duration_ms: f64,
+    roles: BTreeSet<String>,
+}
+
+#[derive(Default)]
 struct SpanDerivedMetrics {
     cni_duration_ms: f64,
     cni_plugin_count: BTreeSet<String>,
     cni_plugins: BTreeMap<String, CniPluginMetrics>,
+    process_binaries: BTreeMap<String, ProcessBinaryMetrics>,
     oci_duration_ms: f64,
     oci_call_count: u64,
     binary_exec_count: u64,
@@ -1747,6 +1755,15 @@ fn metrics_from_spans(
         {
             derived.binary_exec_count += 1;
             derived.binary_exec_duration_ms += duration;
+            let process_binary = process_binary_metric_name(span, &span_name, &binary_name);
+            if !process_binary.is_empty() {
+                let stats = derived.process_binaries.entry(process_binary).or_default();
+                stats.count += 1;
+                stats.duration_ms += duration;
+                if !role.is_empty() {
+                    stats.roles.insert(role.clone());
+                }
+            }
         }
 
         if is_helper_binary(&binary_name) {
@@ -1855,6 +1872,18 @@ fn metrics_from_spans(
         attributes,
         config,
     );
+    for (binary_name, stats) in &derived.process_binaries {
+        push_process_binary_metric_if_positive(
+            &mut metrics,
+            timestamp,
+            binary_name,
+            stats,
+            sandbox_id,
+            runtime_type,
+            attributes,
+            config,
+        );
+    }
     push_metric_if_positive(
         &mut metrics,
         timestamp,
@@ -2048,6 +2077,60 @@ fn metrics_from_uprobe_normalization(
     metrics
 }
 
+fn push_process_binary_metric_if_positive(
+    metrics: &mut Vec<MetricSample>,
+    timestamp: &str,
+    binary_name: &str,
+    stats: &ProcessBinaryMetrics,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) {
+    if stats.count == 0 && stats.duration_ms <= 0.0 {
+        return;
+    }
+
+    let mut binary_attributes = attributes.clone();
+    binary_attributes.insert("process.binary.name".to_string(), json!(binary_name));
+    if !stats.roles.is_empty() {
+        binary_attributes.insert(
+            "process.roles".to_string(),
+            json!(stats.roles.iter().cloned().collect::<Vec<_>>()),
+        );
+    }
+    binary_attributes.insert(
+        "startup.metric.kind".to_string(),
+        json!("process_binary_breakdown"),
+    );
+    let metric_prefix = format!(
+        "sandbox.startup.process.binary.{}",
+        sanitize_metric_key(binary_name)
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_count"),
+        stats.count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &binary_attributes,
+        config,
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_duration_ms"),
+        stats.duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        &binary_attributes,
+        config,
+    );
+}
+
 fn push_cni_plugin_metric_if_positive(
     metrics: &mut Vec<MetricSample>,
     timestamp: &str,
@@ -2164,6 +2247,46 @@ fn is_kata_span(span_name: &str, binary_name: &str) -> bool {
             binary_name,
             "qemu-system-x86_64" | "qemu-system-aarch64" | "cloud-hypervisor" | "firecracker"
         )
+}
+
+fn process_binary_metric_name(
+    span: &StartupStageReport,
+    span_name: &str,
+    binary_name: &str,
+) -> String {
+    if !binary_name.is_empty() {
+        return binary_name.to_string();
+    }
+    if let Some(command) = span.command.as_deref().map(binary_basename) {
+        let command = command.to_ascii_lowercase();
+        if !command.is_empty() {
+            return command;
+        }
+    }
+    if let Some(function) = span
+        .attributes
+        .as_ref()
+        .and_then(|attrs| value_string_from_keys(attrs, &["uprobe.function", "function"]))
+    {
+        let function = function.to_ascii_lowercase();
+        if function.contains("runpodsandbox") {
+            return "containerd-runpodsandbox".to_string();
+        }
+        if function.contains("setuppodnetwork") || function.contains("cnisetup") {
+            return "containerd-cni-setup".to_string();
+        }
+        if function.contains("ocirunc") || function.contains("go-runc") {
+            return "runc".to_string();
+        }
+        if function.contains("katashim") || function.contains("katasandbox") {
+            return "containerd-shim-kata-v2".to_string();
+        }
+        return sanitize_metric_key(&function);
+    }
+    if let Some(name) = span_name.strip_prefix("process.exec.") {
+        return name.to_string();
+    }
+    String::new()
 }
 
 fn is_helper_binary(binary_name: &str) -> bool {
@@ -2761,6 +2884,16 @@ mod tests {
         }));
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.iptables_duration_ms" && metric.value == 30.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.process.binary.bridge_duration_ms"
+                && metric.value == 100.0
+                && metric.attributes.as_ref().unwrap()["process.binary.name"] == json!("bridge")
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.process.binary.iptables_duration_ms"
+                && metric.value == 30.0
+                && metric.attributes.as_ref().unwrap()["process.roles"] == json!(["helper"])
         }));
     }
 
