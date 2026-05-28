@@ -2926,9 +2926,32 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
 .waterfall-scale span:last-child { justify-self: end; }
 
 .span-name {
+  align-items: center;
+  background: transparent;
+  border: 0;
   color: #d5dde7;
+  cursor: pointer;
+  display: flex;
   font-size: 12px;
+  gap: 5px;
   line-height: 26px;
+  min-width: 0;
+  padding: 0 0 0 calc(var(--span-depth, 0) * 14px);
+  text-align: left;
+}
+
+.span-name:hover, .span-row.selected .span-name { color: #ffffff; }
+
+.span-tree-marker {
+  color: var(--muted-2);
+  flex: 0 0 10px;
+  font-size: 12px;
+}
+
+.span-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .span-track {
