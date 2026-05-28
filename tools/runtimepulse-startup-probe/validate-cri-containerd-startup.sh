@@ -377,7 +377,19 @@ for idx, report in enumerate(reports):
     sandbox = report.get('sandboxId') or report.get('criSandboxId')
     if not sandbox:
         raise SystemExit(f'report {idx} has no sandbox id')
-    sandboxes.append(str(sandbox))
+    sandbox = str(sandbox)
+    sandboxes.append(sandbox)
+    event_ids = set()
+    for event in events:
+        for key in ('sandboxId', 'criSandboxId', 'containerdId'):
+            value = str(event.get(key) or '').strip()
+            if value:
+                event_ids.add(value)
+    if sandbox not in event_ids:
+        raise SystemExit(f'report {idx} sandbox id {sandbox} is not present in event identities {sorted(event_ids)}')
+    foreign_ids = sorted(event_ids - {sandbox})
+    if foreign_ids:
+        raise SystemExit(f'report {idx} for sandbox {sandbox} contains foreign sandbox/container ids {foreign_ids}')
     report_runtime = str(report.get('runtimeType') or '').lower()
     if report_runtime:
         runtime_types.add(report_runtime)
@@ -387,6 +399,8 @@ for idx, report in enumerate(reports):
     runtime_types |= {str(event.get('runtimeType') or '').lower() for event in events if event.get('runtimeType')}
     if not roles & {'cni', 'oci', 'kata', 'helper'}:
         raise SystemExit(f'report {idx} has no startup roles: {sorted(roles)}')
+if expected_report_count > 1 and len(set(sandboxes)) != len(sandboxes):
+    raise SystemExit(f'concurrent reports contain duplicate sandbox ids: {sandboxes}')
 if expect_runtime and expect_runtime not in runtime_types:
     raise SystemExit(f'expected runtimeType {expect_runtime}, observed {sorted(runtime_types)}')
 missing_roles = sorted(expect_roles - all_roles)
