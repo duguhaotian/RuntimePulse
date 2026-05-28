@@ -126,9 +126,12 @@ binaries. When a capture window observes multiple sandbox ids, the exporter emit
 one lightweight report per sandbox under `reports` so concurrent starts keep
 separate CNI/helper/runtime metrics. Each generated report carries its own
 `startTime`/`endTime`/`durationMs` event window for the call-chain root span.
-This is the first concrete exporter bridge;
-native containerd `RunPodSandbox` Go uprobes can be added behind the same JSON
-contract later.
+The normalizer derives aggregate startup metrics plus per-process-binary
+breakdowns named `sandbox.startup.process.binary.<binary>_{count,duration_ms}`.
+Those series carry `process.binary.name` and `process.roles` attributes so CNI
+plugin binaries and helper binaries such as `iptables` can be analyzed and shown
+separately. This is the first concrete exporter bridge; native containerd
+`RunPodSandbox` Go uprobes can be added behind the same JSON contract later.
 
 Local one-shot validation can read the bundled raw-event example without a real
 uprobe exporter:

@@ -130,7 +130,12 @@ uretprobes attached. Extra symbols can be
 supplied with repeated `--go-uprobe-symbol` / `--cni-go-uprobe-symbol` /
 `--runtime-go-uprobe-symbol` (or the matching
 `RUNTIMEPULSE_STARTUP_PROBE_*_SYMBOLS` env vars) when investigating specific
-containerd builds. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
+containerd builds. After normalization, each observed process binary also gets
+`sandbox.startup.process.binary.<binary>_{count,duration_ms}` metrics with roles such as
+`cni`, `oci`, `kata`, or `helper`; use
+`EXPECT_PROCESS_BINARY_METRICS=true` and `EXPECT_HELPER_BINARY_METRICS=true` in
+`validate-cri-containerd-startup.sh` to assert that this attribution path is
+present in real captures. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
 points the probe at the same `config.toml` used by the target containerd so it
 can infer `state`/`root` task bundle directories even when the shim argv only
 contains `-namespace`/`-id` plus the runtime root. This is especially useful for
