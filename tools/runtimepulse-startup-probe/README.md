@@ -15,7 +15,8 @@ Current coverage:
   are passed through `--include-binary`.
 - Optional helper binaries such as `iptables`, `nft`, `ip`, and `tc`.
 - Optional containerd Go uprobe entry capture for CRI `RunPodSandbox`
-  (`--enable-go-uprobes`) discovered from Go pclntab symbols even when the
+  (`--enable-go-uprobes`) and containerd/go-cni setup boundaries
+  (`--enable-cni-go-uprobes`), discovered from Go pclntab symbols even when the
   containerd ELF is stripped.
 - Correlation by `CNI_CONTAINERID`, Kubernetes CNI args, containerd shim `-id`,
   or OCI/containerd bundle path; RunPodSandbox uprobe observations are joined to
@@ -101,21 +102,26 @@ sudo runtimepulse-startup-probe export \
   --containerd-namespace k8s.io \
   --include-helpers \
   --enable-go-uprobes \
+  --enable-cni-go-uprobes \
   --containerd-binary /usr/bin/containerd
 ```
 
 The default uprobe profile attaches to the first matching containerd
 `RunPodSandbox` Go symbol and emits a `cri.run_pod_sandbox` span after Rust
-normalization. Extra symbols can be supplied with repeated `--go-uprobe-symbol`
-(or `RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS`) when investigating specific
+normalization. With `--enable-cni-go-uprobes`, it also attaches to
+`setupPodNetwork`/`go-cni` setup symbols and emits `cni.setup` spans, so the
+RunPodSandbox envelope can be separated from the containerd CNI setup boundary
+and individual CNI plugin binary exec spans. Extra symbols can be supplied with
+repeated `--go-uprobe-symbol` / `--cni-go-uprobe-symbol` (or the matching
+`RUNTIMEPULSE_STARTUP_PROBE_*_SYMBOLS` env vars) when investigating specific
 containerd builds.
 
 Limitations:
 
-- The bundled uprobe mode captures RunPodSandbox entry and currently synthesizes
-  the span end from the last observed sandbox startup event in the capture
-  window. This avoids CRI proxying and unsafe Go return probes, but request/
-  response field decoding is still future work.
+- The bundled uprobe mode captures RunPodSandbox/CNI setup entries and currently
+  synthesizes span ends from the last observed sandbox startup event in the
+  capture window. This avoids CRI proxying and unsafe Go return probes, but
+  request/response field decoding is still future work.
 - Concurrent sandbox starts are correlated by stable sandbox ids when those ids
   are available in CNI env, shim args, or bundle paths. RunPodSandbox uprobe
   events are joined by the sandbox event time window; deeper request-object

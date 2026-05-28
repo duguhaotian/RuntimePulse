@@ -1229,7 +1229,10 @@ fn infer_stage_role(function_name: &str, binary_name: &str) -> Option<String> {
     if is_helper_binary(binary_name) {
         return Some("helper".to_string());
     }
-    if function.contains("cni") || is_likely_cni_plugin_binary(binary_name) {
+    if function.contains("cni")
+        || function.contains("setuppodnetwork")
+        || is_likely_cni_plugin_binary(binary_name)
+    {
         return Some("cni".to_string());
     }
     if function.contains("oci") || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
@@ -1264,6 +1267,12 @@ fn infer_span_name(
         || function.contains("run-pod-sandbox")
     {
         return "cri.run_pod_sandbox".to_string();
+    }
+    if function.contains("setuppodnetwork")
+        || function.contains("cnisetup")
+        || function.contains("go-cni")
+    {
+        return "cni.setup".to_string();
     }
     if let Some(role) = role {
         match role {

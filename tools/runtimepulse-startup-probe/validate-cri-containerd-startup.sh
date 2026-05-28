@@ -34,6 +34,8 @@ EXPECT_PARENT_LINKS="${EXPECT_PARENT_LINKS:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 GO_UPROBE_SYMBOLS="${GO_UPROBE_SYMBOLS:-}"
+ENABLE_CNI_GO_UPROBES="${ENABLE_CNI_GO_UPROBES:-false}"
+CNI_GO_UPROBE_SYMBOLS="${CNI_GO_UPROBE_SYMBOLS:-}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
@@ -76,7 +78,9 @@ Common env:
   QUERY_API_RETRY_SECONDS=10   Wait for collector outlet to flush to Query API.
   ENABLE_GO_UPROBES=true       Attach containerd RunPodSandbox Go uprobes.
   CONTAINERD_BINARY=/usr/bin/containerd  Optional containerd binary for symbol discovery.
-  GO_UPROBE_SYMBOLS=pattern    Optional comma-separated Go symbol/pattern list.
+  GO_UPROBE_SYMBOLS=pattern    Optional comma-separated RunPodSandbox Go symbol/pattern list.
+  ENABLE_CNI_GO_UPROBES=true   Also attach containerd/go-cni setup Go uprobes.
+  CNI_GO_UPROBE_SYMBOLS=pattern Optional comma-separated CNI setup Go symbol/pattern list.
 USAGE
 }
 
@@ -179,6 +183,15 @@ capture_probe() {
         [[ -n "$_symbol" ]] && uprobe_args+=(--go-uprobe-symbol "$_symbol")
       done
     fi
+    if [[ "$ENABLE_CNI_GO_UPROBES" == "true" ]]; then
+      uprobe_args+=(--enable-cni-go-uprobes)
+    fi
+    if [[ -n "$CNI_GO_UPROBE_SYMBOLS" ]]; then
+      IFS=',' read -r -a _cni_go_uprobe_symbols <<< "$CNI_GO_UPROBE_SYMBOLS"
+      for _symbol in "${_cni_go_uprobe_symbols[@]}"; do
+        [[ -n "$_symbol" ]] && uprobe_args+=(--cni-go-uprobe-symbol "$_symbol")
+      done
+    fi
   fi
 
   rm -f "$READY_FILE" "$REPORT_PATH" "$RUNP_LOG" "$SANDBOX_ID_FILE"
@@ -195,7 +208,7 @@ capture_probe() {
     > "$REPORT_PATH" &
   local probe_pid=$!
 
-  for _ in {1..100}; do
+  for _ in {1..400}; do
     [[ -e "$READY_FILE" ]] && break
     if ! kill -0 "$probe_pid" 2>/dev/null; then
       wait "$probe_pid"

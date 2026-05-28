@@ -85,6 +85,11 @@ DEFAULT_GO_UPROBE_SYMBOL_PATTERNS = [
     "github.com/containerd/containerd/v2/plugins/cri.criGRPCServer.RunPodSandbox",
     "k8s.io/cri-api/pkg/apis/runtime/v1._RuntimeService_RunPodSandbox_Handler",
 ]
+DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS = [
+    "github.com/containerd/containerd/v2/internal/cri/server.(*criService).setupPodNetwork",
+    "github.com/containerd/go-cni.(*libcni).Setup",
+    "github.com/containerd/go-cni.(*libcni).SetupSerially",
+]
 GO_PCLNTAB_MAGICS = {0xFFFFFFF1, 0xFFFFFFF0, 0xFFFFFFFA, 0xFFFFFFFB}
 TRACEFS_CANDIDATES = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"]
 
@@ -281,6 +286,8 @@ def symbol_matches(name: str, pattern: str) -> bool:
 def short_go_function(symbol: str) -> str:
     if "RunPodSandbox" in symbol:
         return "RunPodSandbox"
+    if "setupPodNetwork" in symbol:
+        return "CNISetup"
     if "SetupSerially" in symbol:
         return "CNISetupSerially"
     if re.search(r"\bSetup$|\.Setup$", symbol):
@@ -484,7 +491,8 @@ def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type
         "uprobe.binary": obs.binary,
         "process.thread_id": obs.tid,
     }
-    return {
+    span_name = "cni.setup" if obs.function.lower().startswith("cni") else ""
+    event = {
         "eventType": event_type,
         "requestId": obs.request_id,
         "function": obs.function,
@@ -495,13 +503,16 @@ def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type
         "containerdId": cri_sandbox_id or sandbox_id,
         "runtimeType": runtime_type or "unknown",
         "status": "ok",
-        "role": "cri",
+        "role": "cni" if obs.function.lower().startswith("cni") else "cri",
         "binary": obs.binary,
         "command": basename(obs.binary) or "containerd",
         "pid": obs.pid,
         "ppid": 0,
         "attributes": attributes,
     }
+    if span_name:
+        event["spanName"] = span_name
+    return event
 
 
 def parse_env(items: Iterable[str]) -> dict[str, str]:
@@ -843,8 +854,13 @@ def event_time_range(events: list[dict[str, object]]) -> tuple[datetime | None, 
     return min(times), max(times)
 
 
+def is_window_correlated_go_uprobe(event: dict[str, object]) -> bool:
+    attrs = event.get("attributes") or {}
+    return isinstance(attrs, dict) and attrs.get("startup.probe.backend") == "bpftrace-go-uprobe"
+
+
 def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
-    sandbox_events = [event for event in events if event.get("role") != "cri" and event_sandbox_key(event) != "unknown"]
+    sandbox_events = [event for event in events if not is_window_correlated_go_uprobe(event) and event_sandbox_key(event) != "unknown"]
     if not sandbox_events:
         return events
     windows: dict[str, tuple[datetime, datetime, str]] = {}
@@ -860,7 +876,7 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
         return events
     result: list[dict[str, object]] = []
     for event in events:
-        if event.get("role") != "cri" or event_sandbox_key(event) != "unknown":
+        if not is_window_correlated_go_uprobe(event) or event_sandbox_key(event) != "unknown":
             result.append(event)
             continue
         ts = event_time(event)
@@ -1203,8 +1219,12 @@ def export_command(args: argparse.Namespace) -> None:
         explicit_patterns = bool(args.go_uprobe_symbol)
         patterns = args.go_uprobe_symbol or DEFAULT_GO_UPROBE_SYMBOL_PATTERNS
         go_uprobes = discover_go_uprobes(args.containerd_binary, patterns)
+        if args.enable_cni_go_uprobes:
+            go_uprobes.extend(discover_go_uprobes(args.containerd_binary, args.cni_go_uprobe_symbol or DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS))
         if go_uprobes and not explicit_patterns:
-            go_uprobes = go_uprobes[:1]
+            runpod = go_uprobes[:1]
+            cni = [spec for spec in go_uprobes[1:] if spec.function.lower().startswith("cni")]
+            go_uprobes = runpod + cni
         if not go_uprobes:
             raise SystemExit(f"no Go uprobe symbols matched in {args.containerd_binary}: {patterns}")
 
@@ -1237,6 +1257,8 @@ def self_test() -> None:
     lines = [
         "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
         "RP_GO_UPROBE_EXIT\t1779940000200000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
+        "RP_GO_UPROBE_ENTER\t1779940000100000000\t90\t91\tcontainerd\tCNISetup\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).setupPodNetwork\t/usr/bin/containerd\n",
+        "RP_GO_UPROBE_EXIT\t1779940000150000000\t90\t91\tcontainerd\tCNISetup\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).setupPodNetwork\t/usr/bin/containerd\n",
         "RP_EXEC_ENTER\t100\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
         "RP_PROC_EXIT\t100\tbridge\n",
         "RP_EXEC_ENTER\t102\t100\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
@@ -1245,12 +1267,12 @@ def self_test() -> None:
         "RP_PROC_EXIT\t101\tkata-runtime\n",
     ]
     events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(lines, 6, 4, "", "", None)
-    assert len([e for e in events if e.get("eventType") == "enter"]) == 4
+    assert len([e for e in events if e.get("eventType") == "enter"]) == 5
     assert runtime_type == "kata"
     assert sandbox_id == "abc123"
     assert cri_sandbox_id == "abc123"
     assert summary["observedCriUprobeCount"] == 1.0
-    assert summary["observedCniExecCount"] == 1.0
+    assert summary["observedCniExecCount"] == 2.0
     assert summary["observedHelperExecCount"] == 1.0
     assert summary["observedOciExecCount"] == 1.0
 
@@ -1289,7 +1311,9 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--include-helpers", action="store_true", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS", "false").lower() == "true")
     export.add_argument("--enable-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES"), help="attach high-precision Go uprobes to containerd RunPodSandbox symbols")
     export.add_argument("--containerd-binary", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY", shutil.which("containerd") or next((path for path in DEFAULT_CONTAINERD_BINARIES if os.path.exists(path)), "containerd")))
-    export.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
+    export.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd RunPodSandbox Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
+    export.add_argument("--enable-cni-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_CNI_GO_UPROBES"), help="also attach containerd/go-cni setup Go uprobes")
+    export.add_argument("--cni-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_GO_UPROBE_SYMBOLS", "")]), help="containerd CNI setup Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
     export.add_argument("--sandbox-id", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SANDBOX_ID", ""))
     export.add_argument("--containerd-namespace", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES", "")]), help="only keep OCI/runtime execs from these containerd namespaces; CNI execs are kept by CNI_CONTAINERID")
     export.add_argument("--runtime-type", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_TYPE", ""))
