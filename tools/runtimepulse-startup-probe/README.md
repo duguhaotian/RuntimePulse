@@ -54,6 +54,10 @@ a timed probe capture window and then normalize the report through
 # Validate report shape only.
 tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup-probe.json
 
+# Add assertions for repeatable runc/Kata checks.
+EXPECT_RUNTIME_TYPE=kata EXPECT_ROLES=cni,kata \
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup-probe.json
+
 # Also push normalized traces/metrics to the local collector outlet.
 VALIDATE_INGEST=true \
 LOCAL_REPORT_URL=http://127.0.0.1:9091/api/local/ingest \

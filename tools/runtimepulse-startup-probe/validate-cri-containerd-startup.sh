@@ -23,6 +23,9 @@ IMAGE_ENDPOINT="${IMAGE_ENDPOINT:-$CRI_ENDPOINT}"
 POD_CONFIG="${POD_CONFIG:-}"
 CRI_RUNTIME_HANDLER="${CRI_RUNTIME_HANDLER:-$RUNTIME_TYPE}"
 CLEANUP_POD="${CLEANUP_POD:-true}"
+EXPECT_RUNTIME_TYPE="${EXPECT_RUNTIME_TYPE:-$RUNTIME_TYPE}"
+EXPECT_ROLES="${EXPECT_ROLES:-}"
+EXPECT_SANDBOX_ID="${EXPECT_SANDBOX_ID:-}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
@@ -53,6 +56,9 @@ Common env:
   CRI_ENDPOINT=unix://...      Runtime endpoint used by crictl.
   CRI_RUNTIME_HANDLER=kata     Optional --runtime passed to crictl runp.
   CLEANUP_POD=true|false       Stop/remove the sandbox after automatic RunPod.
+  EXPECT_RUNTIME_TYPE=kata     Optional report runtime assertion. Defaults to RUNTIME_TYPE.
+  EXPECT_ROLES=cni,kata        Optional required enter-event roles.
+  EXPECT_SANDBOX_ID=...        Optional required sandbox id; auto-filled from runp.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   LOCAL_REPORT_URL=http://127.0.0.1:9091/api/local/ingest
 USAGE
@@ -129,6 +135,10 @@ run_pod_sandbox() {
     exit 1
   fi
   echo "$sandbox_id" > "$SANDBOX_ID_FILE"
+  if [[ -z "$EXPECT_SANDBOX_ID" ]]; then
+    EXPECT_SANDBOX_ID="$sandbox_id"
+    export EXPECT_SANDBOX_ID
+  fi
   echo "created sandbox: $sandbox_id" >&2
 }
 
@@ -191,9 +201,15 @@ normalize_report() {
 }
 
 validate_report_shape() {
+  EXPECT_RUNTIME_TYPE="$EXPECT_RUNTIME_TYPE" \
+  EXPECT_ROLES="$EXPECT_ROLES" \
+  EXPECT_SANDBOX_ID="$EXPECT_SANDBOX_ID" \
   python3 - "$REPORT_PATH" <<'PY'
-import json, sys
+import json, os, sys
 path = sys.argv[1]
+expect_runtime = os.environ.get('EXPECT_RUNTIME_TYPE', '').strip().lower()
+expect_roles = {item.strip().lower() for item in os.environ.get('EXPECT_ROLES', '').split(',') if item.strip()}
+expect_sandbox = os.environ.get('EXPECT_SANDBOX_ID', '').strip()
 with open(path, encoding='utf-8') as handle:
     payload = json.load(handle)
 reports = payload.get('reports') if isinstance(payload, dict) else None
@@ -201,19 +217,39 @@ if reports is None:
     reports = [payload]
 if not reports:
     raise SystemExit('no reports found')
+all_roles = set()
+runtime_types = set()
+sandboxes = []
 for idx, report in enumerate(reports):
     events = report.get('events') or []
     if not events:
         raise SystemExit(f'report {idx} has no events')
-    if not report.get('sandboxId') and not report.get('criSandboxId'):
+    sandbox = report.get('sandboxId') or report.get('criSandboxId')
+    if not sandbox:
         raise SystemExit(f'report {idx} has no sandbox id')
-    roles = {event.get('role') for event in events if event.get('eventType') == 'enter'}
+    sandboxes.append(str(sandbox))
+    report_runtime = str(report.get('runtimeType') or '').lower()
+    if report_runtime:
+        runtime_types.add(report_runtime)
+    roles = {str(event.get('role') or '').lower() for event in events if event.get('eventType') == 'enter'}
+    roles.discard('')
+    all_roles |= roles
+    runtime_types |= {str(event.get('runtimeType') or '').lower() for event in events if event.get('runtimeType')}
     if not roles & {'cni', 'oci', 'kata', 'helper'}:
         raise SystemExit(f'report {idx} has no startup roles: {sorted(roles)}')
+if expect_runtime and expect_runtime not in runtime_types:
+    raise SystemExit(f'expected runtimeType {expect_runtime}, observed {sorted(runtime_types)}')
+missing_roles = sorted(expect_roles - all_roles)
+if missing_roles:
+    raise SystemExit(f'missing expected roles {missing_roles}, observed {sorted(all_roles)}')
+if expect_sandbox and expect_sandbox not in sandboxes:
+    raise SystemExit(f'expected sandbox {expect_sandbox}, observed {sandboxes}')
 print(json.dumps({
     'reports': len(reports),
     'events': sum(len(report.get('events') or []) for report in reports),
-    'sandboxes': [report.get('sandboxId') or report.get('criSandboxId') for report in reports],
+    'sandboxes': sandboxes,
+    'runtimeTypes': sorted(runtime_types),
+    'roles': sorted(all_roles),
 }, separators=(',', ':')))
 PY
 }
