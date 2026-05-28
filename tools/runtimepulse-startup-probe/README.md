@@ -166,7 +166,9 @@ Limitations:
   CNI path uses the standard `CNI_CONTAINERID` and `CNI_ARGS`
   `K8S_POD_INFRA_CONTAINER_ID` values; set `EXPECT_CNI_CONTAINER_ID=true` in the
   validation helper to assert that each report has a CNI plugin event tied to
-  the same sandbox id. RunPodSandbox uprobe events that do not yet expose the
-  request sandbox identity are still joined only when the sandbox event window is
-  unambiguous; deeper request-object decoding should make the CRI entry
-  correlation exact in a later native profile.
+  the same sandbox id. RunPodSandbox uprobes on amd64 try to decode the CRI
+  request pointer and attach `k8s.namespace`, `k8s.pod`, `k8s.pod_uid`, and
+  `cri.runtime_handler` directly to the CRI span. Containerd CNI setup uprobes
+  that do not expose request identity are backfilled from the CNI env identity
+  only when there is a single plausible CNI candidate; otherwise they remain
+  pending and are reported through the pending-go-uprobe quality counters.

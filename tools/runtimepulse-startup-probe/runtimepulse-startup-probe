@@ -547,13 +547,14 @@ class GoUprobeObservation:
     binary: str
     observed_at: str
     timestamp_ns: int = 0
+    metadata: dict[str, str] = field(default_factory=dict)
 
     @property
     def request_id(self) -> str:
         return f"go-uprobe-{self.pid}-{self.tid}-{sanitize_id(self.function)}-{sanitize_id(self.symbol)}"
 
 
-def parse_go_uprobe_line(line: str) -> tuple[str, GoUprobeObservation] | None:
+def parse_go_uprobe_line(line: str, metadata: dict[str, str] | None = None) -> tuple[str, GoUprobeObservation] | None:
     parts = line.rstrip("\n").split("\t")
     if len(parts) < 8 or parts[0] not in {"RP_GO_UPROBE_ENTER", "RP_GO_UPROBE_EXIT"}:
         return None
@@ -574,7 +575,30 @@ def parse_go_uprobe_line(line: str) -> tuple[str, GoUprobeObservation] | None:
         binary=parts[7],
         observed_at=observed_at,
         timestamp_ns=timestamp_ns,
+        metadata=dict(metadata or {}),
     )
+
+
+def parse_go_uprobe_meta_line(line: str) -> tuple[tuple[int, int], str, str] | None:
+    parts = line.rstrip("\n").split("\t", 8)
+    if len(parts) < 9 or parts[0] != "RP_GO_UPROBE_META":
+        return None
+    try:
+        pid = int(parts[2])
+        tid = int(parts[3])
+    except ValueError:
+        return None
+    field = parts[7].strip()
+    value = parts[8].strip()
+    if not field or not value:
+        return None
+    return (pid, tid), field, value
+
+
+def metadata_stable_sandbox_id(metadata: dict[str, str]) -> str:
+    namespace = metadata.get("k8s.namespace", "")
+    pod = metadata.get("k8s.pod", "")
+    return stable_kubernetes_sandbox_id(namespace, pod, "pod") if namespace and pod else ""
 
 
 def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type: str, sandbox_id: str = "", cri_sandbox_id: str = "") -> dict[str, object]:
@@ -589,6 +613,16 @@ def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type
         "uprobe.binary": obs.binary,
         "process.thread_id": obs.tid,
     }
+    request_metadata = obs.metadata if obs.function == "RunPodSandbox" else {}
+    for key, value in request_metadata.items():
+        if value:
+            attributes[key] = value
+    stable_id = metadata_stable_sandbox_id(request_metadata)
+    if stable_id:
+        attributes["startup.stable_sandbox_id"] = stable_id
+        attributes["startup.probe.req_identity"] = "runpod-request"
+    if request_metadata.get("cri.runtime_handler"):
+        attributes["cri.runtime_handler"] = request_metadata["cri.runtime_handler"]
     span_name = go_uprobe_span_name(obs.function)
     event = {
         "eventType": event_type,
@@ -1049,6 +1083,7 @@ def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str
 def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, default_runtime_type: str, forced_sandbox_id: str, namespaces: set[str] | None = None) -> tuple[list[dict[str, object]], dict[str, float], str, str, str]:
     pending: dict[int, ExecObservation] = {}
     pending_go: dict[str, GoUprobeObservation] = {}
+    go_meta_by_thread: dict[tuple[int, int], dict[str, str]] = {}
     events: list[dict[str, object]] = []
     runtime_type = default_runtime_type or "unknown"
     sandbox_id = forced_sandbox_id
@@ -1057,8 +1092,21 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
 
     for raw in lines:
         now = utc_now()
+        if raw.startswith("RP_GO_UPROBE_META\t"):
+            parsed_meta = parse_go_uprobe_meta_line(raw)
+            if parsed_meta:
+                thread_key, field, value = parsed_meta
+                go_meta_by_thread.setdefault(thread_key, {})[field] = value
+            continue
         if raw.startswith("RP_GO_UPROBE_ENTER\t") or raw.startswith("RP_GO_UPROBE_EXIT\t"):
-            parsed_go = parse_go_uprobe_line(raw)
+            parsed_peek = raw.rstrip("\n").split("\t")
+            meta_key = None
+            if len(parsed_peek) >= 4:
+                try:
+                    meta_key = (int(parsed_peek[2]), int(parsed_peek[3]))
+                except ValueError:
+                    meta_key = None
+            parsed_go = parse_go_uprobe_line(raw, go_meta_by_thread.get(meta_key or (-1, -1), {}))
             if not parsed_go:
                 continue
             event_type, obs = parsed_go
@@ -1116,6 +1164,7 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
 
     events = correlate_cni_netns_events(events)
     events = correlate_oci_bundle_metadata_events(events)
+    events = correlate_containerd_go_uprobes_by_cni_identity(events)
     events = correlate_go_uprobe_events(events)
     sandbox_id = first_event_value(events, "sandboxId", "criSandboxId", "containerdId") or sandbox_id
     cri_sandbox_id = first_event_value(events, "criSandboxId", "sandboxId", "containerdId") or cri_sandbox_id
@@ -1150,6 +1199,15 @@ def report_time_window_for_events(events: list[dict[str, object]]) -> tuple[str,
 def is_window_correlated_go_uprobe(event: dict[str, object]) -> bool:
     attrs = event.get("attributes") or {}
     return isinstance(attrs, dict) and attrs.get("startup.probe.backend") == "bpftrace-go-uprobe"
+
+
+def is_pending_window_go_uprobe(event: dict[str, object]) -> bool:
+    attrs = event.get("attributes") or {}
+    return (
+        isinstance(attrs, dict)
+        and attrs.get("startup.probe.backend") == "bpftrace-go-uprobe"
+        and attrs.get("startup.probe.correlation") == "pending-time-window"
+    )
 
 
 def int_event_value(event: dict[str, object], key: str) -> int | None:
@@ -1209,6 +1267,166 @@ def assign_event_to_sandbox(
     updated["attributes"] = attrs
     return updated
 
+
+
+def cni_event_identity(event: dict[str, object]) -> dict[str, str]:
+    if str(event.get("role") or "").lower() != "cni":
+        return {}
+    attrs = event.get("attributes") or {}
+    attrs = attrs if isinstance(attrs, dict) else {}
+    env = event.get("env") or {}
+    env = env if isinstance(env, dict) else {}
+    cni_args = parse_cni_args(str(env.get("CNI_ARGS") or ""))
+    sandbox_id = (
+        str(event.get("sandboxId") or "").strip()
+        or str(event.get("criSandboxId") or "").strip()
+        or str(attrs.get("cni.container_id") or "").strip()
+        or str(env.get("CNI_CONTAINERID") or "").strip()
+        or str(cni_args.get("K8S_POD_INFRA_CONTAINER_ID") or "").strip()
+    )
+    if not sandbox_id:
+        return {}
+    raw_cri_id = str(event.get("criSandboxId") or sandbox_id)
+    raw_containerd_id = str(event.get("containerdId") or sandbox_id)
+    identity = {
+        "sandboxId": sandbox_id,
+        "criSandboxId": raw_cri_id,
+        "containerdId": raw_containerd_id,
+        "runtimeType": str(event.get("runtimeType") or "unknown"),
+    }
+    for arg_key, out_key in (
+        ("K8S_POD_NAMESPACE", "k8s.namespace"),
+        ("K8S_POD_NAME", "k8s.pod"),
+        ("K8S_POD_UID", "k8s.pod_uid"),
+        ("K8S_POD_INFRA_CONTAINER_ID", "cni.args.K8S_POD_INFRA_CONTAINER_ID"),
+    ):
+        value = str(attrs.get(f"cni.args.{arg_key}") or cni_args.get(arg_key) or "").strip()
+        if value:
+            identity[out_key] = value
+    stable_id = stable_kubernetes_sandbox_id(identity.get("k8s.namespace", ""), identity.get("k8s.pod", ""), "pod") if identity.get("k8s.namespace") and identity.get("k8s.pod") else ""
+    if stable_id:
+        identity["startup.stable_sandbox_id"] = stable_id
+    if str(attrs.get("cni.container_id") or "").strip():
+        identity["cni.container_id"] = str(attrs.get("cni.container_id"))
+    elif str(env.get("CNI_CONTAINERID") or "").strip():
+        identity["cni.container_id"] = str(env.get("CNI_CONTAINERID"))
+    return identity
+
+
+def correlate_containerd_go_uprobes_by_cni_identity(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Annotate pending containerd CRI/CNI uprobes from CNI env identity.
+
+    CNI plugin execs carry stable CRI identity via CNI_CONTAINERID and
+    CNI_ARGS.K8S_POD_INFRA_CONTAINER_ID.  Under concurrent RunPodSandbox calls,
+    bare containerd Go uprobes only have pid/tid/function.  This pass only
+    assigns them to a sandbox when a CNI identity is the single plausible match
+    for the event timestamp, avoiding ambiguous time-window attribution.
+    """
+    identities: list[tuple[datetime, dict[str, str]]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in events:
+        identity = cni_event_identity(event)
+        if not identity:
+            continue
+        ts = event_time(event)
+        if not ts:
+            continue
+        key = (identity.get("sandboxId", ""), identity.get("cni.container_id", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        identities.append((ts, identity))
+    if not identities:
+        return events
+
+    result: list[dict[str, object]] = []
+    for event in events:
+        if not is_pending_window_go_uprobe(event) or event_sandbox_key(event) != "unknown":
+            result.append(event)
+            continue
+        role = str(event.get("role") or "").lower()
+        if role not in {"cri", "cni"}:
+            result.append(event)
+            continue
+        attrs = event.get("attributes") or {}
+        attrs = attrs if isinstance(attrs, dict) else {}
+        if role == "cri" and attrs.get("startup.probe.req_identity") == "runpod-request":
+            stable_id = str(attrs.get("startup.stable_sandbox_id") or "").strip()
+            k8s_namespace = str(attrs.get("k8s.namespace") or "").strip()
+            k8s_pod = str(attrs.get("k8s.pod") or "").strip()
+            k8s_uid = str(attrs.get("k8s.pod_uid") or "").strip()
+            request_matches = []
+            for _cni_ts, identity in identities:
+                if stable_id and identity.get("startup.stable_sandbox_id") == stable_id:
+                    request_matches.append(identity)
+                    continue
+                if (
+                    k8s_namespace
+                    and k8s_pod
+                    and identity.get("k8s.namespace") == k8s_namespace
+                    and identity.get("k8s.pod") == k8s_pod
+                    and (not k8s_uid or identity.get("k8s.pod_uid") == k8s_uid)
+                ):
+                    request_matches.append(identity)
+            raw_sandbox_ids = {match.get("sandboxId", "") for match in request_matches}
+            raw_sandbox_ids.discard("")
+            if len(raw_sandbox_ids) == 1:
+                identity = request_matches[0]
+                assigned = assign_event_to_sandbox(
+                    event,
+                    identity["sandboxId"],
+                    identity.get("criSandboxId", identity["sandboxId"]),
+                    identity.get("containerdId", identity.get("criSandboxId", identity["sandboxId"])),
+                    identity.get("runtimeType", str(event.get("runtimeType") or "unknown")),
+                    "runpod-request-cni-env",
+                )
+                assigned_attrs = dict(assigned.get("attributes") or {})
+                for key in ("k8s.namespace", "k8s.pod", "k8s.pod_uid", "startup.stable_sandbox_id", "cri.runtime_handler", "cni.container_id", "cni.args.K8S_POD_INFRA_CONTAINER_ID"):
+                    if attrs.get(key):
+                        assigned_attrs.setdefault(key, attrs[key])
+                    if identity.get(key):
+                        assigned_attrs.setdefault(key, identity[key])
+                assigned_attrs["startup.probe.req_identity"] = "runpod-request"
+                assigned_attrs["startup.probe.correlation_detail"] = "runpod-request-matched-cni-args"
+                assigned["attributes"] = assigned_attrs
+                result.append(assigned)
+                continue
+        ts = event_time(event)
+        if not ts:
+            result.append(event)
+            continue
+        # RunPodSandbox starts before CNI ADD; CNISetup can be just before or
+        # during plugin execution.  Keep a narrow forward window so two
+        # concurrent pod starts only assign when one CNI identity is plausible.
+        max_before = timedelta(seconds=15 if role == "cri" else 5)
+        max_after = timedelta(seconds=1)
+        candidates: list[tuple[float, dict[str, str]]] = []
+        for cni_ts, identity in identities:
+            delta = (cni_ts - ts).total_seconds()
+            if -max_after.total_seconds() <= delta <= max_before.total_seconds():
+                candidates.append((abs(delta), identity))
+        sandbox_ids = {candidate[1].get("sandboxId", "") for candidate in candidates}
+        sandbox_ids.discard("")
+        if len(sandbox_ids) != 1:
+            result.append(event)
+            continue
+        _distance, identity = sorted(candidates, key=lambda item: item[0])[0]
+        assigned = assign_event_to_sandbox(
+            event,
+            identity["sandboxId"],
+            identity.get("criSandboxId", identity["sandboxId"]),
+            identity.get("containerdId", identity.get("criSandboxId", identity["sandboxId"])),
+            identity.get("runtimeType", str(event.get("runtimeType") or "unknown")),
+            "cni-env",
+        )
+        attrs = dict(assigned.get("attributes") or {})
+        for key in ("k8s.namespace", "k8s.pod", "k8s.pod_uid", "startup.stable_sandbox_id", "cni.container_id", "cni.args.K8S_POD_INFRA_CONTAINER_ID"):
+            if identity.get(key):
+                attrs.setdefault(key, identity[key])
+        attrs["startup.probe.correlation_detail"] = "cni-containerid-single-candidate"
+        assigned["attributes"] = attrs
+        result.append(assigned)
+    return result
 
 def correlate_cni_netns_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
     """Join CNI/helper execs by netns inode before falling back to id/window joins.
@@ -1325,7 +1543,7 @@ def runtime_boundary_go_uprobe(event: dict[str, object]) -> bool:
 
 
 def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
-    sandbox_events = [event for event in events if not is_window_correlated_go_uprobe(event) and event_sandbox_key(event) != "unknown"]
+    sandbox_events = [event for event in events if not is_pending_window_go_uprobe(event) and event_sandbox_key(event) != "unknown"]
     if not sandbox_events:
         return events
     windows: dict[str, tuple[datetime, datetime, str]] = {}
@@ -1361,7 +1579,7 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
         return events
     result: list[dict[str, object]] = []
     for event in events:
-        if not is_window_correlated_go_uprobe(event) or event_sandbox_key(event) != "unknown":
+        if not is_pending_window_go_uprobe(event) or event_sandbox_key(event) != "unknown":
             result.append(event)
             continue
 
@@ -1441,6 +1659,7 @@ def inherit_parent_context(obs: ExecObservation, parent: ExecObservation) -> Non
             "cni.netns.ino",
             "cni.netns.id",
             "cni.netns.stat_error",
+            "cni.args.K8S_POD_INFRA_CONTAINER_ID",
             "cni.args.K8S_POD_NAMESPACE",
             "cni.args.K8S_POD_NAME",
             "cni.args.K8S_POD_UID",
@@ -1485,11 +1704,114 @@ def summarize_events(events: list[dict[str, object]]) -> dict[str, float]:
 
 
 def build_bcc_go_uprobe_program(go_uprobes: list[GoUprobeSpec]) -> str:
-    functions = ["#include <uapi/linux/ptrace.h>\n"]
-    for idx, _spec in enumerate(go_uprobes):
+    functions = ["""
+#include <uapi/linux/ptrace.h>
+#include <linux/sched.h>
+#ifndef PT_REGS_DI
+#define PT_REGS_DI(ctx) ((ctx)->di)
+#endif
+#ifndef PT_REGS_CX
+#define PT_REGS_CX(ctx) ((ctx)->cx)
+#endif
+
+static int read_go_string(char *dst, int dst_len, void *data, u64 len) {
+    if (!data || len == 0) {
+        return 0;
+    }
+    int size = len < (u64)(dst_len - 1) ? (int)len : dst_len - 1;
+    if (size <= 0) {
+        return 0;
+    }
+    bpf_probe_read_user(dst, size, data);
+    dst[size] = 0;
+    return size;
+}
+
+static int emit_runpod_request_metadata_from_req(struct pt_regs *ctx, int idx, void *req) {
+#ifdef __x86_64__
+    u64 id = bpf_get_current_pid_tgid();
+    u32 pid = id >> 32;
+    u32 tid = (u32)id;
+    u64 ts = bpf_ktime_get_ns();
+    if (!req) {
+        return 0;
+    }
+    void *config = 0;
+    bpf_probe_read_user(&config, sizeof(config), req + 8);
+    if (!config) {
+        return 0;
+    }
+    void *metadata = 0;
+    bpf_probe_read_user(&metadata, sizeof(metadata), config + 8);
+    if (metadata) {
+        void *name_data = 0;
+        u64 name_len = 0;
+        void *uid_data = 0;
+        u64 uid_len = 0;
+        void *namespace_data = 0;
+        u64 namespace_len = 0;
+        char value[96];
+        bpf_probe_read_user(&name_data, sizeof(name_data), metadata + 8);
+        bpf_probe_read_user(&name_len, sizeof(name_len), metadata + 16);
+        if (read_go_string(value, sizeof(value), name_data, name_len) > 0) {
+            bpf_trace_printk("RP_GO_UPROBE_META %u %u k8s.pod %s\\n", pid, tid, value);
+        }
+        bpf_probe_read_user(&uid_data, sizeof(uid_data), metadata + 24);
+        bpf_probe_read_user(&uid_len, sizeof(uid_len), metadata + 32);
+        if (read_go_string(value, sizeof(value), uid_data, uid_len) > 0) {
+            bpf_trace_printk("RP_GO_UPROBE_META %u %u k8s.pod_uid %s\\n", pid, tid, value);
+        }
+        bpf_probe_read_user(&namespace_data, sizeof(namespace_data), metadata + 40);
+        bpf_probe_read_user(&namespace_len, sizeof(namespace_len), metadata + 48);
+        if (read_go_string(value, sizeof(value), namespace_data, namespace_len) > 0) {
+            bpf_trace_printk("RP_GO_UPROBE_META %u %u k8s.namespace %s\\n", pid, tid, value);
+        }
+    }
+    void *runtime_data = 0;
+    u64 runtime_len = 0;
+    char runtime_value[64];
+    bpf_probe_read_user(&runtime_data, sizeof(runtime_data), req + 16);
+    bpf_probe_read_user(&runtime_len, sizeof(runtime_len), req + 24);
+    if (read_go_string(runtime_value, sizeof(runtime_value), runtime_data, runtime_len) > 0) {
+        bpf_trace_printk("RP_GO_UPROBE_META %u %u cri.runtime_handler %s\\n", pid, tid, runtime_value);
+    }
+#endif
+    return 0;
+}
+
+static int emit_runpod_request_metadata_di(struct pt_regs *ctx, int idx) {
+#ifdef __x86_64__
+    return emit_runpod_request_metadata_from_req(ctx, idx, (void *)PT_REGS_DI(ctx));
+#else
+    return 0;
+#endif
+}
+
+static int emit_runpod_request_metadata_grpc_handler(struct pt_regs *ctx, int idx) {
+#ifdef __x86_64__
+    void *dec = (void *)PT_REGS_DI(ctx);
+    if (!dec) {
+        return 0;
+    }
+    void *req = 0;
+    bpf_probe_read_user(&req, sizeof(req), dec + 8);
+    return emit_runpod_request_metadata_from_req(ctx, idx, req);
+#else
+    return 0;
+#endif
+}
+"""]
+    for idx, spec in enumerate(go_uprobes):
+        if spec.function == "RunPodSandbox" and "_RuntimeService_RunPodSandbox_Handler" in spec.symbol:
+            meta_call = f"emit_runpod_request_metadata_grpc_handler(ctx, {idx});"
+        elif spec.function == "RunPodSandbox":
+            meta_call = f"emit_runpod_request_metadata_di(ctx, {idx});"
+        else:
+            meta_call = ""
         functions.append(f"""
 int trace_entry_{idx}(struct pt_regs *ctx) {{
     u64 id = bpf_get_current_pid_tgid();
+    {meta_call}
     bpf_trace_printk("RP_GO_UPROBE_ENTER {idx} %llu %u %u\\n", bpf_ktime_get_ns(), id >> 32, (u32)id);
     return 0;
 }}
@@ -1501,7 +1823,6 @@ int trace_return_{idx}(struct pt_regs *ctx) {{
 }}
 """)
     return "\n".join(functions)
-
 
 def attach_bcc_go_uprobes(go_uprobes: list[GoUprobeSpec]):
     if not go_uprobes:
@@ -1530,6 +1851,7 @@ def read_bcc_go_uprobe_lines(bpf, symbol_by_index: dict[int, GoUprobeSpec]) -> l
     trace = bpf.trace_open(nonblocking=True)
     lines: list[str] = []
     pattern = re.compile(r"^\s*(?P<comm>.*?)\s*[-]\s*\d+\s+\[.*?\]\s+[^:]+:\s+(?:(?P<ip>0x[0-9a-fA-F]+):\s+)?(?:bpf_trace_printk:\s+)?(?P<kind>RP_GO_UPROBE_(?:ENTER|EXIT))\s+(?P<idx>\d+)\s+(?P<ts>\d+)\s+(?P<pid>\d+)\s+(?P<tid>\d+)")
+    meta_pattern = re.compile(r"^\s*(?P<comm>.*?)\s*[-]\s*\d+\s+\[.*?\]\s+[^:]+:\s+(?:(?P<ip>0x[0-9a-fA-F]+):\s+)?(?:bpf_trace_printk:\s+)?RP_GO_UPROBE_META\s+(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<field>\S+)\s+(?P<value>.*)$")
     monotonic_epoch_ns = time.time_ns() - time.monotonic_ns()
     while True:
         try:
@@ -1539,6 +1861,18 @@ def read_bcc_go_uprobe_lines(bpf, symbol_by_index: dict[int, GoUprobeSpec]) -> l
         if not raw:
             break
         text = raw.decode("utf-8", "replace").strip()
+        meta_match = meta_pattern.match(text)
+        if meta_match:
+            # Metadata lines intentionally omit the symbol index because Linux
+            # trace_printk only reliably formats three dynamic values.  Attach
+            # them by pid/tid to the following RunPodSandbox entry.
+            timestamp_ns = time.time_ns()
+            lines.append(
+                f"RP_GO_UPROBE_META\t{timestamp_ns}\t{meta_match.group('pid')}\t{meta_match.group('tid')}\t"
+                f"{meta_match.group('comm').strip()}\tRunPodSandbox\tunknown\t"
+                f"{meta_match.group('field')}\t{meta_match.group('value').strip()}\n"
+            )
+            continue
         match = pattern.match(text)
         if not match:
             continue
@@ -1615,7 +1949,6 @@ def event_sandbox_key(event: dict[str, object]) -> str:
             return value
     return "unknown"
 
-
 def runtime_type_from_events(events: list[dict[str, object]], default: str) -> str:
     runtime_type = default or "unknown"
     for event in events:
@@ -1630,6 +1963,7 @@ def first_event_value(events: list[dict[str, object]], *keys: str) -> str:
             if value:
                 return value
     return ""
+
 
 
 def report_time_window(events: list[dict[str, object]]) -> tuple[str, str, float | None]:
@@ -1740,7 +2074,7 @@ def grouped_reports(
     groups: dict[str, list[dict[str, object]]] = {}
     pending_go_events: list[dict[str, object]] = []
     for event in events:
-        if event_sandbox_key(event) == "unknown" and is_window_correlated_go_uprobe(event):
+        if event_sandbox_key(event) == "unknown" and is_pending_window_go_uprobe(event):
             pending_go_events.append(event)
             continue
         groups.setdefault(event_sandbox_key(event), []).append(event)
@@ -1887,7 +2221,6 @@ def self_test() -> None:
     ]
     assert all(e.get("cniNetnsId") for e in cni_events)
     assert any((e.get("attributes") or {}).get("startup.phase") == "containerd-task" for e in events if e.get("role") == "oci")
-
     multi_lines = [
         "RP_EXEC_ENTER\t200\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
         "RP_PROC_EXIT\t200\tbridge\n",
@@ -1906,6 +2239,34 @@ def self_test() -> None:
     assert {report["sandboxId"] for report in reports} == {"sandbox-a", "sandbox-b"}
     assert all(report["summary"]["observedCniExecCount"] == 1.0 for report in reports)
     assert all(report["startTime"] <= report["endTime"] for report in reports)
+
+    request_meta_lines = [
+        "RP_GO_UPROBE_META\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\tk8s.namespace\tdefault\n",
+        "RP_GO_UPROBE_META\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\tk8s.pod\trequest-demo\n",
+        "RP_GO_UPROBE_META\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\tk8s.pod_uid\trequest-demo-uid\n",
+        "RP_GO_UPROBE_META\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\tcri.runtime_handler\trunc\n",
+        "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
+        "RP_EXEC_ENTER\t210\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=k8s-default-request-demo-pod\tCNI_ARGS=K8S_POD_INFRA_CONTAINER_ID=k8s-default-request-demo-pod;K8S_POD_UID=request-demo-uid;K8S_POD_NAMESPACE=default;K8S_POD_NAME=request-demo\t\n",
+    ]
+    request_meta_events, _request_meta_summary, request_meta_runtime, _request_meta_sandbox, _request_meta_cri = collect_from_stream(request_meta_lines, 6, 4, "runc", "", None)
+    request_meta_reports = grouped_reports(request_meta_events, request_meta_runtime, "", "", "self-test")
+    assert len(request_meta_reports) == 1
+    assert request_meta_reports[0]["sandboxId"] == "k8s-default-request-demo-pod"
+    request_meta_event = next(event for event in request_meta_reports[0]["events"] if event.get("function") == "RunPodSandbox")
+    assert request_meta_event["attributes"]["startup.probe.req_identity"] == "runpod-request"
+    assert request_meta_event["attributes"]["k8s.pod"] == "request-demo"
+
+    ambiguous_go_lines = [
+        "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
+        "RP_EXEC_ENTER\t210\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
+        "RP_EXEC_ENTER\t211\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-b\t\n",
+    ]
+    ambiguous_events, _ambiguous_summary, ambiguous_runtime, _ambiguous_sandbox, _ambiguous_cri = collect_from_stream(ambiguous_go_lines, 6, 4, "runc", "", None)
+    ambiguous_reports = grouped_reports(ambiguous_events, ambiguous_runtime, "", "", "self-test")
+    assert len(ambiguous_reports) == 2
+    assert all(report["summary"].get("assignedPendingGoUprobeEventCount") == 0.0 for report in ambiguous_reports)
+    assert all(report["summary"].get("unassignedPendingGoUprobeEventCount") == 1.0 for report in ambiguous_reports)
+
     orphan_runtime_lines = [
         "RP_GO_UPROBE_ENTER\t1779940000160000000\t999\t1000\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
         "RP_EXEC_ENTER\t300\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-c\t\t\n",
