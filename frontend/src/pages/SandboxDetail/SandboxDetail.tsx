@@ -365,7 +365,7 @@ function StartupCallchainPanel({
   const phases = startupCallchainPhases(metrics, spans);
   const totalDuration = startupCallchainTotal(sandbox, metrics, spans);
   const maxDuration = Math.max(...phases.items.map((phase) => phase.durationMs), 1);
-  const hasCallchainData = phases.items.some((phase) => phase.durationMs > 0 || phase.count > 0);
+  const hasCallchainData = phases.items.some((phase) => phase.durationMs > 0 || phase.count > 0) || phases.processBinaries.length > 0;
 
   if (!hasCallchainData) return null;
 
@@ -382,24 +382,24 @@ function StartupCallchainPanel({
         </div>
       </div>
       {phases.cniPlugins.length > 0 && (
-        <div className="cni-plugin-breakdown">
-          <div className="cni-plugin-breakdown-header">
-            <strong>CNI plugin binaries</strong>
-            <span>{phases.cniPlugins.length} observed</span>
-          </div>
-          <div className="cni-plugin-list">
-            {phases.cniPlugins.map((plugin) => (
-              <article className="cni-plugin-row" key={plugin.binary}>
-                <div>
-                  <strong>{plugin.binary}</strong>
-                  <span>{plugin.count} calls · {formatRatio(ratio(plugin.durationMs, Math.max(totalDuration, 1)))} of startup</span>
-                </div>
-                <div className="cni-plugin-track"><i style={{ width: `${Math.max(plugin.durationMs > 0 ? 7 : 0, plugin.durationMs / Math.max(phases.cniMaxDurationMs, 1) * 100)}%` }} /></div>
-                <em>{formatDuration(plugin.durationMs)}</em>
-              </article>
-            ))}
-          </div>
-        </div>
+        <StartupBreakdownList
+          title="CNI plugin binaries"
+          countLabel={`${phases.cniPlugins.length} observed`}
+          items={phases.cniPlugins}
+          maxDurationMs={phases.cniMaxDurationMs}
+          totalDurationMs={totalDuration}
+          tone="cni"
+        />
+      )}
+      {phases.processBinaries.length > 0 && (
+        <StartupBreakdownList
+          title="All process binaries"
+          countLabel={`${phases.processBinaries.length} observed`}
+          items={phases.processBinaries}
+          maxDurationMs={phases.processMaxDurationMs}
+          totalDurationMs={totalDuration}
+          tone="process"
+        />
       )}
       <div className="startup-callchain-grid">
         {phases.items.map((phase) => (
@@ -427,6 +427,48 @@ function StartupCallchainPanel({
   );
 }
 
+type StartupBreakdownItem = { binary: string; count: number; durationMs: number; roles?: string[] };
+
+function StartupBreakdownList({
+  title,
+  countLabel,
+  items,
+  maxDurationMs,
+  totalDurationMs,
+  tone,
+}: {
+  title: string;
+  countLabel: string;
+  items: StartupBreakdownItem[];
+  maxDurationMs: number;
+  totalDurationMs: number;
+  tone: 'cni' | 'process';
+}) {
+  return (
+    <div className={`startup-breakdown ${tone}`}>
+      <div className="startup-breakdown-header">
+        <strong>{title}</strong>
+        <span>{countLabel}</span>
+      </div>
+      <div className="startup-breakdown-list">
+        {items.slice(0, 8).map((item) => (
+          <article className="startup-breakdown-row" key={item.binary}>
+            <div>
+              <strong>{item.binary}</strong>
+              <span>
+                {item.count} calls · {formatRatio(ratio(item.durationMs, Math.max(totalDurationMs, 1)))} of startup
+                {item.roles?.length ? ` · ${item.roles.join(', ')}` : ''}
+              </span>
+            </div>
+            <div className="startup-breakdown-track"><i style={{ width: `${Math.max(item.durationMs > 0 ? 7 : 0, item.durationMs / Math.max(maxDurationMs, 1) * 100)}%` }} /></div>
+            <em>{formatDuration(item.durationMs)}</em>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
   const definitions = [
     { key: 'cni', label: 'CNI plugin', durationMetric: 'sandbox.startup.cni_duration_ms', countMetric: 'sandbox.startup.cni_plugin_count', tone: 'network', patterns: [/^cni\./i] },
@@ -437,6 +479,7 @@ function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
   ];
 
   const cniPlugins = cniPluginMetrics(metrics);
+  const processBinaries = processBinaryMetrics(metrics);
   const items = definitions.map((definition) => {
     const relatedSpans = definition.key === 'cni'
       ? spans.filter(isCniStartupSpan)
@@ -455,12 +498,14 @@ function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
   return {
     items,
     cniPlugins,
+    processBinaries,
     cniMaxDurationMs: Math.max(...cniPlugins.map((plugin) => plugin.durationMs), 1),
+    processMaxDurationMs: Math.max(...processBinaries.map((binary) => binary.durationMs), 1),
   };
 }
 
-function cniPluginMetrics(metrics: MetricSeries[]) {
-  const plugins = new Map<string, { binary: string; count: number; durationMs: number }>();
+function cniPluginMetrics(metrics: MetricSeries[]): StartupBreakdownItem[] {
+  const plugins = new Map<string, StartupBreakdownItem>();
 
   for (const series of metrics) {
     const match = series.name.match(/^sandbox\.startup\.cni\.plugin\.(.+)_(count|duration_ms)$/);
@@ -475,6 +520,27 @@ function cniPluginMetrics(metrics: MetricSeries[]) {
   }
 
   return Array.from(plugins.values()).sort((left, right) => right.durationMs - left.durationMs || right.count - left.count);
+}
+
+function processBinaryMetrics(metrics: MetricSeries[]): StartupBreakdownItem[] {
+  const binaries = new Map<string, StartupBreakdownItem>();
+
+  for (const series of metrics) {
+    const match = series.name.match(/^sandbox\.startup\.process\.binary\.(.+)_(count|duration_ms)$/);
+    if (!match) continue;
+
+    const [, metricBinary, kind] = match;
+    const attrBinary = stringAttribute(series.attributes, 'process.binary.name');
+    const binary = attrBinary ?? metricBinary;
+    const candidate = binaries.get(binary) ?? { binary, count: 0, durationMs: 0, roles: stringArrayAttribute(series.attributes, 'process.roles') };
+    const value = latestMetricValue(series);
+    if (kind === 'count') candidate.count = Math.max(candidate.count, value);
+    if (kind === 'duration_ms') candidate.durationMs = Math.max(candidate.durationMs, value);
+    candidate.roles = uniqueStrings([...(candidate.roles ?? []), ...stringArrayAttribute(series.attributes, 'process.roles')]);
+    binaries.set(binary, candidate);
+  }
+
+  return Array.from(binaries.values()).sort((left, right) => right.durationMs - left.durationMs || right.count - left.count);
 }
 
 function isCniStartupSpan(span: TraceSpan) {
@@ -698,6 +764,17 @@ function uniqueStrings(values: Array<string | undefined>): string[] {
 function stringAttribute(attributes: Record<string, unknown> | undefined, name: string) {
   const value = attributes?.[name];
   return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function stringArrayAttribute(attributes: Record<string, unknown> | undefined, name: string): string[] {
+  const value = attributes?.[name];
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()));
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return value.split(',').map((item) => item.trim()).filter(Boolean);
+  }
+  return [];
 }
 
 function MetricPanelToolbar({ size, onSizeChange }: { size: MetricPanelSize; onSizeChange: (size: MetricPanelSize) => void }) {

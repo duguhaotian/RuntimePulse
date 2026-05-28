@@ -3688,7 +3688,7 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   gap: 10px;
 }
 
-.cni-plugin-breakdown {
+.startup-breakdown {
   display: grid;
   gap: 9px;
   border: 1px solid rgba(45, 212, 191, 0.18);
@@ -3697,31 +3697,31 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   padding: 11px;
 }
 
-.cni-plugin-breakdown-header {
+.startup-breakdown-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.cni-plugin-breakdown-header strong {
+.startup-breakdown-header strong {
   color: #e6fffb;
   font-size: 13px;
 }
 
-.cni-plugin-breakdown-header span {
+.startup-breakdown-header span {
   color: var(--muted-2);
   font-size: 11px;
   font-weight: 850;
   text-transform: uppercase;
 }
 
-.cni-plugin-list {
+.startup-breakdown-list {
   display: grid;
   gap: 8px;
 }
 
-.cni-plugin-row {
+.startup-breakdown-row {
   display: grid;
   grid-template-columns: minmax(120px, 0.55fr) minmax(0, 1fr) auto;
   align-items: center;
@@ -3729,32 +3729,41 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   min-width: 0;
 }
 
-.cni-plugin-row strong {
+.startup-breakdown-row strong {
   display: block;
   overflow-wrap: anywhere;
   color: #f8fafc;
   font-size: 13px;
 }
 
-.cni-plugin-row span,
-.cni-plugin-row em {
+.startup-breakdown-row span,
+.startup-breakdown-row em {
   color: var(--muted);
   font-size: 11px;
   font-style: normal;
 }
 
-.cni-plugin-track {
+.startup-breakdown-track {
   height: 8px;
   overflow: hidden;
   border-radius: 999px;
   background: rgba(148, 163, 184, 0.12);
 }
 
-.cni-plugin-track i {
+.startup-breakdown-track i {
   display: block;
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, rgba(45, 212, 191, 0.95), rgba(75, 163, 255, 0.78));
+}
+
+.startup-breakdown.process {
+  border-color: rgba(246, 195, 68, 0.18);
+  background: rgba(246, 195, 68, 0.04);
+}
+
+.startup-breakdown.process .startup-breakdown-track i {
+  background: linear-gradient(90deg, rgba(246, 195, 68, 0.95), rgba(251, 146, 60, 0.74));
 }
 
 .startup-callchain-card {
@@ -5098,7 +5107,7 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
     grid-template-columns: 1fr;
   }
 
-  .cni-plugin-row {
+  .startup-breakdown-row {
     grid-template-columns: 1fr;
   }
 
