@@ -34,6 +34,7 @@ EXPECT_ANALYSIS="${EXPECT_ANALYSIS:-false}"
 EXPECT_PARENT_LINKS="${EXPECT_PARENT_LINKS:-false}"
 EXPECT_PROCESS_BINARY_METRICS="${EXPECT_PROCESS_BINARY_METRICS:-false}"
 EXPECT_HELPER_BINARY_METRICS="${EXPECT_HELPER_BINARY_METRICS:-false}"
+EXPECT_CNI_CONTAINER_ID="${EXPECT_CNI_CONTAINER_ID:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
@@ -81,6 +82,7 @@ Common env:
   EXPECT_PARENT_LINKS=true     Require at least one non-root trace span parent link.
   EXPECT_PROCESS_BINARY_METRICS=true Require per-process-binary startup metrics.
   EXPECT_HELPER_BINARY_METRICS=true Require helper process-binary metrics.
+  EXPECT_CNI_CONTAINER_ID=true Require CNI_CONTAINERID/CNI_ARGS infra id matches report sandbox id.
   EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
@@ -351,6 +353,7 @@ validate_report_shape() {
   EXPECT_ROLES="$EXPECT_ROLES" \
   EXPECT_SANDBOX_ID="$EXPECT_SANDBOX_ID" \
   CONCURRENT_RUNPODS="$CONCURRENT_RUNPODS" \
+  EXPECT_CNI_CONTAINER_ID="$EXPECT_CNI_CONTAINER_ID" \
   python3 - "$REPORT_PATH" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -358,6 +361,40 @@ expect_runtime = os.environ.get('EXPECT_RUNTIME_TYPE', '').strip().lower()
 expect_roles = {item.strip().lower() for item in os.environ.get('EXPECT_ROLES', '').split(',') if item.strip()}
 expect_sandbox = os.environ.get('EXPECT_SANDBOX_ID', '').strip()
 expected_report_count = int(os.environ.get('CONCURRENT_RUNPODS', '1') or '1')
+expect_cni_container_id = os.environ.get('EXPECT_CNI_CONTAINER_ID', '').lower() == 'true'
+
+def parse_cni_args(value):
+    result = {}
+    for item in str(value or '').split(';'):
+        if '=' not in item:
+            continue
+        key, val = item.split('=', 1)
+        key = key.strip()
+        if key:
+            result[key] = val
+    return result
+
+def cni_identity_candidates(event):
+    candidates = set()
+    for key in ('cniContainerId', 'criSandboxId', 'containerdId', 'sandboxId'):
+        value = str(event.get(key) or '').strip()
+        if value:
+            candidates.add(value)
+    attrs = event.get('attributes') or {}
+    if isinstance(attrs, dict):
+        for key in ('cni.container_id', 'cni.args.K8S_POD_INFRA_CONTAINER_ID'):
+            value = str(attrs.get(key) or '').strip()
+            if value:
+                candidates.add(value)
+    env = event.get('env') or {}
+    if isinstance(env, dict):
+        value = str(env.get('CNI_CONTAINERID') or '').strip()
+        if value:
+            candidates.add(value)
+        infra = parse_cni_args(env.get('CNI_ARGS', '')).get('K8S_POD_INFRA_CONTAINER_ID', '').strip()
+        if infra:
+            candidates.add(infra)
+    return candidates
 with open(path, encoding='utf-8') as handle:
     payload = json.load(handle)
 reports = payload.get('reports') if isinstance(payload, dict) else None
@@ -399,6 +436,22 @@ for idx, report in enumerate(reports):
     runtime_types |= {str(event.get('runtimeType') or '').lower() for event in events if event.get('runtimeType')}
     if not roles & {'cni', 'oci', 'kata', 'helper'}:
         raise SystemExit(f'report {idx} has no startup roles: {sorted(roles)}')
+    if expect_cni_container_id:
+        matching_cni = []
+        mismatched_cni = []
+        for event in events:
+            if str(event.get('role') or '').lower() != 'cni':
+                continue
+            candidates = cni_identity_candidates(event)
+            if sandbox in candidates:
+                matching_cni.append(event)
+            elif candidates:
+                mismatched_cni.append(sorted(candidates))
+        if not matching_cni:
+            raise SystemExit(
+                f'report {idx} sandbox {sandbox} has no CNI event with CNI_CONTAINERID/'
+                f'CNI_ARGS infra id matching sandbox; observed CNI ids {mismatched_cni}'
+            )
 if expected_report_count > 1 and len(set(sandboxes)) != len(sandboxes):
     raise SystemExit(f'concurrent reports contain duplicate sandbox ids: {sandboxes}')
 if expect_runtime and expect_runtime not in runtime_types:
@@ -414,6 +467,7 @@ print(json.dumps({
     'sandboxes': sandboxes,
     'runtimeTypes': sorted(runtime_types),
     'roles': sorted(all_roles),
+    'validatedCniContainerId': expect_cni_container_id,
 }, separators=(',', ':')))
 PY
 }

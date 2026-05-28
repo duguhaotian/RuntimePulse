@@ -102,7 +102,7 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 # start inside the same probe window. Works for runc or Kata by switching
 # RUNTIME_TYPE/CRI_RUNTIME_HANDLER and POD_CONFIG.
 CAPTURE=true VALIDATE_INGEST=true CONCURRENT_RUNPODS=2 \
-EXPECT_PROCESS_BINARY_METRICS=true EXPECT_ROLES=cni,kata \
+EXPECT_PROCESS_BINARY_METRICS=true EXPECT_CNI_CONTAINER_ID=true EXPECT_ROLES=cni,kata \
 RUNTIME_TYPE=kata CRI_RUNTIME_HANDLER=kata \
 ENABLE_GO_UPROBES=true ENABLE_CNI_GO_UPROBES=true ENABLE_RUNTIME_GO_UPROBES=true \
 CONTAINERD_BINARY=/usr/bin/containerd \
@@ -162,7 +162,11 @@ Limitations:
   an opt-in experimental mode until request decoding provides exact end
   attribution without perturbing Go stacks.
 - Concurrent sandbox starts are correlated by stable sandbox ids when those ids
-  are available in CNI env, CNI netns inode id, shim args, or bundle paths.
-  RunPodSandbox uprobe events are still joined by the sandbox event time window;
-  deeper request-object decoding should make that correlation exact in a later
-  native profile.
+  are available in CNI env, CNI netns inode id, shim args, or bundle paths. The
+  CNI path uses the standard `CNI_CONTAINERID` and `CNI_ARGS`
+  `K8S_POD_INFRA_CONTAINER_ID` values; set `EXPECT_CNI_CONTAINER_ID=true` in the
+  validation helper to assert that each report has a CNI plugin event tied to
+  the same sandbox id. RunPodSandbox uprobe events that do not yet expose the
+  request sandbox identity are still joined only when the sandbox event window is
+  unambiguous; deeper request-object decoding should make the CRI entry
+  correlation exact in a later native profile.

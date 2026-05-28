@@ -859,7 +859,7 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
         attributes["cni.ifname"] = env["CNI_IFNAME"]
     if env.get("CNI_PATH"):
         attributes["cni.path"] = env["CNI_PATH"]
-    for key in ("K8S_POD_NAMESPACE", "K8S_POD_NAME", "K8S_POD_UID"):
+    for key in ("K8S_POD_INFRA_CONTAINER_ID", "K8S_POD_NAMESPACE", "K8S_POD_NAME", "K8S_POD_UID"):
         if cni_args.get(key):
             attributes[f"cni.args.{key}"] = cni_args[key]
 
