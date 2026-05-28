@@ -100,7 +100,9 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 
 # Concurrent RunPodSandbox capture: verify reports stay isolated when two pods
 # start inside the same probe window. Works for runc or Kata by switching
-# RUNTIME_TYPE/CRI_RUNTIME_HANDLER and POD_CONFIG.
+# RUNTIME_TYPE/CRI_RUNTIME_HANDLER and POD_CONFIG. The request-identity
+# assertion verifies RunPodSandbox request metadata is decoded and matched to
+# the real sandbox id through CNI env identity.
 CAPTURE=true VALIDATE_INGEST=true CONCURRENT_RUNPODS=2 \
 EXPECT_PROCESS_BINARY_METRICS=true EXPECT_CNI_CONTAINER_ID=true \
 EXPECT_RUNPOD_REQUEST_IDENTITY=true EXPECT_ROLES=cni,kata \
