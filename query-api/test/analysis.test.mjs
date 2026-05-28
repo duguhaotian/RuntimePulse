@@ -93,3 +93,37 @@ test('analysis flags high helper-binary count even with small aggregate duration
   assert.equal(finding.severity, 'warning');
   assert.match(finding.summary, /helper binaries accounts|helper binaries executed/);
 });
+
+test('analysis names hottest startup process binary from breakdown metrics', () => {
+  const bridgeDuration = metric('sandbox.startup.process.binary.bridge_duration_ms', 1600);
+  bridgeDuration.attributes = { 'process.binary.name': 'bridge', 'process.roles': ['cni'] };
+  const bridgeCount = metric('sandbox.startup.process.binary.bridge_count', 2);
+  bridgeCount.attributes = { 'process.binary.name': 'bridge', 'process.roles': ['cni'] };
+  const iptablesDuration = metric('sandbox.startup.process.binary.iptables_duration_ms', 300);
+  iptablesDuration.attributes = { 'process.binary.name': 'iptables', 'process.roles': ['helper'] };
+
+  const analysis = buildSandboxAnalysis({
+    sandbox: { ...baseSandbox, runtimeType: 'runc', startupDurationMs: 3200 },
+    image: undefined,
+    metrics: [
+      metric('sandbox.startup.callchain_duration_ms', 3200),
+      metric('sandbox.startup.binary_exec_duration_ms', 2100),
+      metric('sandbox.startup.binary_exec_count', 8),
+      bridgeDuration,
+      bridgeCount,
+      iptablesDuration,
+    ],
+    events: [],
+    spans: [],
+    profiles: [],
+  });
+
+  const finding = analysis.findings.find((item) => item.id === 'cri-sandbox-a-startup-callchain-binary-exec');
+  assert.ok(finding);
+  assert.equal(finding.title, 'bridge is the hottest startup process binary');
+  assert.match(finding.summary, /bridge accounts/);
+  assert.deepEqual(finding.relatedMetricNames, [
+    'sandbox.startup.process.binary.bridge_duration_ms',
+    'sandbox.startup.process.binary.bridge_count',
+  ]);
+});

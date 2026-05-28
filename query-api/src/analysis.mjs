@@ -94,12 +94,16 @@ function startupCallchainFinding(sandbox, metrics, spans) {
 
   const title = best.key === 'cni' && best.binary
     ? `${best.binary} is the hottest CNI plugin binary`
-    : best.title;
+    : best.key === 'binary-exec' && best.binary
+      ? `${best.binary} is the hottest startup process binary`
+      : best.title;
   const summary = best.key === 'cni' && best.binary
     ? `${best.binary} accounts for ${formatRatio(share)} of the measured startup call chain.`
-    : best.durationMs > 0
-      ? `${best.label} accounts for ${formatRatio(share)} of the measured startup call chain.`
-      : `${best.label} executed ${best.count} times during startup; inspect per-command attribution for hidden latency.`;
+    : best.key === 'binary-exec' && best.binary
+      ? `${best.binary} accounts for ${formatRatio(share)} of startup process execution cost.`
+      : best.durationMs > 0
+        ? `${best.label} accounts for ${formatRatio(share)} of the measured startup call chain.`
+        : `${best.label} executed ${best.count} times during startup; inspect per-command attribution for hidden latency.`;
   const severity = share >= 0.55 || best.durationMs >= 5_000 || best.errorSpan ? 'critical' : 'warning';
 
   return {
@@ -210,15 +214,17 @@ function startupCallchainCandidates(metrics, spans) {
       : spans.filter((span) => definition.spanPatterns.some((pattern) => pattern.test(span.spanName)));
     const spanDurationMs = relatedSpans.reduce((total, span) => total + Number(span.durationMs ?? 0), 0);
     const pluginBreakdown = definition.perPlugin ? dominantCniPluginMetrics(metrics) : undefined;
+    const processBreakdown = definition.key === 'binary-exec' ? dominantProcessBinaryMetrics(metrics) : undefined;
+    const breakdown = pluginBreakdown ?? processBreakdown;
     return {
       ...definition,
-      binary: pluginBreakdown?.binary ?? dominantBinaryName(relatedSpans),
-      durationMs: pluginBreakdown?.durationMs ?? maxMetricValue(metrics, definition.durationMetricName) ?? spanDurationMs,
-      count: pluginBreakdown?.count ?? (definition.countMetricName ? maxMetricValue(metrics, definition.countMetricName) ?? 0 : 0),
-      durationMetricName: pluginBreakdown?.durationMetricName ?? definition.durationMetricName,
-      countMetricName: pluginBreakdown?.countMetricName ?? definition.countMetricName,
-      relatedSpanIds: pluginBreakdown?.binary
-        ? relatedSpans.filter((span) => spanMatchesBinary(span, pluginBreakdown.binary)).map((span) => span.spanId)
+      binary: breakdown?.binary ?? dominantBinaryName(relatedSpans),
+      durationMs: breakdown?.durationMs ?? maxMetricValue(metrics, definition.durationMetricName) ?? spanDurationMs,
+      count: breakdown?.count ?? (definition.countMetricName ? maxMetricValue(metrics, definition.countMetricName) ?? 0 : 0),
+      durationMetricName: breakdown?.durationMetricName ?? definition.durationMetricName,
+      countMetricName: breakdown?.countMetricName ?? definition.countMetricName,
+      relatedSpanIds: breakdown?.binary
+        ? relatedSpans.filter((span) => spanMatchesBinary(span, breakdown.binary)).map((span) => span.spanId)
         : relatedSpans.map((span) => span.spanId),
       errorSpan: relatedSpans.find((span) => span.status === 'error'),
     };
@@ -247,6 +253,31 @@ function dominantCniPluginMetrics(metrics) {
   }
 
   return [...plugins.values()].sort((left, right) => right.durationMs - left.durationMs || right.count - left.count)[0];
+}
+
+function dominantProcessBinaryMetrics(metrics) {
+  const binaries = new Map();
+
+  for (const series of metrics) {
+    const match = String(series?.name ?? '').match(/^sandbox\.startup\.process\.binary\.(.+)_(count|duration_ms)$/);
+    if (!match) continue;
+
+    const [, metricBinary, kind] = match;
+    const binary = stringAttribute(series.attributes, 'process.binary.name') ?? metricBinary;
+    const candidate = binaries.get(binary) ?? {
+      binary,
+      count: 0,
+      durationMs: 0,
+      countMetricName: `sandbox.startup.process.binary.${metricBinary}_count`,
+      durationMetricName: `sandbox.startup.process.binary.${metricBinary}_duration_ms`,
+    };
+    const value = maxPoint(series)?.value ?? 0;
+    if (kind === 'count') candidate.count = Math.max(candidate.count, value);
+    if (kind === 'duration_ms') candidate.durationMs = Math.max(candidate.durationMs, value);
+    binaries.set(binary, candidate);
+  }
+
+  return [...binaries.values()].sort((left, right) => right.durationMs - left.durationMs || right.count - left.count)[0];
 }
 
 function startupTotalMs(sandbox, metrics, spans) {
@@ -290,7 +321,7 @@ function isCniStartupSpan(span) {
 }
 
 function processBinaryName(span) {
-  const raw = span?.attributes?.['process.binary'] ?? span?.attributes?.['process.command'];
+  const raw = span?.attributes?.['process.binary.name'] ?? span?.attributes?.['process.binary'] ?? span?.attributes?.['process.command'];
   if (typeof raw !== 'string' || !raw.trim()) return undefined;
   return raw.trim().split(/\s+/)[0].split('/').filter(Boolean).pop();
 }
@@ -305,6 +336,11 @@ function binaryFromSpanName(span) {
   if (name.startsWith('cni.plugin.')) return name.slice('cni.plugin.'.length).split('.').filter(Boolean).pop();
   if (name.startsWith('oci.')) return name.slice('oci.'.length).split('.').filter(Boolean).pop();
   return undefined;
+}
+
+function stringAttribute(attributes, name) {
+  const value = attributes?.[name];
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function spanMatchesBinary(span, binary) {
