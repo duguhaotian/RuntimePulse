@@ -1235,7 +1235,12 @@ fn infer_stage_role(function_name: &str, binary_name: &str) -> Option<String> {
     {
         return Some("cni".to_string());
     }
-    if function.contains("oci") || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
+    if function.contains("kata") || (binary_name.contains("kata") && binary_name != "kata-runtime") {
+        return Some("kata".to_string());
+    }
+    if function.contains("oci")
+        || function.contains("runc")
+        || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
     {
         return Some("oci".to_string());
     }
@@ -1273,6 +1278,30 @@ fn infer_span_name(
         || function.contains("go-cni")
     {
         return "cni.setup".to_string();
+    }
+    if function.contains("ocishimcreate") {
+        return "oci.shim.create".to_string();
+    }
+    if function.contains("ocishimstart") {
+        return "oci.shim.start".to_string();
+    }
+    if function.contains("ocirunccreate") {
+        return "oci.runc.create".to_string();
+    }
+    if function.contains("ociruncstart") {
+        return "oci.runc.start".to_string();
+    }
+    if function.contains("katashimcreate") {
+        return "kata.shim.create".to_string();
+    }
+    if function.contains("katashimstart") {
+        return "kata.shim.start".to_string();
+    }
+    if function.contains("katasandboxcreate") {
+        return "kata.sandbox.create".to_string();
+    }
+    if function.contains("katasandboxstart") {
+        return "kata.sandbox.start".to_string();
     }
     if let Some(role) = role {
         match role {

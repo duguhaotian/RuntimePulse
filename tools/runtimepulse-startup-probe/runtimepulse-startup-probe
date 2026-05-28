@@ -90,6 +90,22 @@ DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS = [
     "github.com/containerd/go-cni.(*libcni).Setup",
     "github.com/containerd/go-cni.(*libcni).SetupSerially",
 ]
+DEFAULT_RUNTIME_UPROBE_BINARIES = [
+    "/usr/bin/containerd-shim-runc-v2",
+    "/usr/local/bin/containerd-shim-runc-v2",
+    "/usr/local/bin/containerd-shim-kata-v2",
+    "/opt/kata/bin/containerd-shim-kata-v2",
+]
+DEFAULT_GO_RUNTIME_UPROBE_SYMBOL_PATTERNS = [
+    "github.com/containerd/containerd/v2/cmd/containerd-shim-runc-v2/process.(*Init).Create",
+    "github.com/containerd/containerd/v2/cmd/containerd-shim-runc-v2/process.(*Init).Start",
+    "github.com/containerd/go-runc.(*Runc).Create",
+    "github.com/containerd/go-runc.(*Runc).Start",
+    "github.com/kata-containers/kata-containers/src/runtime/pkg/containerd-shim-v2.(*service).Create",
+    "github.com/kata-containers/kata-containers/src/runtime/pkg/containerd-shim-v2.(*service).Start",
+    "github.com/kata-containers/kata-containers/src/runtime/virtcontainers.CreateSandbox",
+    "github.com/kata-containers/kata-containers/src/runtime/virtcontainers.(*Sandbox).Start",
+]
 GO_PCLNTAB_MAGICS = {0xFFFFFFF1, 0xFFFFFFF0, 0xFFFFFFFA, 0xFFFFFFFB}
 TRACEFS_CANDIDATES = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"]
 
@@ -154,6 +170,18 @@ def discover_cni_binaries(dirs: Iterable[str]) -> list[str]:
     return existing_files(result)
 
 
+def unique_realpaths(paths: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for path in paths:
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen.add(real)
+        result.append(path)
+    return result
+
+
 def candidate_names(paths: Iterable[str]) -> set[str]:
     names: set[str] = set()
     for path in paths:
@@ -200,7 +228,17 @@ def parse_elf_load_segments(data: bytes) -> list[tuple[int, int, int, int]]:
     return segments
 
 
-def virtual_address_to_file_offset(address: int, segments: list[tuple[int, int, int, int]]) -> int:
+def elf_type(data: bytes) -> int:
+    if len(data) < 18 or data[:4] != b"\x7fELF" or data[5] != 1:
+        return 0
+    return struct.unpack_from("<H", data, 16)[0]
+
+
+def bcc_attach_address(address: int, data: bytes, segments: list[tuple[int, int, int, int]]) -> int:
+    # BCC expects virtual addresses for ET_EXEC binaries and file-load-relative
+    # offsets for PIE/ET_DYN binaries. Go pclntab entries are virtual PCs.
+    if elf_type(data) == 2:  # ET_EXEC
+        return address
     for p_offset, p_vaddr, p_filesz, p_memsz in segments:
         if p_vaddr <= address < p_vaddr + p_memsz:
             candidate = p_offset + (address - p_vaddr)
@@ -268,7 +306,7 @@ def discover_go_functions(binary: str) -> dict[str, tuple[int, int]]:
         if not name:
             continue
         address = text_start + entry_delta
-        functions[name] = (address, virtual_address_to_file_offset(address, segments))
+        functions[name] = (address, bcc_attach_address(address, data, segments))
     return functions
 
 
@@ -284,16 +322,68 @@ def symbol_matches(name: str, pattern: str) -> bool:
 
 
 def short_go_function(symbol: str) -> str:
-    if "RunPodSandbox" in symbol:
+    lower = symbol.lower()
+    if "runpodsandbox" in lower:
         return "RunPodSandbox"
-    if "setupPodNetwork" in symbol:
+    if "setuppodnetwork" in lower:
         return "CNISetup"
-    if "SetupSerially" in symbol:
+    if "setupserially" in symbol:
         return "CNISetupSerially"
+    if "go-cni" in lower and re.search(r"\bSetup$|\.Setup$", symbol):
+        return "CNISetup"
+    if "containerd-shim-runc-v2" in lower and "(*init).create" in lower:
+        return "OCIShimCreate"
+    if "containerd-shim-runc-v2" in lower and "(*init).start" in lower:
+        return "OCIShimStart"
+    if "go-runc" in lower and "(*runc).create" in lower:
+        return "OCIRuncCreate"
+    if "go-runc" in lower and "(*runc).start" in lower:
+        return "OCIRuncStart"
+    if "containerd-shim-v2" in lower and "(*service).create" in lower:
+        return "KataShimCreate"
+    if "containerd-shim-v2" in lower and "(*service).start" in lower:
+        return "KataShimStart"
+    if "virtcontainers.createsandbox" in lower or "(*vcimpl).createsandbox" in lower:
+        return "KataSandboxCreate"
+    if "virtcontainers.(*sandbox).start" in lower:
+        return "KataSandboxStart"
     if re.search(r"\bSetup$|\.Setup$", symbol):
         return "CNISetup"
     return symbol.rsplit("/", 1)[-1]
 
+
+def go_uprobe_role(function: str) -> str:
+    lower = function.lower()
+    if lower.startswith("cni"):
+        return "cni"
+    if lower.startswith("kata"):
+        return "kata"
+    if lower.startswith("oci"):
+        return "oci"
+    return "cri"
+
+
+def go_uprobe_span_name(function: str) -> str:
+    lower = function.lower()
+    if lower.startswith("cni"):
+        return "cni.setup"
+    if lower == "ocishimcreate":
+        return "oci.shim.create"
+    if lower == "ocishimstart":
+        return "oci.shim.start"
+    if lower == "ocirunccreate":
+        return "oci.runc.create"
+    if lower == "ociruncstart":
+        return "oci.runc.start"
+    if lower == "katashimcreate":
+        return "kata.shim.create"
+    if lower == "katashimstart":
+        return "kata.shim.start"
+    if lower == "katasandboxcreate":
+        return "kata.sandbox.create"
+    if lower == "katasandboxstart":
+        return "kata.sandbox.start"
+    return ""
 
 def discover_go_uprobes(binary: str, patterns: Iterable[str]) -> list[GoUprobeSpec]:
     resolved = resolve_binary(binary)
@@ -491,7 +581,8 @@ def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type
         "uprobe.binary": obs.binary,
         "process.thread_id": obs.tid,
     }
-    span_name = "cni.setup" if obs.function.lower().startswith("cni") else ""
+    span_name = go_uprobe_span_name(obs.function)
+    role = go_uprobe_role(obs.function)
     event = {
         "eventType": event_type,
         "requestId": obs.request_id,
@@ -503,7 +594,7 @@ def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type
         "containerdId": cri_sandbox_id or sandbox_id,
         "runtimeType": runtime_type or "unknown",
         "status": "ok",
-        "role": "cni" if obs.function.lower().startswith("cni") else "cri",
+        "role": role,
         "binary": obs.binary,
         "command": basename(obs.binary) or "containerd",
         "pid": obs.pid,
@@ -1221,10 +1312,15 @@ def export_command(args: argparse.Namespace) -> None:
         go_uprobes = discover_go_uprobes(args.containerd_binary, patterns)
         if args.enable_cni_go_uprobes:
             go_uprobes.extend(discover_go_uprobes(args.containerd_binary, args.cni_go_uprobe_symbol or DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS))
+        if args.enable_runtime_go_uprobes:
+            runtime_patterns = args.runtime_go_uprobe_symbol or DEFAULT_GO_RUNTIME_UPROBE_SYMBOL_PATTERNS
+            runtime_binaries = unique_realpaths(existing_files(args.runtime_uprobe_binary or DEFAULT_RUNTIME_UPROBE_BINARIES))
+            for runtime_binary in runtime_binaries:
+                go_uprobes.extend(discover_go_uprobes(runtime_binary, runtime_patterns))
         if go_uprobes and not explicit_patterns:
             runpod = go_uprobes[:1]
-            cni = [spec for spec in go_uprobes[1:] if spec.function.lower().startswith("cni")]
-            go_uprobes = runpod + cni
+            extra = [spec for spec in go_uprobes[1:] if go_uprobe_role(spec.function) != "cri"]
+            go_uprobes = runpod + extra
         if not go_uprobes:
             raise SystemExit(f"no Go uprobe symbols matched in {args.containerd_binary}: {patterns}")
 
@@ -1259,6 +1355,8 @@ def self_test() -> None:
         "RP_GO_UPROBE_EXIT\t1779940000200000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
         "RP_GO_UPROBE_ENTER\t1779940000100000000\t90\t91\tcontainerd\tCNISetup\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).setupPodNetwork\t/usr/bin/containerd\n",
         "RP_GO_UPROBE_EXIT\t1779940000150000000\t90\t91\tcontainerd\tCNISetup\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).setupPodNetwork\t/usr/bin/containerd\n",
+        "RP_GO_UPROBE_ENTER\t1779940000160000000\t91\t92\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
+        "RP_GO_UPROBE_EXIT\t1779940000180000000\t91\t92\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
         "RP_EXEC_ENTER\t100\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
         "RP_PROC_EXIT\t100\tbridge\n",
         "RP_EXEC_ENTER\t102\t100\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
@@ -1267,14 +1365,14 @@ def self_test() -> None:
         "RP_PROC_EXIT\t101\tkata-runtime\n",
     ]
     events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(lines, 6, 4, "", "", None)
-    assert len([e for e in events if e.get("eventType") == "enter"]) == 5
+    assert len([e for e in events if e.get("eventType") == "enter"]) == 6
     assert runtime_type == "kata"
     assert sandbox_id == "abc123"
     assert cri_sandbox_id == "abc123"
     assert summary["observedCriUprobeCount"] == 1.0
     assert summary["observedCniExecCount"] == 2.0
     assert summary["observedHelperExecCount"] == 1.0
-    assert summary["observedOciExecCount"] == 1.0
+    assert summary["observedOciExecCount"] == 2.0
 
     multi_lines = [
         "RP_EXEC_ENTER\t200\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
@@ -1314,6 +1412,9 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd RunPodSandbox Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
     export.add_argument("--enable-cni-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_CNI_GO_UPROBES"), help="also attach containerd/go-cni setup Go uprobes")
     export.add_argument("--cni-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_GO_UPROBE_SYMBOLS", "")]), help="containerd CNI setup Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
+    export.add_argument("--enable-runtime-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_RUNTIME_GO_UPROBES"), help="also attach OCI/Kata runtime shim Go uprobes")
+    export.add_argument("--runtime-uprobe-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_UPROBE_BINARIES", "")]), help="runtime shim binary for Go uprobe discovery; may be repeated")
+    export.add_argument("--runtime-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_GO_UPROBE_SYMBOLS", "")]), help="OCI/Kata runtime Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
     export.add_argument("--sandbox-id", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SANDBOX_ID", ""))
     export.add_argument("--containerd-namespace", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES", "")]), help="only keep OCI/runtime execs from these containerd namespaces; CNI execs are kept by CNI_CONTAINERID")
     export.add_argument("--runtime-type", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_TYPE", ""))

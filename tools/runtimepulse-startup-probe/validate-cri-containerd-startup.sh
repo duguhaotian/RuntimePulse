@@ -36,6 +36,9 @@ CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 GO_UPROBE_SYMBOLS="${GO_UPROBE_SYMBOLS:-}"
 ENABLE_CNI_GO_UPROBES="${ENABLE_CNI_GO_UPROBES:-false}"
 CNI_GO_UPROBE_SYMBOLS="${CNI_GO_UPROBE_SYMBOLS:-}"
+ENABLE_RUNTIME_GO_UPROBES="${ENABLE_RUNTIME_GO_UPROBES:-false}"
+RUNTIME_UPROBE_BINARIES="${RUNTIME_UPROBE_BINARIES:-}"
+RUNTIME_GO_UPROBE_SYMBOLS="${RUNTIME_GO_UPROBE_SYMBOLS:-}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
@@ -81,6 +84,9 @@ Common env:
   GO_UPROBE_SYMBOLS=pattern    Optional comma-separated RunPodSandbox Go symbol/pattern list.
   ENABLE_CNI_GO_UPROBES=true   Also attach containerd/go-cni setup Go uprobes.
   CNI_GO_UPROBE_SYMBOLS=pattern Optional comma-separated CNI setup Go symbol/pattern list.
+  ENABLE_RUNTIME_GO_UPROBES=true Also attach OCI/Kata runtime shim Go uprobes.
+  RUNTIME_UPROBE_BINARIES=/usr/bin/containerd-shim-runc-v2 Optional comma-separated runtime shim binaries.
+  RUNTIME_GO_UPROBE_SYMBOLS=pattern Optional comma-separated runtime Go symbol/pattern list.
 USAGE
 }
 
@@ -190,6 +196,21 @@ capture_probe() {
       IFS=',' read -r -a _cni_go_uprobe_symbols <<< "$CNI_GO_UPROBE_SYMBOLS"
       for _symbol in "${_cni_go_uprobe_symbols[@]}"; do
         [[ -n "$_symbol" ]] && uprobe_args+=(--cni-go-uprobe-symbol "$_symbol")
+      done
+    fi
+    if [[ "$ENABLE_RUNTIME_GO_UPROBES" == "true" ]]; then
+      uprobe_args+=(--enable-runtime-go-uprobes)
+    fi
+    if [[ -n "$RUNTIME_UPROBE_BINARIES" ]]; then
+      IFS=',' read -r -a _runtime_uprobe_binaries <<< "$RUNTIME_UPROBE_BINARIES"
+      for _binary in "${_runtime_uprobe_binaries[@]}"; do
+        [[ -n "$_binary" ]] && uprobe_args+=(--runtime-uprobe-binary "$_binary")
+      done
+    fi
+    if [[ -n "$RUNTIME_GO_UPROBE_SYMBOLS" ]]; then
+      IFS=',' read -r -a _runtime_go_uprobe_symbols <<< "$RUNTIME_GO_UPROBE_SYMBOLS"
+      for _symbol in "${_runtime_go_uprobe_symbols[@]}"; do
+        [[ -n "$_symbol" ]] && uprobe_args+=(--runtime-go-uprobe-symbol "$_symbol")
       done
     fi
   fi

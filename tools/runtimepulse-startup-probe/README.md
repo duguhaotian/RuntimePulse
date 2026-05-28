@@ -14,10 +14,11 @@ Current coverage:
 - Kata/containerd shim and selected hypervisor helpers when their paths exist or
   are passed through `--include-binary`.
 - Optional helper binaries such as `iptables`, `nft`, `ip`, and `tc`.
-- Optional containerd Go uprobe entry capture for CRI `RunPodSandbox`
-  (`--enable-go-uprobes`) and containerd/go-cni setup boundaries
-  (`--enable-cni-go-uprobes`), discovered from Go pclntab symbols even when the
-  containerd ELF is stripped.
+- Optional Go uprobe entry capture for CRI `RunPodSandbox`
+  (`--enable-go-uprobes`), containerd/go-cni setup boundaries
+  (`--enable-cni-go-uprobes`), and OCI/Kata runtime shim boundaries
+  (`--enable-runtime-go-uprobes`), discovered from Go pclntab symbols even when
+  the ELF is stripped.
 - Correlation by `CNI_CONTAINERID`, Kubernetes CNI args, containerd shim `-id`,
   or OCI/containerd bundle path; RunPodSandbox uprobe observations are joined to
   the sandbox report by the observed startup event window.
@@ -103,6 +104,7 @@ sudo runtimepulse-startup-probe export \
   --include-helpers \
   --enable-go-uprobes \
   --enable-cni-go-uprobes \
+  --enable-runtime-go-uprobes \
   --containerd-binary /usr/bin/containerd
 ```
 
@@ -111,15 +113,18 @@ The default uprobe profile attaches to the first matching containerd
 normalization. With `--enable-cni-go-uprobes`, it also attaches to
 `setupPodNetwork`/`go-cni` setup symbols and emits `cni.setup` spans, so the
 RunPodSandbox envelope can be separated from the containerd CNI setup boundary
-and individual CNI plugin binary exec spans. Extra symbols can be supplied with
-repeated `--go-uprobe-symbol` / `--cni-go-uprobe-symbol` (or the matching
+and individual CNI plugin binary exec spans. With `--enable-runtime-go-uprobes`,
+it also emits `oci.shim.*`, `oci.runc.*`, `kata.shim.*`, and
+`kata.sandbox.*` boundary spans from runtime shim binaries. Extra symbols can be
+supplied with repeated `--go-uprobe-symbol` / `--cni-go-uprobe-symbol` /
+`--runtime-go-uprobe-symbol` (or the matching
 `RUNTIMEPULSE_STARTUP_PROBE_*_SYMBOLS` env vars) when investigating specific
 containerd builds.
 
 Limitations:
 
-- The bundled uprobe mode captures RunPodSandbox/CNI setup entries and currently
-  synthesizes span ends from the last observed sandbox startup event in the
+- The bundled uprobe mode captures RunPodSandbox/CNI setup/runtime-shim entries
+  and currently synthesizes span ends from the last observed sandbox startup event in the
   capture window. This avoids CRI proxying and unsafe Go return probes, but
   request/response field decoding is still future work.
 - Concurrent sandbox starts are correlated by stable sandbox ids when those ids

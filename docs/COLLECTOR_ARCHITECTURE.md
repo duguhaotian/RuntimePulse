@@ -111,8 +111,8 @@ start point is the first observable CRI/containerd sandbox event, not the
 internal `RunPodSandbox` function entry.
 
 The high-fidelity startup path now includes a minimal containerd CRI
-`RunPodSandbox` plus CNI setup Go-uProbe profiles in the bundled startup probe,
-and should next add deeper OCI-runtime boundaries and request-object decoding,
+`RunPodSandbox`, CNI setup, and OCI/Kata runtime shim Go-uProbe profiles in the
+bundled startup probe, and should next add request-object decoding,
 combined with exec/exit capture for CNI and runtime helper binaries. The goal is
 to attribute CNI plugin cost, `iptables`/`nft`/`ip`/`tc` helper calls, and
 `runc`/`kata-runtime`/hypervisor invocations to the active RunPodSandbox
@@ -127,10 +127,11 @@ The first concrete exporter bridge is available as
 `bpftrace` `execve`/process-exit tracepoints to emit raw call-chain events for
 CNI plugin binaries, OCI/Kata runtime binaries, containerd shims, and optional
 helper binaries. It now supports an optional `--enable-go-uprobes` mode that discovers stripped
-containerd Go pclntab symbols and emits CRI `RunPodSandbox` plus optional
-`cni.setup` uprobe observations joined to the sandbox event window. Future native
-depth should decode RunPodSandbox request/response context and add OCI-runtime
-boundary uprobes while preserving the same startup-callchain JSON contract.
+containerd/runtime-shim Go pclntab symbols and emits CRI `RunPodSandbox`,
+optional `cni.setup`, and optional OCI/Kata shim uprobe observations joined to
+the sandbox event window. Future native depth should decode RunPodSandbox
+request/response context while preserving the same startup-callchain JSON
+contract.
 
 `startup-callchain` is the report-ingestion bridge for that later high-fidelity
 path. External uprobe/eBPF exporters can write JSON/JSONL or be invoked by
