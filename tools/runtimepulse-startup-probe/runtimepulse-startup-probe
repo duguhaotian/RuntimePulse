@@ -78,6 +78,8 @@ DEFAULT_CONTAINERD_BINARIES = [
     "/usr/bin/containerd",
     "/usr/local/bin/containerd",
 ]
+EXTRA_CONTAINERD_CONFIGS: list[str] = []
+
 DEFAULT_GO_UPROBE_SYMBOL_PATTERNS = [
     "github.com/containerd/containerd/v2/internal/cri/instrument.(*instrumentedService).RunPodSandbox",
     "github.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox",
@@ -722,11 +724,13 @@ def fallback_containerd_bundle(namespace: str, container_id: str, argv: list[str
 
 def configured_containerd_task_roots() -> list[str]:
     roots: list[str] = []
-    for config in (
+    configs = [
+        *EXTRA_CONTAINERD_CONFIGS,
         os.getenv("RUNTIMEPULSE_CONTAINERD_CONFIG", ""),
         "/etc/containerd/config.toml",
         "/tmp/runtimepulse-containerd-cri-test/config.toml",
-    ):
+    ]
+    for config in unique_realpaths(configs):
         if not config:
             continue
         try:
@@ -1723,6 +1727,8 @@ def emit_report(
 
 
 def export_command(args: argparse.Namespace) -> None:
+    global EXTRA_CONTAINERD_CONFIGS
+    EXTRA_CONTAINERD_CONFIGS = split_csv(args.containerd_config or [])
     candidates = candidate_names(existing_files(args.include_binary))
     cni_dirs = args.cni_bin_dir or DEFAULT_CNI_BIN_DIRS
     cni_binaries = discover_cni_binaries(cni_dirs)
@@ -1906,6 +1912,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--include-helpers", action="store_true", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS", "false").lower() == "true")
     export.add_argument("--enable-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES"), help="attach high-precision Go uprobes to containerd RunPodSandbox symbols")
     export.add_argument("--containerd-binary", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY", shutil.which("containerd") or next((path for path in DEFAULT_CONTAINERD_BINARIES if os.path.exists(path)), "containerd")))
+    export.add_argument("--containerd-config", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_CONTAINERD_CONFIG", "")]), help="containerd config.toml used to infer task bundle roots from state/root; may be repeated")
     export.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd RunPodSandbox Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
     export.add_argument("--enable-cni-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_CNI_GO_UPROBES"), help="also attach containerd/go-cni setup Go uprobes")
     export.add_argument("--cni-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_GO_UPROBE_SYMBOLS", "")]), help="containerd CNI setup Go symbol/pattern to attach; may be repeated; prefix regex: for regex")

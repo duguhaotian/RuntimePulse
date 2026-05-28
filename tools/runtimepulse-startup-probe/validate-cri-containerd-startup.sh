@@ -33,6 +33,7 @@ EXPECT_ANALYSIS="${EXPECT_ANALYSIS:-false}"
 EXPECT_PARENT_LINKS="${EXPECT_PARENT_LINKS:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
+CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
 GO_UPROBE_SYMBOLS="${GO_UPROBE_SYMBOLS:-}"
 ENABLE_CNI_GO_UPROBES="${ENABLE_CNI_GO_UPROBES:-false}"
 CNI_GO_UPROBE_SYMBOLS="${CNI_GO_UPROBE_SYMBOLS:-}"
@@ -82,6 +83,7 @@ Common env:
   QUERY_API_RETRY_SECONDS=10   Wait for collector outlet to flush to Query API.
   ENABLE_GO_UPROBES=true       Attach containerd RunPodSandbox Go uprobes.
   CONTAINERD_BINARY=/usr/bin/containerd  Optional containerd binary for symbol discovery.
+  CONTAINERD_CONFIG=/etc/containerd/config.toml Optional config for task bundle root inference.
   GO_UPROBE_SYMBOLS=pattern    Optional comma-separated RunPodSandbox Go symbol/pattern list.
   ENABLE_CNI_GO_UPROBES=true   Also attach containerd/go-cni setup Go uprobes.
   CNI_GO_UPROBE_SYMBOLS=pattern Optional comma-separated CNI setup Go symbol/pattern list.
@@ -184,6 +186,9 @@ capture_probe() {
     uprobe_args+=(--enable-go-uprobes)
     if [[ -n "$CONTAINERD_BINARY" ]]; then
       uprobe_args+=(--containerd-binary "$CONTAINERD_BINARY")
+    fi
+    if [[ -n "$CONTAINERD_CONFIG" ]]; then
+      uprobe_args+=(--containerd-config "$CONTAINERD_CONFIG")
     fi
     if [[ -n "$GO_UPROBE_SYMBOLS" ]]; then
       IFS=',' read -r -a _go_uprobe_symbols <<< "$GO_UPROBE_SYMBOLS"

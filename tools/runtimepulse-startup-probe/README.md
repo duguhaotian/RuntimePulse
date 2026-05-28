@@ -92,6 +92,7 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 # the sandbox, and validates collector ingestion.
 CAPTURE=true VALIDATE_QUERY_API=true RUNTIME_TYPE=kata CRI_RUNTIME_HANDLER=kata \
 ENABLE_GO_UPROBES=true CONTAINERD_BINARY=/usr/bin/containerd \
+CONTAINERD_CONFIG=/tmp/runtimepulse-containerd-cri-test/config.toml \
 EXPECT_ROLES=cri,cni,kata \
 CRI_ENDPOINT=unix:///tmp/runtimepulse-containerd-cri-test/containerd.sock \
 POD_CONFIG=/tmp/runtimepulse-containerd-cri-test/pod-config-kata.json \
@@ -108,7 +109,8 @@ sudo runtimepulse-startup-probe export \
   --enable-go-uprobes \
   --enable-cni-go-uprobes \
   --enable-runtime-go-uprobes \
-  --containerd-binary /usr/bin/containerd
+  --containerd-binary /usr/bin/containerd \
+  --containerd-config /etc/containerd/config.toml
 ```
 
 The default uprobe profile attaches to the first matching containerd
@@ -128,7 +130,11 @@ uretprobes attached. Extra symbols can be
 supplied with repeated `--go-uprobe-symbol` / `--cni-go-uprobe-symbol` /
 `--runtime-go-uprobe-symbol` (or the matching
 `RUNTIMEPULSE_STARTUP_PROBE_*_SYMBOLS` env vars) when investigating specific
-containerd builds.
+containerd builds. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
+points the probe at the same `config.toml` used by the target containerd so it
+can infer `state`/`root` task bundle directories even when the shim argv only
+contains `-namespace`/`-id` plus the runtime root. This is especially useful for
+standalone CRI+containerd test deployments whose task root is not `/run`.
 
 Limitations:
 
