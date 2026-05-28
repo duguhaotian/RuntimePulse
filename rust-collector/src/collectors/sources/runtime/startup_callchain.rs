@@ -1162,6 +1162,9 @@ fn infer_stage_role(function_name: &str, binary_name: &str) -> Option<String> {
     {
         return Some("cri".to_string());
     }
+    if is_helper_binary(binary_name) {
+        return Some("helper".to_string());
+    }
     if function.contains("cni") || is_likely_cni_plugin_binary(binary_name) {
         return Some("cni".to_string());
     }
@@ -1220,7 +1223,7 @@ fn infer_span_name(
                     }
                 )
             }
-            "exec" => {
+            "exec" | "helper" => {
                 return format!(
                     "process.exec.{}",
                     if binary_name.is_empty() {
@@ -2007,6 +2010,15 @@ fn span_duration_ms(span: &StartupStageReport) -> Option<f64> {
 }
 
 fn is_cni_span(span: &StartupStageReport, span_name: &str, binary_name: &str) -> bool {
+    if span
+        .role
+        .as_deref()
+        .is_some_and(|role| role.eq_ignore_ascii_case("helper"))
+        || is_helper_binary(binary_name)
+    {
+        return false;
+    }
+
     span_name.starts_with("cni.")
         || span.cni_plugin.is_some()
         || span.cni_command.is_some()
@@ -2052,6 +2064,9 @@ fn is_helper_binary(binary_name: &str) -> bool {
 }
 
 fn cni_plugin_name(span: &StartupStageReport, span_name: &str, binary_name: &str) -> String {
+    if is_helper_binary(binary_name) {
+        return String::new();
+    }
     if let Some(plugin) = span
         .cni_plugin
         .as_deref()
@@ -2545,6 +2560,88 @@ mod tests {
             output.metadata.sandboxes[0]["id"],
             json!("k8s-default-demo-pod")
         );
+    }
+
+    #[test]
+    fn keeps_cni_helper_execs_out_of_cni_plugin_metrics() {
+        let config = test_config();
+        let content = r#"
+        {
+          "sandboxId": "sandbox-cni-helper",
+          "runtimeType": "runc",
+          "events": [
+            {
+              "eventType": "enter",
+              "requestId": "cni-bridge",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.000Z",
+              "binary": "/opt/cni/bin/bridge",
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-cni-helper"
+            },
+            {
+              "eventType": "exit",
+              "requestId": "cni-bridge",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.100Z",
+              "binary": "/opt/cni/bin/bridge",
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-cni-helper"
+            },
+            {
+              "eventType": "enter",
+              "requestId": "iptables-child",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.020Z",
+              "binary": "/usr/sbin/iptables",
+              "role": "helper",
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-cni-helper",
+              "env": {"CNI_COMMAND": "ADD"}
+            },
+            {
+              "eventType": "exit",
+              "requestId": "iptables-child",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.050Z",
+              "binary": "/usr/sbin/iptables",
+              "role": "helper",
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-cni-helper",
+              "env": {"CNI_COMMAND": "ADD"}
+            }
+          ]
+        }
+        "#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert!(output.traces.iter().any(|span| {
+            span.span_name == "cni.plugin.bridge"
+                && span.duration_ms == 100.0
+                && span.attributes["cni.plugin"] == json!("bridge")
+        }));
+        assert!(output.traces.iter().any(|span| {
+            span.span_name == "process.exec.iptables"
+                && span.duration_ms == 30.0
+                && span.attributes["process.role"] == json!("helper")
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.cni_duration_ms" && metric.value == 100.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.cni.plugin.bridge_duration_ms" && metric.value == 100.0
+        }));
+        assert!(!output
+            .metrics
+            .iter()
+            .any(|metric| { metric.name == "sandbox.startup.cni.plugin.iptables_duration_ms" }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.helper_binary_duration_ms" && metric.value == 30.0
+        }));
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "sandbox.startup.iptables_duration_ms" && metric.value == 30.0
+        }));
     }
 
     #[test]
