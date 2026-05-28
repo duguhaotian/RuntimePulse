@@ -1319,6 +1319,7 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
     pid_to_runtime: dict[int, str] = {}
     pid_to_containerd_id: dict[int, str] = {}
     pid_to_phase: dict[int, str] = {}
+    pid_to_attributes: dict[int, dict[str, object]] = {}
     for key in sorted({event_sandbox_key(event) for event in sandbox_events}):
         group = [event for event in sandbox_events if event_sandbox_key(event) == key]
         start, end = event_time_range(group)
@@ -1337,6 +1338,9 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
             pid_to_runtime.setdefault(pid, runtime)
             pid_to_containerd_id.setdefault(pid, str(item.get("containerdId", "") or ""))
             pid_to_phase.setdefault(pid, str(event_attribute(item, "startup.phase") or ""))
+            attrs = item.get("attributes") or {}
+            if isinstance(attrs, dict):
+                pid_to_attributes.setdefault(pid, dict(attrs))
     if not windows:
         return events
     result: list[dict[str, object]] = []
@@ -1363,6 +1367,14 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
                     "pid",
                 )
                 attrs = dict(assigned.get("attributes") or {})
+                for attr_key, attr_value in pid_to_attributes.get(pid, {}).items():
+                    if attr_key.startswith("k8s.") or attr_key.startswith("cri.") or attr_key in {
+                        "containerd.raw_id",
+                        "containerd.sandbox_container_id",
+                        "oci.bundle",
+                        "startup.stable_sandbox_id",
+                    }:
+                        attrs.setdefault(attr_key, attr_value)
                 if pid_to_phase.get(pid):
                     attrs["startup.phase"] = pid_to_phase[pid]
                     attrs["startup.phase.source"] = "matched-shim-pid"
