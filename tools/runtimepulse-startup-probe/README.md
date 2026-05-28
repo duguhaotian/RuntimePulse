@@ -102,7 +102,8 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 # start inside the same probe window. Works for runc or Kata by switching
 # RUNTIME_TYPE/CRI_RUNTIME_HANDLER and POD_CONFIG.
 CAPTURE=true VALIDATE_INGEST=true CONCURRENT_RUNPODS=2 \
-EXPECT_PROCESS_BINARY_METRICS=true EXPECT_CNI_CONTAINER_ID=true EXPECT_ROLES=cni,kata \
+EXPECT_PROCESS_BINARY_METRICS=true EXPECT_CNI_CONTAINER_ID=true \
+EXPECT_RUNPOD_REQUEST_IDENTITY=true EXPECT_ROLES=cni,kata \
 RUNTIME_TYPE=kata CRI_RUNTIME_HANDLER=kata \
 ENABLE_GO_UPROBES=true ENABLE_CNI_GO_UPROBES=true ENABLE_RUNTIME_GO_UPROBES=true \
 CONTAINERD_BINARY=/usr/bin/containerd \
@@ -148,7 +149,9 @@ containerd builds. After normalization, each observed process binary also gets
 `cni`, `oci`, `kata`, or `helper`; use
 `EXPECT_PROCESS_BINARY_METRICS=true` and `EXPECT_HELPER_BINARY_METRICS=true` in
 `validate-cri-containerd-startup.sh` to assert that this attribution path is
-present in real captures. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
+present in real captures. Use `EXPECT_RUNPOD_REQUEST_IDENTITY=true` to assert
+that RunPodSandbox request metadata was decoded and matched back to the real
+sandbox id through CNI identity. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
 points the probe at the same `config.toml` used by the target containerd so it
 can infer `state`/`root` task bundle directories even when the shim argv only
 contains `-namespace`/`-id` plus the runtime root. This is especially useful for

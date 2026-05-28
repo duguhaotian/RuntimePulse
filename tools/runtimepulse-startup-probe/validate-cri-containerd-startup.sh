@@ -35,6 +35,7 @@ EXPECT_PARENT_LINKS="${EXPECT_PARENT_LINKS:-false}"
 EXPECT_PROCESS_BINARY_METRICS="${EXPECT_PROCESS_BINARY_METRICS:-false}"
 EXPECT_HELPER_BINARY_METRICS="${EXPECT_HELPER_BINARY_METRICS:-false}"
 EXPECT_CNI_CONTAINER_ID="${EXPECT_CNI_CONTAINER_ID:-false}"
+EXPECT_RUNPOD_REQUEST_IDENTITY="${EXPECT_RUNPOD_REQUEST_IDENTITY:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
@@ -83,6 +84,7 @@ Common env:
   EXPECT_PROCESS_BINARY_METRICS=true Require per-process-binary startup metrics.
   EXPECT_HELPER_BINARY_METRICS=true Require helper process-binary metrics.
   EXPECT_CNI_CONTAINER_ID=true Require CNI_CONTAINERID/CNI_ARGS infra id matches report sandbox id.
+  EXPECT_RUNPOD_REQUEST_IDENTITY=true Require RunPodSandbox uprobe identity decoded and matched to sandbox.
   EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
@@ -354,6 +356,7 @@ validate_report_shape() {
   EXPECT_SANDBOX_ID="$EXPECT_SANDBOX_ID" \
   CONCURRENT_RUNPODS="$CONCURRENT_RUNPODS" \
   EXPECT_CNI_CONTAINER_ID="$EXPECT_CNI_CONTAINER_ID" \
+  EXPECT_RUNPOD_REQUEST_IDENTITY="$EXPECT_RUNPOD_REQUEST_IDENTITY" \
   python3 - "$REPORT_PATH" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -362,6 +365,7 @@ expect_roles = {item.strip().lower() for item in os.environ.get('EXPECT_ROLES', 
 expect_sandbox = os.environ.get('EXPECT_SANDBOX_ID', '').strip()
 expected_report_count = int(os.environ.get('CONCURRENT_RUNPODS', '1') or '1')
 expect_cni_container_id = os.environ.get('EXPECT_CNI_CONTAINER_ID', '').lower() == 'true'
+expect_runpod_request_identity = os.environ.get('EXPECT_RUNPOD_REQUEST_IDENTITY', '').lower() == 'true'
 
 def parse_cni_args(value):
     result = {}
@@ -452,6 +456,31 @@ for idx, report in enumerate(reports):
                 f'report {idx} sandbox {sandbox} has no CNI event with CNI_CONTAINERID/'
                 f'CNI_ARGS infra id matching sandbox; observed CNI ids {mismatched_cni}'
             )
+    if expect_runpod_request_identity:
+        matching_runpod = []
+        decoded_unmatched = []
+        for event in events:
+            if str(event.get('function') or '') != 'RunPodSandbox':
+                continue
+            attrs = event.get('attributes') or {}
+            if not isinstance(attrs, dict):
+                attrs = {}
+            if attrs.get('startup.probe.req_identity') != 'runpod-request':
+                continue
+            pod_identity = (attrs.get('k8s.namespace'), attrs.get('k8s.pod'), attrs.get('k8s.pod_uid'))
+            if str(event.get('sandboxId') or '') == sandbox and all(pod_identity[:2]):
+                matching_runpod.append(event)
+            else:
+                decoded_unmatched.append({
+                    'sandboxId': event.get('sandboxId'),
+                    'correlation': attrs.get('startup.probe.correlation'),
+                    'pod': pod_identity,
+                })
+        if not matching_runpod:
+            raise SystemExit(
+                f'report {idx} sandbox {sandbox} has no RunPodSandbox event with decoded request identity; '
+                f'observed decoded RunPod events {decoded_unmatched}'
+            )
 if expected_report_count > 1 and len(set(sandboxes)) != len(sandboxes):
     raise SystemExit(f'concurrent reports contain duplicate sandbox ids: {sandboxes}')
 if expect_runtime and expect_runtime not in runtime_types:
@@ -468,6 +497,7 @@ print(json.dumps({
     'runtimeTypes': sorted(runtime_types),
     'roles': sorted(all_roles),
     'validatedCniContainerId': expect_cni_container_id,
+    'validatedRunPodRequestIdentity': expect_runpod_request_identity,
 }, separators=(',', ':')))
 PY
 }
