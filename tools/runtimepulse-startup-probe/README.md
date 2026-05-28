@@ -42,6 +42,29 @@ computed from its own event window, allowing RuntimePulse to render a
 `sandbox.startup.callchain` root span per sandbox. Use `--no-group-by-sandbox`
 only for legacy debugging where a single capture-window report is required.
 
+
+## CRI/containerd E2E validation helper
+
+Use `validate-cri-containerd-startup.sh` to make the current runc/Kata startup
+call-chain path repeatable. It can validate an existing probe JSON report, or run
+a timed probe capture window and then normalize the report through
+`host-startup-callchain`.
+
+```bash
+# Validate report shape only.
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup-probe.json
+
+# Also push normalized traces/metrics to the local collector outlet.
+VALIDATE_INGEST=true \
+LOCAL_REPORT_URL=http://127.0.0.1:9091/api/local/ingest \
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup-probe.json
+
+# Capture mode: start this, wait for the ready message, then run crictl runp in
+# another shell before the capture window ends.
+CAPTURE=true RUNTIME_TYPE=kata DURATION_MS=12000 \
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
+```
+
 Limitations:
 
 - This is an exec-level exporter. It provides concrete CNI/runtime/helper binary
