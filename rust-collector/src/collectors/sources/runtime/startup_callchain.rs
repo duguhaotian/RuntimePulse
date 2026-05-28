@@ -139,6 +139,8 @@ struct UprobeEventReport {
     cni_container_id: Option<String>,
     #[serde(alias = "netns")]
     cni_netns: Option<String>,
+    #[serde(alias = "cni_netns_id", alias = "netnsId", alias = "netns_id")]
+    cni_netns_id: Option<String>,
     #[serde(alias = "oci_runtime")]
     oci_runtime: Option<String>,
     #[serde(alias = "oci_operation")]
@@ -184,6 +186,8 @@ struct StartupStageReport {
     cni_container_id: Option<String>,
     #[serde(alias = "netns")]
     cni_netns: Option<String>,
+    #[serde(alias = "cni_netns_id", alias = "netnsId", alias = "netns_id")]
+    cni_netns_id: Option<String>,
     #[serde(alias = "oci_runtime")]
     oci_runtime: Option<String>,
     #[serde(alias = "oci_operation")]
@@ -1151,6 +1155,10 @@ fn span_from_uprobe_pair(
             .cni_netns
             .clone()
             .or_else(|| enter.and_then(|event| event.cni_netns.clone())),
+        cni_netns_id: exit
+            .cni_netns_id
+            .clone()
+            .or_else(|| enter.and_then(|event| event.cni_netns_id.clone())),
         oci_runtime: exit
             .oci_runtime
             .clone()
@@ -1357,6 +1365,12 @@ fn merge_event_attributes(attributes: &mut Map<String, Value>, event: Option<&Up
     }
     if let Some(value) = &event.containerd_id {
         attributes.insert("containerd.id".to_string(), json!(value));
+    }
+    if let Some(value) = &event.cni_netns {
+        attributes.insert("cni.netns".to_string(), json!(value));
+    }
+    if let Some(value) = &event.cni_netns_id {
+        attributes.insert("cni.netns.id".to_string(), json!(value));
     }
     if let Some(value) = &event.k8s_namespace {
         attributes.insert("k8s.namespace".to_string(), json!(value));
@@ -1570,6 +1584,9 @@ fn merge_stage_attributes(
     }
     if let Some(netns) = &stage.cni_netns {
         attributes.insert("cni.netns".to_string(), json!(netns));
+    }
+    if let Some(netns_id) = &stage.cni_netns_id {
+        attributes.insert("cni.netns.id".to_string(), json!(netns_id));
     }
     if let Some(runtime) = &stage.oci_runtime {
         attributes.insert("oci.runtime".to_string(), json!(runtime));

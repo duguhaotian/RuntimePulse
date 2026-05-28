@@ -521,6 +521,7 @@ class ExecObservation:
     cni_plugin: str = ""
     cni_command: str = ""
     cni_netns: str = ""
+    cni_netns_id: str = ""
     oci_runtime: str = ""
     oci_operation: str = ""
     oci_bundle: str = ""
@@ -574,15 +575,18 @@ def parse_go_uprobe_line(line: str) -> tuple[str, GoUprobeObservation] | None:
 
 
 def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type: str, sandbox_id: str = "", cri_sandbox_id: str = "") -> dict[str, object]:
+    role = go_uprobe_role(obs.function)
+    phase = go_uprobe_startup_phase(role)
     attributes: dict[str, object] = {
         "startup.probe.backend": "bpftrace-go-uprobe",
         "startup.probe.correlation": "time-window" if sandbox_id or cri_sandbox_id else "pending-time-window",
+        "startup.phase": phase,
+        "startup.phase.source": "go-uprobe-function",
         "uprobe.symbol": obs.symbol,
         "uprobe.binary": obs.binary,
         "process.thread_id": obs.tid,
     }
     span_name = go_uprobe_span_name(obs.function)
-    role = go_uprobe_role(obs.function)
     event = {
         "eventType": event_type,
         "requestId": obs.request_id,
@@ -628,6 +632,51 @@ def parse_cni_args(value: str) -> dict[str, str]:
     return parsed
 
 
+def netns_identity(path: str) -> dict[str, object]:
+    """Return a stable-ish netns identity for CNI correlation.
+
+    CNI passes the target sandbox netns as a path.  The path may be transient
+    or reused, so capture the nsfs device/inode when the exec event is parsed
+    and use that as the primary association key.
+    """
+    clean = path.strip()
+    if not clean:
+        return {}
+    attrs: dict[str, object] = {"cni.netns.path": clean}
+    try:
+        stat = os.stat(clean)
+    except OSError as exc:
+        attrs["cni.netns.stat_error"] = exc.strerror or exc.__class__.__name__
+        return attrs
+    attrs["cni.netns.dev"] = stat.st_dev
+    attrs["cni.netns.ino"] = stat.st_ino
+    attrs["cni.netns.id"] = f"netns:{stat.st_dev}:{stat.st_ino}"
+    return attrs
+
+
+def exec_startup_phase(role: str) -> str:
+    if role == "cni":
+        return "sandbox-network"
+    if role == "helper":
+        return "helper"
+    if role in {"oci", "kata"}:
+        # A runtime/shim process is a containerd task boundary.  It can be the
+        # sandbox task during RunPodSandbox, or a later workload-container task;
+        # keep the exact containerd id so higher layers can distinguish them.
+        return "containerd-task"
+    return "process"
+
+
+def go_uprobe_startup_phase(role: str) -> str:
+    if role == "cri":
+        return "sandbox-cri"
+    if role == "cni":
+        return "sandbox-network"
+    if role in {"oci", "kata"}:
+        return "containerd-task"
+    return "process"
+
+
 def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str, default_runtime_type: str, forced_sandbox_id: str) -> ExecObservation | None:
     parts = line.rstrip("\n").split("\t")
     expected = 6 + argv_slots + env_slots
@@ -660,12 +709,22 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
     oci_runtime = basename(binary) if role in {"oci", "kata"} and basename(binary).startswith("containerd-shim-") else (basename(binary) if role == "oci" else "")
     oci_operation = infer_oci_operation(argv) if role in {"oci", "kata"} else ""
     cni_plugin = basename(binary) if role == "cni" else ""
+    cni_netns = env.get("CNI_NETNS", "")
+    netns_attrs = netns_identity(cni_netns)
+    cni_netns_id = str(netns_attrs.get("cni.netns.id", "") or "")
 
     attributes: dict[str, object] = {
         "startup.probe.backend": "bpftrace-execve",
+        "startup.phase": exec_startup_phase(role),
+        "startup.phase.source": "exec-role",
         "process.uid": uid,
         "process.gid": gid,
     }
+    if containerd_id:
+        attributes["containerd.container_id"] = containerd_id
+    if cni_container_id:
+        attributes["cni.container_id"] = cni_container_id
+    attributes.update(netns_attrs)
     if bundle:
         attributes["oci.bundle"] = bundle
     if namespace:
@@ -697,7 +756,8 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
         runtime_type=runtime_type,
         cni_plugin=cni_plugin,
         cni_command=env.get("CNI_COMMAND", ""),
-        cni_netns=env.get("CNI_NETNS", ""),
+        cni_netns=cni_netns,
+        cni_netns_id=cni_netns_id,
         oci_runtime=oci_runtime,
         oci_operation=oci_operation,
         oci_bundle=bundle,
@@ -849,6 +909,8 @@ def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str
         event["cniContainerId"] = obs.cri_sandbox_id
     if obs.cni_netns:
         event["cniNetns"] = obs.cni_netns
+    if obs.cni_netns_id:
+        event["cniNetnsId"] = obs.cni_netns_id
     if obs.oci_runtime:
         event["ociRuntime"] = obs.oci_runtime
     if obs.oci_operation:
@@ -928,6 +990,7 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
         event.setdefault("attributes", {})["startup.probe.exitSynthetic"] = "last-observed-startup-event"
         events.append(event)
 
+    events = correlate_cni_netns_events(events)
     events = correlate_go_uprobe_events(events)
     summary = summarize_events(events)
     return events, summary, runtime_type, sandbox_id, cri_sandbox_id or containerd_id
@@ -960,6 +1023,81 @@ def int_event_value(event: dict[str, object], key: str) -> int | None:
         return None
 
 
+def event_attribute(event: dict[str, object], key: str) -> object:
+    attrs = event.get("attributes") or {}
+    if isinstance(attrs, dict):
+        return attrs.get(key, "")
+    return ""
+
+
+def event_netns_key(event: dict[str, object]) -> str:
+    for key in ("cniNetnsId", "cni_netns_id", "netnsId"):
+        value = str(event.get(key, "") or "").strip()
+        if value:
+            return value
+    value = str(event_attribute(event, "cni.netns.id") or "").strip()
+    return value
+
+
+def assign_event_to_sandbox(
+    event: dict[str, object],
+    key: str,
+    cri_id: str,
+    containerd_id: str,
+    runtime_type: str,
+    correlation: str,
+) -> dict[str, object]:
+    updated = dict(event)
+    updated["sandboxId"] = key
+    updated["criSandboxId"] = cri_id or key
+    updated["containerdId"] = containerd_id or cri_id or key
+    updated["runtimeType"] = runtime_type or str(event.get("runtimeType") or "unknown")
+    attrs = dict(updated.get("attributes") or {})
+    attrs["startup.probe.correlation"] = correlation
+    attrs["startup.probe.correlation_sandbox_id"] = key
+    updated["attributes"] = attrs
+    return updated
+
+
+def correlate_cni_netns_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Join CNI/helper execs by netns inode before falling back to id/window joins.
+
+    The CNI target netns is the stable sandbox-network anchor.  This pass lets
+    helpers or plugins that miss CNI_CONTAINERID still join the sandbox when
+    another CNI event in the same capture has the same nsfs device/inode.
+    """
+    netns_to_identity: dict[str, tuple[str, str, str, str]] = {}
+    for event in events:
+        netns = event_netns_key(event)
+        sandbox = event_sandbox_key(event)
+        if not netns or sandbox == "unknown":
+            continue
+        cri_id = str(event.get("criSandboxId", "") or "").strip()
+        containerd_id = str(event.get("containerdId", "") or "").strip()
+        runtime_type = str(event.get("runtimeType", "") or "").strip()
+        netns_to_identity.setdefault(netns, (sandbox, cri_id, containerd_id, runtime_type))
+    if not netns_to_identity:
+        return events
+
+    result: list[dict[str, object]] = []
+    for event in events:
+        if event_sandbox_key(event) != "unknown":
+            result.append(event)
+            continue
+        role = str(event.get("role") or "").lower()
+        if role not in {"cni", "helper"}:
+            result.append(event)
+            continue
+        netns = event_netns_key(event)
+        identity = netns_to_identity.get(netns)
+        if not identity:
+            result.append(event)
+            continue
+        sandbox, cri_id, containerd_id, runtime_type = identity
+        result.append(assign_event_to_sandbox(event, sandbox, cri_id, containerd_id, runtime_type, "netns"))
+    return result
+
+
 def assign_go_uprobe_to_sandbox(
     event: dict[str, object],
     key: str,
@@ -967,16 +1105,7 @@ def assign_go_uprobe_to_sandbox(
     runtime_type: str,
     correlation: str,
 ) -> dict[str, object]:
-    updated = dict(event)
-    updated["sandboxId"] = key
-    updated["criSandboxId"] = cri_id or key
-    updated["containerdId"] = cri_id or key
-    updated["runtimeType"] = runtime_type or str(event.get("runtimeType") or "unknown")
-    attrs = dict(updated.get("attributes") or {})
-    attrs["startup.probe.correlation"] = correlation
-    attrs["startup.probe.correlation_sandbox_id"] = key
-    updated["attributes"] = attrs
-    return updated
+    return assign_event_to_sandbox(event, key, cri_id, cri_id or key, runtime_type, correlation)
 
 
 def runtime_boundary_go_uprobe(event: dict[str, object]) -> bool:
@@ -992,6 +1121,8 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
     pid_to_key: dict[int, str] = {}
     pid_to_cri_id: dict[int, str] = {}
     pid_to_runtime: dict[int, str] = {}
+    pid_to_containerd_id: dict[int, str] = {}
+    pid_to_phase: dict[int, str] = {}
     for key in sorted({event_sandbox_key(event) for event in sandbox_events}):
         group = [event for event in sandbox_events if event_sandbox_key(event) == key]
         start, end = event_time_range(group)
@@ -1008,6 +1139,8 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
             pid_to_key.setdefault(pid, key)
             pid_to_cri_id.setdefault(pid, cri_id)
             pid_to_runtime.setdefault(pid, runtime)
+            pid_to_containerd_id.setdefault(pid, str(item.get("containerdId", "") or ""))
+            pid_to_phase.setdefault(pid, str(event_attribute(item, "startup.phase") or ""))
     if not windows:
         return events
     result: list[dict[str, object]] = []
@@ -1025,15 +1158,22 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
         if runtime_boundary_go_uprobe(event):
             if pid is not None and pid in pid_to_key:
                 key = pid_to_key[pid]
-                result.append(
-                    assign_go_uprobe_to_sandbox(
-                        event,
-                        key,
-                        pid_to_cri_id.get(pid, key),
-                        pid_to_runtime.get(pid, runtime_by_key.get(key, "unknown")),
-                        "pid",
-                    )
+                assigned = assign_event_to_sandbox(
+                    event,
+                    key,
+                    pid_to_cri_id.get(pid, key),
+                    pid_to_containerd_id.get(pid, pid_to_cri_id.get(pid, key)),
+                    pid_to_runtime.get(pid, runtime_by_key.get(key, "unknown")),
+                    "pid",
                 )
+                attrs = dict(assigned.get("attributes") or {})
+                if pid_to_phase.get(pid):
+                    attrs["startup.phase"] = pid_to_phase[pid]
+                    attrs["startup.phase.source"] = "matched-shim-pid"
+                if pid_to_containerd_id.get(pid):
+                    attrs["containerd.container_id"] = pid_to_containerd_id[pid]
+                assigned["attributes"] = attrs
+                result.append(assigned)
             continue
 
         ts = event_time(event)
@@ -1065,7 +1205,22 @@ def inherit_parent_context(obs: ExecObservation, parent: ExecObservation) -> Non
         obs.cni_plugin = obs.cni_plugin or parent.cni_plugin
         obs.cni_command = obs.cni_command or parent.cni_command
         obs.cni_netns = obs.cni_netns or parent.cni_netns
-        for key in ("cni.ifname", "cni.path", "cni.args.K8S_POD_NAMESPACE", "cni.args.K8S_POD_NAME", "cni.args.K8S_POD_UID"):
+        obs.cni_netns_id = obs.cni_netns_id or parent.cni_netns_id
+        obs.attributes["startup.phase"] = "sandbox-network-helper"
+        obs.attributes["startup.phase.source"] = "parent-cni"
+        for key in (
+            "cni.ifname",
+            "cni.path",
+            "cni.container_id",
+            "cni.netns.path",
+            "cni.netns.dev",
+            "cni.netns.ino",
+            "cni.netns.id",
+            "cni.netns.stat_error",
+            "cni.args.K8S_POD_NAMESPACE",
+            "cni.args.K8S_POD_NAME",
+            "cni.args.K8S_POD_UID",
+        ):
             if key in parent.attributes:
                 obs.attributes.setdefault(key, parent.attributes[key])
 
@@ -1414,9 +1569,9 @@ def self_test() -> None:
         "RP_GO_UPROBE_ENTER\t1779940000160000000\t91\t92\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
         "RP_GO_UPROBE_EXIT\t1779940000180000000\t91\t92\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
         "RP_EXEC_ENTER\t91\t1\t0\t0\tcontainerd\t/usr/bin/containerd-shim-runc-v2\t/usr/bin/containerd-shim-runc-v2\t-namespace\tk8s.io\t-id\tabc123\t\t\t\t\n",
-        "RP_EXEC_ENTER\t100\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
+        "RP_EXEC_ENTER\t100\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/proc/self/ns/net\t\n",
         "RP_PROC_EXIT\t100\tbridge\n",
-        "RP_EXEC_ENTER\t102\t100\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
+        "RP_EXEC_ENTER\t102\t100\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/proc/self/ns/net\t\n",
         "RP_PROC_EXIT\t102\tiptables\n",
         "RP_EXEC_ENTER\t101\t1\t0\t0\tcontainerd\t/usr/local/bin/kata-runtime\tkata-runtime\t--bundle\t/run/containerd/io.containerd.runtime.v2.task/k8s.io/abc123\tcreate\tabc123\t\t\t\t\n",
         "RP_PROC_EXIT\t101\tkata-runtime\n",
@@ -1430,6 +1585,15 @@ def self_test() -> None:
     assert summary["observedCniExecCount"] == 2.0
     assert summary["observedHelperExecCount"] == 1.0
     assert summary["observedOciExecCount"] == 3.0
+    cni_events = [
+        e
+        for e in events
+        if e.get("eventType") == "enter"
+        and e.get("role") in {"cni", "helper"}
+        and (e.get("attributes") or {}).get("startup.probe.backend") == "bpftrace-execve"
+    ]
+    assert all(e.get("cniNetnsId") for e in cni_events)
+    assert any((e.get("attributes") or {}).get("startup.phase") == "containerd-task" for e in events if e.get("role") == "oci")
 
     multi_lines = [
         "RP_EXEC_ENTER\t200\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
@@ -1459,6 +1623,19 @@ def self_test() -> None:
     assert len(orphan_reports) == 1
     assert orphan_reports[0]["sandboxId"] == "sandbox-c"
     assert not any(event.get("function") == "OCIRuncCreate" for event in orphan_reports[0]["events"])
+
+    netns_lines = [
+        "RP_EXEC_ENTER\t400\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-netns\tCNI_NETNS=/proc/self/ns/net\t\n",
+        "RP_PROC_EXIT\t400\tbridge\n",
+        "RP_EXEC_ENTER\t401\t1\t0\t0\tcontainerd\t/opt/cni/bin/portmap\t/opt/cni/bin/portmap\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_NETNS=/proc/self/ns/net\t\t\n",
+        "RP_PROC_EXIT\t401\tportmap\n",
+    ]
+    netns_events, netns_summary, netns_runtime, _netns_sandbox, _netns_cri = collect_from_stream(netns_lines, 6, 4, "runc", "", None)
+    netns_reports = grouped_reports(netns_events, netns_runtime, "", "", "self-test")
+    assert len(netns_reports) == 1
+    assert netns_reports[0]["sandboxId"] == "sandbox-netns"
+    assert netns_summary["observedCniExecCount"] == 2.0
+    assert any((event.get("attributes") or {}).get("startup.probe.correlation") == "netns" for event in netns_events)
     print("self-test ok")
 
 
