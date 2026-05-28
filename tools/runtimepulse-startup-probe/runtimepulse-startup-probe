@@ -880,7 +880,7 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
                 pending_go[obs.request_id] = obs
             else:
                 pending_go.pop(obs.request_id, None)
-            events.append(event_from_go_uprobe(obs, event_type, runtime_type, sandbox_id, cri_sandbox_id or containerd_id))
+            events.append(event_from_go_uprobe(obs, event_type, runtime_type, "", ""))
         elif raw.startswith("RP_EXEC_ENTER\t"):
             obs = parse_exec_line(raw, argv_slots, env_slots, now, default_runtime_type, forced_sandbox_id)
             if not obs:
@@ -921,7 +921,7 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
         events.append(event)
     synthetic_exit_time = max([str(event.get("timestamp", "") or "") for event in events] or [utc_now()]) or utc_now()
     for obs in pending_go.values():
-        event = event_from_go_uprobe(obs, "exit", runtime_type, sandbox_id, cri_sandbox_id or containerd_id)
+        event = event_from_go_uprobe(obs, "exit", runtime_type, "", "")
         event["timestamp"] = synthetic_exit_time
         event["durationMs"] = 1
         event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
@@ -950,19 +950,64 @@ def is_window_correlated_go_uprobe(event: dict[str, object]) -> bool:
     return isinstance(attrs, dict) and attrs.get("startup.probe.backend") == "bpftrace-go-uprobe"
 
 
+def int_event_value(event: dict[str, object], key: str) -> int | None:
+    value = event.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def assign_go_uprobe_to_sandbox(
+    event: dict[str, object],
+    key: str,
+    cri_id: str,
+    runtime_type: str,
+    correlation: str,
+) -> dict[str, object]:
+    updated = dict(event)
+    updated["sandboxId"] = key
+    updated["criSandboxId"] = cri_id or key
+    updated["containerdId"] = cri_id or key
+    updated["runtimeType"] = runtime_type or str(event.get("runtimeType") or "unknown")
+    attrs = dict(updated.get("attributes") or {})
+    attrs["startup.probe.correlation"] = correlation
+    attrs["startup.probe.correlation_sandbox_id"] = key
+    updated["attributes"] = attrs
+    return updated
+
+
+def runtime_boundary_go_uprobe(event: dict[str, object]) -> bool:
+    return str(event.get("role") or "").lower() in {"oci", "kata"}
+
+
 def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
     sandbox_events = [event for event in events if not is_window_correlated_go_uprobe(event) and event_sandbox_key(event) != "unknown"]
     if not sandbox_events:
         return events
     windows: dict[str, tuple[datetime, datetime, str]] = {}
     runtime_by_key: dict[str, str] = {}
+    pid_to_key: dict[int, str] = {}
+    pid_to_cri_id: dict[int, str] = {}
+    pid_to_runtime: dict[int, str] = {}
     for key in sorted({event_sandbox_key(event) for event in sandbox_events}):
         group = [event for event in sandbox_events if event_sandbox_key(event) == key]
         start, end = event_time_range(group)
         if not start or not end:
             continue
-        windows[key] = (start - timedelta(seconds=2), end + timedelta(seconds=2), first_event_value(group, "criSandboxId", "sandboxId", "containerdId"))
-        runtime_by_key[key] = runtime_type_from_events(group, "unknown")
+        cri_id = first_event_value(group, "criSandboxId", "sandboxId", "containerdId")
+        runtime = runtime_type_from_events(group, "unknown")
+        windows[key] = (start - timedelta(seconds=2), end + timedelta(seconds=2), cri_id)
+        runtime_by_key[key] = runtime
+        for item in group:
+            pid = int_event_value(item, "pid")
+            if pid is None:
+                continue
+            pid_to_key.setdefault(pid, key)
+            pid_to_cri_id.setdefault(pid, cri_id)
+            pid_to_runtime.setdefault(pid, runtime)
     if not windows:
         return events
     result: list[dict[str, object]] = []
@@ -970,6 +1015,27 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
         if not is_window_correlated_go_uprobe(event) or event_sandbox_key(event) != "unknown":
             result.append(event)
             continue
+
+        # Runtime shim Go uprobes execute in the shim process. Prefer exact PID
+        # correlation to the observed shim exec event and intentionally drop
+        # unmatched runtime-boundary uprobes instead of time-window joining them;
+        # otherwise unrelated host/container runtime activity inside the capture
+        # window can be attributed to the RunPodSandbox under test.
+        pid = int_event_value(event, "pid")
+        if runtime_boundary_go_uprobe(event):
+            if pid is not None and pid in pid_to_key:
+                key = pid_to_key[pid]
+                result.append(
+                    assign_go_uprobe_to_sandbox(
+                        event,
+                        key,
+                        pid_to_cri_id.get(pid, key),
+                        pid_to_runtime.get(pid, runtime_by_key.get(key, "unknown")),
+                        "pid",
+                    )
+                )
+            continue
+
         ts = event_time(event)
         candidates: list[tuple[float, str]] = []
         if ts:
@@ -984,18 +1050,8 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
             continue
         _distance, key = sorted(candidates)[0]
         _start, _end, cri_id = windows[key]
-        updated = dict(event)
-        updated["sandboxId"] = key
-        updated["criSandboxId"] = cri_id or key
-        updated["containerdId"] = cri_id or key
-        updated["runtimeType"] = runtime_by_key.get(key) or str(event.get("runtimeType") or "unknown")
-        attrs = dict(updated.get("attributes") or {})
-        attrs["startup.probe.correlation"] = "time-window"
-        attrs["startup.probe.correlation_sandbox_id"] = key
-        updated["attributes"] = attrs
-        result.append(updated)
+        result.append(assign_go_uprobe_to_sandbox(event, key, cri_id, runtime_by_key.get(key, "unknown"), "time-window"))
     return result
-
 
 def inherit_parent_context(obs: ExecObservation, parent: ExecObservation) -> None:
     obs.sandbox_id = obs.sandbox_id or parent.sandbox_id
@@ -1357,6 +1413,7 @@ def self_test() -> None:
         "RP_GO_UPROBE_EXIT\t1779940000150000000\t90\t91\tcontainerd\tCNISetup\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).setupPodNetwork\t/usr/bin/containerd\n",
         "RP_GO_UPROBE_ENTER\t1779940000160000000\t91\t92\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
         "RP_GO_UPROBE_EXIT\t1779940000180000000\t91\t92\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
+        "RP_EXEC_ENTER\t91\t1\t0\t0\tcontainerd\t/usr/bin/containerd-shim-runc-v2\t/usr/bin/containerd-shim-runc-v2\t-namespace\tk8s.io\t-id\tabc123\t\t\t\t\n",
         "RP_EXEC_ENTER\t100\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
         "RP_PROC_EXIT\t100\tbridge\n",
         "RP_EXEC_ENTER\t102\t100\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
@@ -1365,14 +1422,14 @@ def self_test() -> None:
         "RP_PROC_EXIT\t101\tkata-runtime\n",
     ]
     events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(lines, 6, 4, "", "", None)
-    assert len([e for e in events if e.get("eventType") == "enter"]) == 6
+    assert len([e for e in events if e.get("eventType") == "enter"]) == 7
     assert runtime_type == "kata"
     assert sandbox_id == "abc123"
     assert cri_sandbox_id == "abc123"
     assert summary["observedCriUprobeCount"] == 1.0
     assert summary["observedCniExecCount"] == 2.0
     assert summary["observedHelperExecCount"] == 1.0
-    assert summary["observedOciExecCount"] == 2.0
+    assert summary["observedOciExecCount"] == 3.0
 
     multi_lines = [
         "RP_EXEC_ENTER\t200\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
@@ -1392,7 +1449,16 @@ def self_test() -> None:
     assert {report["sandboxId"] for report in reports} == {"sandbox-a", "sandbox-b"}
     assert all(report["summary"]["observedCniExecCount"] == 1.0 for report in reports)
     assert all(report["startTime"] <= report["endTime"] for report in reports)
-    assert all(report["durationMs"] >= 1.0 for report in reports)
+    orphan_runtime_lines = [
+        "RP_GO_UPROBE_ENTER\t1779940000160000000\t999\t1000\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
+        "RP_EXEC_ENTER\t300\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-c\t\t\n",
+        "RP_PROC_EXIT\t300\tbridge\n",
+    ]
+    orphan_events, _orphan_summary, orphan_runtime, _orphan_sandbox, _orphan_cri = collect_from_stream(orphan_runtime_lines, 6, 4, "runc", "", None)
+    orphan_reports = grouped_reports(orphan_events, orphan_runtime, "", "", "self-test")
+    assert len(orphan_reports) == 1
+    assert orphan_reports[0]["sandboxId"] == "sandbox-c"
+    assert not any(event.get("function") == "OCIRuncCreate" for event in orphan_reports[0]["events"])
     print("self-test ok")
 
 

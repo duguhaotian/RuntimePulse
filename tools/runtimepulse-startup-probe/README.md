@@ -115,7 +115,9 @@ normalization. With `--enable-cni-go-uprobes`, it also attaches to
 RunPodSandbox envelope can be separated from the containerd CNI setup boundary
 and individual CNI plugin binary exec spans. With `--enable-runtime-go-uprobes`,
 it also emits `oci.shim.*`, `oci.runc.*`, `kata.shim.*`, and
-`kata.sandbox.*` boundary spans from runtime shim binaries. Extra symbols can be
+`kata.sandbox.*` boundary spans from runtime shim binaries. Runtime-shim uprobe
+events are attributed by exact shim PID first to avoid pulling unrelated host
+runtime activity into the active RunPodSandbox window. Extra symbols can be
 supplied with repeated `--go-uprobe-symbol` / `--cni-go-uprobe-symbol` /
 `--runtime-go-uprobe-symbol` (or the matching
 `RUNTIMEPULSE_STARTUP_PROBE_*_SYMBOLS` env vars) when investigating specific
