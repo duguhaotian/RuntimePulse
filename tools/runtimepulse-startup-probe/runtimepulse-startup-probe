@@ -2357,7 +2357,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--source", default="runtimepulse-startup-probe")
     export.add_argument("--argv-slots", type=int, default=16)
     export.add_argument("--env-slots", type=int, default=32)
-    export.add_argument("--strlen", type=int, default=256)
+    export.add_argument("--strlen", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_STRLEN", "1024")))
     export.add_argument("--from-bpftrace-log", help=argparse.SUPPRESS)
     export.add_argument(
         "--ready-file",
