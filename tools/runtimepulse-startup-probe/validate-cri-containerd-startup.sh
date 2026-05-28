@@ -17,7 +17,9 @@ RUNTIME_TYPE="${RUNTIME_TYPE:-}"
 CONTAINERD_NAMESPACE="${CONTAINERD_NAMESPACE:-k8s.io}"
 INCLUDE_HELPERS="${INCLUDE_HELPERS:-true}"
 LOCAL_REPORT_URL="${LOCAL_REPORT_URL:-http://127.0.0.1:9091/api/local/ingest}"
+QUERY_API_URL="${QUERY_API_URL:-http://127.0.0.1:8081/api}"
 VALIDATE_INGEST="${VALIDATE_INGEST:-false}"
+VALIDATE_QUERY_API="${VALIDATE_QUERY_API:-false}"
 CRI_ENDPOINT="${CRI_ENDPOINT:-}"
 IMAGE_ENDPOINT="${IMAGE_ENDPOINT:-$CRI_ENDPOINT}"
 POD_CONFIG="${POD_CONFIG:-}"
@@ -60,7 +62,9 @@ Common env:
   EXPECT_ROLES=cni,kata        Optional required enter-event roles.
   EXPECT_SANDBOX_ID=...        Optional required sandbox id; auto-filled from runp.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
+  VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
   LOCAL_REPORT_URL=http://127.0.0.1:9091/api/local/ingest
+  QUERY_API_URL=http://127.0.0.1:8081/api
 USAGE
 }
 
@@ -281,6 +285,75 @@ print(json.dumps(last, separators=(',', ':')))
 PY
 }
 
+query_api_sandboxes() {
+  python3 - "$REPORT_PATH" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as handle:
+    payload = json.load(handle)
+reports = payload.get('reports') if isinstance(payload, dict) else None
+if reports is None:
+    reports = [payload]
+for report in reports:
+    sandbox = report.get('sandboxId') or report.get('criSandboxId')
+    if sandbox:
+        print(sandbox)
+PY
+}
+
+validate_query_api_output() {
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl not found; cannot validate Query API" >&2
+    exit 1
+  fi
+
+  local sandbox_id
+  local trace_file
+  local metrics_file
+  while IFS= read -r sandbox_id; do
+    [[ -n "$sandbox_id" ]] || continue
+    trace_file="$OUT_DIR/query-trace-${sandbox_id}.json"
+    metrics_file="$OUT_DIR/query-metrics-${sandbox_id}.json"
+    curl -fsS "$QUERY_API_URL/sandboxes/$sandbox_id/trace" > "$trace_file"
+    curl -fsS "$QUERY_API_URL/sandboxes/$sandbox_id/metrics" > "$metrics_file"
+    EXPECT_ROLES="$EXPECT_ROLES" EXPECT_RUNTIME_TYPE="$EXPECT_RUNTIME_TYPE" \
+    python3 - "$trace_file" "$metrics_file" "$sandbox_id" <<'PY'
+import json, os, sys
+trace_path, metrics_path, sandbox_id = sys.argv[1:4]
+expect_roles = {item.strip().lower() for item in os.environ.get('EXPECT_ROLES', '').split(',') if item.strip()}
+expect_runtime = os.environ.get('EXPECT_RUNTIME_TYPE', '').strip().lower()
+with open(trace_path, encoding='utf-8') as handle:
+    traces = json.load(handle).get('data') or []
+with open(metrics_path, encoding='utf-8') as handle:
+    metrics = json.load(handle).get('data') or []
+if not traces:
+    raise SystemExit(f'Query API returned no traces for {sandbox_id}')
+if not metrics:
+    raise SystemExit(f'Query API returned no metrics for {sandbox_id}')
+span_names = {str(span.get('spanName') or '') for span in traces}
+if 'sandbox.startup.callchain' not in span_names:
+    raise SystemExit(f'missing sandbox.startup.callchain span for {sandbox_id}: {sorted(span_names)}')
+roles = {str((span.get('attributes') or {}).get('process.role') or '').lower() for span in traces}
+roles.discard('')
+missing_roles = sorted(expect_roles - roles)
+if missing_roles:
+    raise SystemExit(f'Query API missing roles {missing_roles} for {sandbox_id}, observed {sorted(roles)}')
+runtime_types = {str(span.get('runtimeType') or '').lower() for span in traces if span.get('runtimeType')}
+if expect_runtime and expect_runtime not in runtime_types:
+    raise SystemExit(f'Query API expected runtime {expect_runtime} for {sandbox_id}, observed {sorted(runtime_types)}')
+metric_names = {series.get('name') for series in metrics}
+if 'sandbox.startup.callchain_duration_ms' not in metric_names:
+    raise SystemExit(f'missing sandbox.startup.callchain_duration_ms metric for {sandbox_id}')
+print(json.dumps({
+    'sandboxId': sandbox_id,
+    'traces': len(traces),
+    'metrics': len(metrics),
+    'roles': sorted(roles),
+    'runtimeTypes': sorted(runtime_types),
+}, separators=(',', ':')))
+PY
+  done < <(query_api_sandboxes)
+}
+
 if [[ "${CAPTURE:-false}" == "true" ]]; then
   capture_probe
 else
@@ -288,9 +361,13 @@ else
 fi
 
 validate_report_shape
-if [[ "$VALIDATE_INGEST" == "true" ]]; then
+if [[ "$VALIDATE_INGEST" == "true" || "$VALIDATE_QUERY_API" == "true" ]]; then
   normalize_report
   validate_collector_output
 else
   echo "report shape validated; set VALIDATE_INGEST=true to send through host-startup-callchain" >&2
+fi
+
+if [[ "$VALIDATE_QUERY_API" == "true" ]]; then
+  validate_query_api_output
 fi
