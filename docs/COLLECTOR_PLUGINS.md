@@ -122,8 +122,11 @@ The repository includes a minimal exporter at
 `tools/runtimepulse-startup-probe/runtimepulse-startup-probe`. It uses real
 `bpftrace` exec/exit tracepoints to emit raw startup-callchain events for CNI
 plugin binaries, OCI/Kata runtime binaries, containerd shims, and optional helper
-binaries. This is the first concrete exporter bridge; native containerd
-`RunPodSandbox` Go uprobes can be added behind the same JSON contract later.
+binaries. When a capture window observes multiple sandbox ids, the exporter emits
+one lightweight report per sandbox under `reports` so concurrent starts keep
+separate CNI/helper/runtime metrics. This is the first concrete exporter bridge;
+native containerd `RunPodSandbox` Go uprobes can be added behind the same JSON
+contract later.
 
 Local one-shot validation can read the bundled raw-event example without a real
 uprobe exporter:

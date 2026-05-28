@@ -14,6 +14,8 @@ Current coverage:
 - Optional helper binaries such as `iptables`, `nft`, `ip`, and `tc`.
 - Correlation by `CNI_CONTAINERID`, Kubernetes CNI args, containerd shim `-id`,
   or OCI/containerd bundle path.
+- Per-sandbox report grouping when one capture window observes multiple sandbox
+  ids, so concurrent pod starts do not merge their CNI/helper/runtime metrics.
 
 Example with host-agent:
 
@@ -32,6 +34,11 @@ For local parser validation without attaching BPF:
 ```bash
 tools/runtimepulse-startup-probe/runtimepulse-startup-probe self-test
 ```
+
+By default the exporter groups captured events into one report per observed
+`sandboxId`/`criSandboxId` and emits a top-level `reports` array when more than
+one sandbox is seen. Use `--no-group-by-sandbox` only for legacy debugging where
+a single capture-window report is required.
 
 Limitations:
 

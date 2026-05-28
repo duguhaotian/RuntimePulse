@@ -611,7 +611,95 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str]) -> list[str]:
     return lines
 
 
-def emit_report(events: list[dict[str, object]], summary: dict[str, float], runtime_type: str, sandbox_id: str, cri_sandbox_id: str, source: str) -> None:
+def event_sandbox_key(event: dict[str, object]) -> str:
+    for key in ("sandboxId", "criSandboxId", "containerdId"):
+        value = str(event.get(key, "") or "").strip()
+        if value:
+            return value
+    return "unknown"
+
+
+def runtime_type_from_events(events: list[dict[str, object]], default: str) -> str:
+    runtime_type = default or "unknown"
+    for event in events:
+        runtime_type = choose_runtime_type(runtime_type, str(event.get("runtimeType", "") or ""))
+    return runtime_type
+
+
+def first_event_value(events: list[dict[str, object]], *keys: str) -> str:
+    for event in events:
+        for key in keys:
+            value = str(event.get(key, "") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def report_from_events(
+    events: list[dict[str, object]],
+    runtime_type: str,
+    sandbox_id: str,
+    cri_sandbox_id: str,
+    source: str,
+) -> dict[str, object]:
+    report_sandbox_id = sandbox_id or first_event_value(
+        events, "sandboxId", "criSandboxId", "containerdId"
+    )
+    report_cri_sandbox_id = cri_sandbox_id or first_event_value(
+        events, "criSandboxId", "sandboxId", "containerdId"
+    )
+    return {
+        "source": source,
+        "timestamp": utc_now(),
+        "runtimeType": runtime_type_from_events(events, runtime_type),
+        "sandboxId": report_sandbox_id,
+        "criSandboxId": report_cri_sandbox_id,
+        "containerdId": first_event_value(events, "containerdId", "criSandboxId", "sandboxId"),
+        "summary": summarize_events(events),
+        "events": events,
+    }
+
+
+def grouped_reports(
+    events: list[dict[str, object]],
+    runtime_type: str,
+    sandbox_id: str,
+    cri_sandbox_id: str,
+    source: str,
+) -> list[dict[str, object]]:
+    groups: dict[str, list[dict[str, object]]] = {}
+    for event in events:
+        groups.setdefault(event_sandbox_key(event), []).append(event)
+    if not groups:
+        return [report_from_events([], runtime_type, sandbox_id, cri_sandbox_id, source)]
+    return [
+        report_from_events(group_events, runtime_type, "", "", source)
+        for _key, group_events in sorted(groups.items())
+    ]
+
+
+def emit_report(
+    events: list[dict[str, object]],
+    summary: dict[str, float],
+    runtime_type: str,
+    sandbox_id: str,
+    cri_sandbox_id: str,
+    source: str,
+    group_by_sandbox: bool = True,
+) -> None:
+    if group_by_sandbox:
+        reports = grouped_reports(events, runtime_type, sandbox_id, cri_sandbox_id, source)
+        if len(reports) == 1:
+            print(json.dumps(reports[0], separators=(",", ":")))
+        else:
+            print(
+                json.dumps(
+                    {"source": source, "timestamp": utc_now(), "reports": reports},
+                    separators=(",", ":"),
+                )
+            )
+        return
+
     report = {
         "source": source,
         "timestamp": utc_now(),
@@ -649,7 +737,15 @@ def export_command(args: argparse.Namespace) -> None:
         args.sandbox_id,
         namespaces,
     )
-    emit_report(events, summary, runtime_type, sandbox_id, cri_sandbox_id, args.source)
+    emit_report(
+        events,
+        summary,
+        runtime_type,
+        sandbox_id,
+        cri_sandbox_id,
+        args.source,
+        not args.no_group_by_sandbox,
+    )
 
 
 def self_test() -> None:
@@ -669,6 +765,24 @@ def self_test() -> None:
     assert summary["observedCniExecCount"] == 1.0
     assert summary["observedHelperExecCount"] == 1.0
     assert summary["observedOciExecCount"] == 1.0
+
+    multi_lines = [
+        "RP_EXEC_ENTER\t200\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
+        "RP_PROC_EXIT\t200\tbridge\n",
+        "RP_EXEC_ENTER\t201\t1\t0\t0\tcontainerd\t/opt/cni/bin/host-local\t/opt/cni/bin/host-local\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-b\t\n",
+        "RP_PROC_EXIT\t201\thost-local\n",
+    ]
+    (
+        multi_events,
+        _multi_summary,
+        multi_runtime,
+        _multi_sandbox_id,
+        _multi_cri_sandbox_id,
+    ) = collect_from_stream(multi_lines, 6, 4, "runc", "", None)
+    reports = grouped_reports(multi_events, multi_runtime, "", "", "self-test")
+    assert len(reports) == 2
+    assert {report["sandboxId"] for report in reports} == {"sandbox-a", "sandbox-b"}
+    assert all(report["summary"]["observedCniExecCount"] == 1.0 for report in reports)
     print("self-test ok")
 
 
@@ -691,7 +805,18 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--env-slots", type=int, default=32)
     export.add_argument("--strlen", type=int, default=256)
     export.add_argument("--from-bpftrace-log", help=argparse.SUPPRESS)
-    export.add_argument("--ready-file", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_READY_FILE", ""), help="write this file after bpftrace reports probes are attached")
+    export.add_argument(
+        "--ready-file",
+        default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_READY_FILE", ""),
+        help="write this file after bpftrace reports probes are attached",
+    )
+    export.add_argument(
+        "--no-group-by-sandbox",
+        action="store_true",
+        default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_NO_GROUP_BY_SANDBOX", "false").lower()
+        == "true",
+        help="emit one legacy report for the whole capture window instead of one report per sandbox id",
+    )
     export.set_defaults(func=export_command)
 
     test_cmd = sub.add_parser("self-test", help="run parser self-test")

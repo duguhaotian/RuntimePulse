@@ -152,7 +152,10 @@ same stable sandbox id as CRI/containerd events (`k8s-{namespace}-{pod}-{contain
 when pod fields are present, otherwise the CRI/containerd sandbox id), uses
 `cri-containerd-startup-{stableSandboxId}`, and parents the call-chain root under
 the existing `sandbox.startup.e2e` root span. Detailed RunPod/CNI/OCI/Kata spans
-therefore join the lightweight CRI+containerd startup trace by default. See
+therefore join the lightweight CRI+containerd startup trace by default. If one
+exporter capture window sees multiple sandbox ids, it should emit a top-level
+`reports` array with one lightweight report per sandbox id; the bundled
+`runtimepulse-startup-probe` does this by default. See
 `rust-collector/examples/startup-uprobe-events.json` for the raw event shape.
 When summary values are absent, RuntimePulse derives first-pass aggregate
 metrics from the spans, including CNI duration/plugin count, OCI duration/call
