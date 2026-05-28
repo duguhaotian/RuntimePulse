@@ -97,6 +97,19 @@ EXPECT_ROLES=cri,cni,kata \
 CRI_ENDPOINT=unix:///tmp/runtimepulse-containerd-cri-test/containerd.sock \
 POD_CONFIG=/tmp/runtimepulse-containerd-cri-test/pod-config-kata.json \
 tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
+
+# Concurrent RunPodSandbox capture: verify reports stay isolated when two pods
+# start inside the same probe window. Works for runc or Kata by switching
+# RUNTIME_TYPE/CRI_RUNTIME_HANDLER and POD_CONFIG.
+CAPTURE=true VALIDATE_INGEST=true CONCURRENT_RUNPODS=2 \
+EXPECT_PROCESS_BINARY_METRICS=true EXPECT_ROLES=cni,kata \
+RUNTIME_TYPE=kata CRI_RUNTIME_HANDLER=kata \
+ENABLE_GO_UPROBES=true ENABLE_CNI_GO_UPROBES=true ENABLE_RUNTIME_GO_UPROBES=true \
+CONTAINERD_BINARY=/usr/bin/containerd \
+CONTAINERD_CONFIG=/tmp/runtimepulse-containerd-cri-test/config.toml \
+CRI_ENDPOINT=unix:///tmp/runtimepulse-containerd-cri-test/containerd.sock \
+POD_CONFIG=/tmp/runtimepulse-containerd-cri-test/pod-config-kata.json \
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 ```
 
 High-precision RunPodSandbox uprobe mode:

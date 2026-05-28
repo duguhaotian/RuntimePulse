@@ -130,8 +130,12 @@ The normalizer derives aggregate startup metrics plus per-process-binary
 breakdowns named `sandbox.startup.process.binary.<binary>_{count,duration_ms}`.
 Those series carry `process.binary.name` and `process.roles` attributes so CNI
 plugin binaries and helper binaries such as `iptables` can be analyzed and shown
-separately. This is the first concrete exporter bridge; native containerd
-`RunPodSandbox` Go uprobes can be added behind the same JSON contract later.
+separately. `validate-cri-containerd-startup.sh` can set `CONCURRENT_RUNPODS` to
+start multiple CRI sandboxes in one capture and assert that each emitted report
+contains only its own sandbox/container ids; this has been validated for both
+runc and Kata on the standalone CRI+containerd test setup. This is the first
+concrete exporter bridge; native containerd `RunPodSandbox` Go uprobes can be
+added behind the same JSON contract later.
 
 Local one-shot validation can read the bundled raw-event example without a real
 uprobe exporter:
