@@ -31,6 +31,9 @@ EXPECT_ROLES="${EXPECT_ROLES:-}"
 EXPECT_SANDBOX_ID="${EXPECT_SANDBOX_ID:-}"
 EXPECT_ANALYSIS="${EXPECT_ANALYSIS:-false}"
 EXPECT_PARENT_LINKS="${EXPECT_PARENT_LINKS:-false}"
+ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
+CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
+GO_UPROBE_SYMBOLS="${GO_UPROBE_SYMBOLS:-}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
@@ -71,6 +74,9 @@ Common env:
   LOCAL_REPORT_URL=http://127.0.0.1:9091/api/local/ingest
   QUERY_API_URL=http://127.0.0.1:8081/api
   QUERY_API_RETRY_SECONDS=10   Wait for collector outlet to flush to Query API.
+  ENABLE_GO_UPROBES=true       Attach containerd RunPodSandbox Go uprobes.
+  CONTAINERD_BINARY=/usr/bin/containerd  Optional containerd binary for symbol discovery.
+  GO_UPROBE_SYMBOLS=pattern    Optional comma-separated Go symbol/pattern list.
 USAGE
 }
 
@@ -155,11 +161,24 @@ run_pod_sandbox() {
 capture_probe() {
   local helper_args=()
   local runtime_args=()
+  local uprobe_args=()
   if [[ "$INCLUDE_HELPERS" == "true" ]]; then
     helper_args+=(--include-helpers)
   fi
   if [[ -n "$RUNTIME_TYPE" ]]; then
     runtime_args+=(--runtime-type "$RUNTIME_TYPE")
+  fi
+  if [[ "$ENABLE_GO_UPROBES" == "true" ]]; then
+    uprobe_args+=(--enable-go-uprobes)
+    if [[ -n "$CONTAINERD_BINARY" ]]; then
+      uprobe_args+=(--containerd-binary "$CONTAINERD_BINARY")
+    fi
+    if [[ -n "$GO_UPROBE_SYMBOLS" ]]; then
+      IFS=',' read -r -a _go_uprobe_symbols <<< "$GO_UPROBE_SYMBOLS"
+      for _symbol in "${_go_uprobe_symbols[@]}"; do
+        [[ -n "$_symbol" ]] && uprobe_args+=(--go-uprobe-symbol "$_symbol")
+      done
+    fi
   fi
 
   rm -f "$READY_FILE" "$REPORT_PATH" "$RUNP_LOG" "$SANDBOX_ID_FILE"
@@ -172,6 +191,7 @@ capture_probe() {
     --ready-file "$READY_FILE" \
     "${runtime_args[@]}" \
     "${helper_args[@]}" \
+    "${uprobe_args[@]}" \
     > "$REPORT_PATH" &
   local probe_pid=$!
 

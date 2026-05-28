@@ -7,23 +7,26 @@ exec/exit tracepoints through bpftrace to attribute CNI plugin binaries, OCI
 runtime binaries, Kata/runtime helpers, and selected helper binaries to a
 sandbox id whenever that id is present in CNI env or OCI/containerd paths.
 
-It is a small bridge, not a CRI proxy.  Precise Go-function RunPodSandbox
-uprobes can be added as a later backend while keeping this JSON contract.
+It is a small bridge, not a CRI proxy.  An optional high-precision Go uprobe
+backend can attach to containerd CRI RunPodSandbox symbols and correlate those
+function spans with the same sandbox-scoped exec events.
 """
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import shutil
+import struct
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -71,6 +74,29 @@ DEFAULT_HELPER_BINARIES = [
 ]
 CNI_ENV_KEYS = ["CNI_COMMAND", "CNI_CONTAINERID", "CNI_NETNS", "CNI_IFNAME", "CNI_PATH", "CNI_ARGS"]
 OCI_OPS = {"create", "start", "state", "delete", "run", "exec", "kill", "pause", "resume"}
+DEFAULT_CONTAINERD_BINARIES = [
+    "/usr/bin/containerd",
+    "/usr/local/bin/containerd",
+]
+DEFAULT_GO_UPROBE_SYMBOL_PATTERNS = [
+    "github.com/containerd/containerd/v2/internal/cri/instrument.(*instrumentedService).RunPodSandbox",
+    "github.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox",
+    "github.com/containerd/containerd/v2/plugins/cri.(*criGRPCServer).RunPodSandbox",
+    "github.com/containerd/containerd/v2/plugins/cri.criGRPCServer.RunPodSandbox",
+    "k8s.io/cri-api/pkg/apis/runtime/v1._RuntimeService_RunPodSandbox_Handler",
+]
+GO_PCLNTAB_MAGICS = {0xFFFFFFF1, 0xFFFFFFF0, 0xFFFFFFFA, 0xFFFFFFFB}
+TRACEFS_CANDIDATES = ["/sys/kernel/tracing", "/sys/kernel/debug/tracing"]
+
+
+@dataclass(frozen=True)
+class GoUprobeSpec:
+    binary: str
+    symbol: str
+    address: int
+    attach_offset: int
+    function: str
+
 
 
 def utc_now() -> str:
@@ -133,11 +159,213 @@ def candidate_names(paths: Iterable[str]) -> set[str]:
     return names
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def resolve_binary(path_or_name: str) -> str:
+    if not path_or_name:
+        return ""
+    if os.path.isabs(path_or_name):
+        return path_or_name
+    return shutil.which(path_or_name) or path_or_name
+
+
+def parse_elf_load_segments(data: bytes) -> list[tuple[int, int, int, int]]:
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return []
+    if data[4] != 2 or data[5] != 1:
+        return []
+    e_phoff = struct.unpack_from("<Q", data, 32)[0]
+    e_phentsize = struct.unpack_from("<H", data, 54)[0]
+    e_phnum = struct.unpack_from("<H", data, 56)[0]
+    segments: list[tuple[int, int, int, int]] = []
+    for idx in range(e_phnum):
+        offset = e_phoff + idx * e_phentsize
+        if offset + 56 > len(data):
+            break
+        p_type = struct.unpack_from("<I", data, offset)[0]
+        if p_type != 1:
+            continue
+        p_offset, p_vaddr, _p_paddr, p_filesz, p_memsz, _p_align = struct.unpack_from("<QQQQQQ", data, offset + 8)
+        segments.append((p_offset, p_vaddr, p_filesz, p_memsz))
+    return segments
+
+
+def virtual_address_to_file_offset(address: int, segments: list[tuple[int, int, int, int]]) -> int:
+    for p_offset, p_vaddr, p_filesz, p_memsz in segments:
+        if p_vaddr <= address < p_vaddr + p_memsz:
+            candidate = p_offset + (address - p_vaddr)
+            if candidate < p_offset + max(p_filesz, 1):
+                return candidate
+    return address
+
+
+def c_string(data: bytes, offset: int) -> str:
+    if offset < 0 or offset >= len(data):
+        return ""
+    end = data.find(b"\x00", offset)
+    if end < 0:
+        return ""
+    return data[offset:end].decode("utf-8", "replace")
+
+
+def find_go_pclntab(data: bytes) -> tuple[int, int, int, int, int] | None:
+    for offset in range(0, len(data) - 72):
+        magic = struct.unpack_from("<I", data, offset)[0]
+        if magic not in GO_PCLNTAB_MAGICS:
+            continue
+        pad1, pad2, min_lc, ptr_size = struct.unpack_from("<BBBB", data, offset + 4)
+        if pad1 != 0 or pad2 != 0 or ptr_size not in {4, 8} or min_lc not in {1, 2, 4}:
+            continue
+        try:
+            nfunc = struct.unpack_from("<Q", data, offset + 8)[0]
+            text_start = struct.unpack_from("<Q", data, offset + 24)[0]
+            funcname_offset = struct.unpack_from("<Q", data, offset + 32)[0]
+            pcln_offset = struct.unpack_from("<Q", data, offset + 64)[0]
+        except struct.error:
+            continue
+        if not (0 < nfunc < 2_000_000):
+            continue
+        if not (0 < funcname_offset < len(data) and 0 < pcln_offset < len(data)):
+            continue
+        functab = offset + pcln_offset
+        if functab + 8 > len(data):
+            continue
+        return offset, nfunc, text_start, funcname_offset, pcln_offset
+    return None
+
+
+def discover_go_functions(binary: str) -> dict[str, tuple[int, int]]:
+    data = Path(binary).read_bytes()
+    header = find_go_pclntab(data)
+    if not header:
+        return {}
+    base, nfunc, text_start, funcname_offset, pcln_offset = header
+    name_base = base + funcname_offset
+    functab = base + pcln_offset
+    funcdata_base = base + pcln_offset
+    segments = parse_elf_load_segments(data)
+    functions: dict[str, tuple[int, int]] = {}
+    for idx in range(nfunc):
+        entry_offset = functab + idx * 8
+        if entry_offset + 8 > len(data):
+            break
+        entry_delta, func_offset = struct.unpack_from("<II", data, entry_offset)
+        funcdata = funcdata_base + func_offset
+        if funcdata + 8 > len(data):
+            continue
+        name_offset = struct.unpack_from("<I", data, funcdata + 4)[0]
+        name = c_string(data, name_base + name_offset)
+        if not name:
+            continue
+        address = text_start + entry_delta
+        functions[name] = (address, virtual_address_to_file_offset(address, segments))
+    return functions
+
+
+def symbol_matches(name: str, pattern: str) -> bool:
+    if name == pattern or name.endswith(pattern):
+        return True
+    if pattern.startswith("regex:"):
+        try:
+            return re.search(pattern[len("regex:"):], name) is not None
+        except re.error:
+            return False
+    return pattern in name
+
+
+def short_go_function(symbol: str) -> str:
+    if "RunPodSandbox" in symbol:
+        return "RunPodSandbox"
+    if "SetupSerially" in symbol:
+        return "CNISetupSerially"
+    if re.search(r"\bSetup$|\.Setup$", symbol):
+        return "CNISetup"
+    return symbol.rsplit("/", 1)[-1]
+
+
+def discover_go_uprobes(binary: str, patterns: Iterable[str]) -> list[GoUprobeSpec]:
+    resolved = resolve_binary(binary)
+    if not resolved or not os.path.exists(resolved):
+        return []
+    functions = discover_go_functions(resolved)
+    specs: list[GoUprobeSpec] = []
+    used: set[str] = set()
+    for pattern in patterns:
+        matches = [name for name in functions if symbol_matches(name, pattern)]
+        matches.sort(key=lambda name: (".func" in name or "deferwrap" in name, len(name), name))
+        for name in matches:
+            if name in used:
+                continue
+            address, attach_offset = functions[name]
+            specs.append(GoUprobeSpec(resolved, name, address, attach_offset, short_go_function(name)))
+            used.add(name)
+            break
+    return specs
+
+
+def tracefs_path() -> Path:
+    for candidate in TRACEFS_CANDIDATES:
+        path = Path(candidate)
+        if path.exists():
+            return path
+    return Path(TRACEFS_CANDIDATES[0])
+
+
+def write_tracefs_line(path: Path, line: str, append: bool = True) -> None:
+    flags = os.O_WRONLY
+    if append:
+        flags |= os.O_APPEND
+    fd = os.open(path, flags)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def register_go_uprobe_tracepoints(specs: list[GoUprobeSpec], group: str = "runtimepulse_startup") -> list[tuple[str, GoUprobeSpec]]:
+    if not specs:
+        return []
+    uprobe_events = tracefs_path() / "uprobe_events"
+    registrations: list[tuple[str, GoUprobeSpec]] = []
+    for idx, spec in enumerate(specs):
+        safe = sanitize_id(spec.function or spec.symbol).replace("-", "_")[:32] or "go_uprobe"
+        enter_event = f"{safe}_{idx}_enter"
+        exit_event = f"{safe}_{idx}_exit"
+        for event in (enter_event, exit_event):
+            try:
+                write_tracefs_line(uprobe_events, f"-:{group}/{event}\n")
+            except OSError:
+                pass
+        write_tracefs_line(uprobe_events, f"p:{group}/{enter_event} {spec.binary}:0x{spec.attach_offset:x}\n")
+        write_tracefs_line(uprobe_events, f"r:{group}/{exit_event} {spec.binary}:0x{spec.attach_offset:x}\n")
+        registrations.append((enter_event, spec))
+        registrations.append((exit_event, spec))
+    return registrations
+
+def unregister_go_uprobe_tracepoints(registrations: list[tuple[str, GoUprobeSpec]], group: str = "runtimepulse_startup") -> None:
+    if not registrations:
+        return
+    uprobe_events = tracefs_path() / "uprobe_events"
+    for event, _spec in registrations:
+        try:
+            write_tracefs_line(uprobe_events, f"-:{group}/{event}\n")
+        except OSError:
+            pass
+
+def timestamp_from_unix_nanos(value: int) -> str:
+    return datetime.fromtimestamp(value / 1_000_000_000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def bpftrace_string(value: str) -> str:
     return json.dumps(value)
 
 
-def build_bpftrace_program(candidates: set[str], duration_ms: int, argv_slots: int, env_slots: int) -> str:
+def build_bpftrace_program(candidates: set[str], duration_ms: int, argv_slots: int, env_slots: int, go_uprobes: list[GoUprobeSpec] | None = None) -> str:
     predicate = ""
     if candidates:
         comparisons = [f"str(args->filename) == {bpftrace_string(item)}" for item in sorted(candidates)]
@@ -206,6 +434,74 @@ class ExecObservation:
     def request_id(self) -> str:
         key = self.cri_sandbox_id or self.containerd_id or self.sandbox_id or "unknown"
         return f"exec-{self.pid}-{sanitize_id(basename(self.binary))}-{sanitize_id(key)}"
+
+
+@dataclass
+class GoUprobeObservation:
+    pid: int
+    tid: int
+    comm: str
+    function: str
+    symbol: str
+    binary: str
+    observed_at: str
+    timestamp_ns: int = 0
+
+    @property
+    def request_id(self) -> str:
+        return f"go-uprobe-{self.pid}-{self.tid}-{sanitize_id(self.function)}-{sanitize_id(self.symbol)}"
+
+
+def parse_go_uprobe_line(line: str) -> tuple[str, GoUprobeObservation] | None:
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 8 or parts[0] not in {"RP_GO_UPROBE_ENTER", "RP_GO_UPROBE_EXIT"}:
+        return None
+    try:
+        timestamp_ns = int(parts[1])
+        pid = int(parts[2])
+        tid = int(parts[3])
+    except ValueError:
+        return None
+    event_type = "enter" if parts[0].endswith("ENTER") else "exit"
+    observed_at = timestamp_from_unix_nanos(timestamp_ns) if timestamp_ns > 0 else utc_now()
+    return event_type, GoUprobeObservation(
+        pid=pid,
+        tid=tid,
+        comm=parts[4],
+        function=parts[5] or "RunPodSandbox",
+        symbol=parts[6],
+        binary=parts[7],
+        observed_at=observed_at,
+        timestamp_ns=timestamp_ns,
+    )
+
+
+def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type: str, sandbox_id: str = "", cri_sandbox_id: str = "") -> dict[str, object]:
+    attributes: dict[str, object] = {
+        "startup.probe.backend": "bpftrace-go-uprobe",
+        "startup.probe.correlation": "time-window" if sandbox_id or cri_sandbox_id else "pending-time-window",
+        "uprobe.symbol": obs.symbol,
+        "uprobe.binary": obs.binary,
+        "process.thread_id": obs.tid,
+    }
+    return {
+        "eventType": event_type,
+        "requestId": obs.request_id,
+        "function": obs.function,
+        "timestamp": obs.observed_at,
+        "timestampNs": obs.timestamp_ns,
+        "sandboxId": sandbox_id,
+        "criSandboxId": cri_sandbox_id or sandbox_id,
+        "containerdId": cri_sandbox_id or sandbox_id,
+        "runtimeType": runtime_type or "unknown",
+        "status": "ok",
+        "role": "cri",
+        "binary": obs.binary,
+        "command": basename(obs.binary) or "containerd",
+        "pid": obs.pid,
+        "ppid": 0,
+        "attributes": attributes,
+    }
 
 
 def parse_env(items: Iterable[str]) -> dict[str, str]:
@@ -464,6 +760,7 @@ def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str
 
 def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, default_runtime_type: str, forced_sandbox_id: str, namespaces: set[str] | None = None) -> tuple[list[dict[str, object]], dict[str, float], str, str, str]:
     pending: dict[int, ExecObservation] = {}
+    pending_go: dict[str, GoUprobeObservation] = {}
     events: list[dict[str, object]] = []
     runtime_type = default_runtime_type or "unknown"
     sandbox_id = forced_sandbox_id
@@ -472,7 +769,17 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
 
     for raw in lines:
         now = utc_now()
-        if raw.startswith("RP_EXEC_ENTER\t"):
+        if raw.startswith("RP_GO_UPROBE_ENTER\t") or raw.startswith("RP_GO_UPROBE_EXIT\t"):
+            parsed_go = parse_go_uprobe_line(raw)
+            if not parsed_go:
+                continue
+            event_type, obs = parsed_go
+            if event_type == "enter":
+                pending_go[obs.request_id] = obs
+            else:
+                pending_go.pop(obs.request_id, None)
+            events.append(event_from_go_uprobe(obs, event_type, runtime_type, sandbox_id, cri_sandbox_id or containerd_id))
+        elif raw.startswith("RP_EXEC_ENTER\t"):
             obs = parse_exec_line(raw, argv_slots, env_slots, now, default_runtime_type, forced_sandbox_id)
             if not obs:
                 continue
@@ -510,9 +817,77 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
         event["durationMs"] = 1
         event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
         events.append(event)
+    synthetic_exit_time = max([str(event.get("timestamp", "") or "") for event in events] or [utc_now()]) or utc_now()
+    for obs in pending_go.values():
+        event = event_from_go_uprobe(obs, "exit", runtime_type, sandbox_id, cri_sandbox_id or containerd_id)
+        event["timestamp"] = synthetic_exit_time
+        event["durationMs"] = 1
+        event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
+        event.setdefault("attributes", {})["startup.probe.exitSynthetic"] = "last-observed-startup-event"
+        events.append(event)
 
+    events = correlate_go_uprobe_events(events)
     summary = summarize_events(events)
     return events, summary, runtime_type, sandbox_id, cri_sandbox_id or containerd_id
+
+
+def event_time(event: dict[str, object]) -> datetime | None:
+    return parse_iso8601(str(event.get("timestamp", "") or ""))
+
+
+def event_time_range(events: list[dict[str, object]]) -> tuple[datetime | None, datetime | None]:
+    times = [event_time(event) for event in events]
+    times = [time for time in times if time is not None]
+    if not times:
+        return None, None
+    return min(times), max(times)
+
+
+def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    sandbox_events = [event for event in events if event.get("role") != "cri" and event_sandbox_key(event) != "unknown"]
+    if not sandbox_events:
+        return events
+    windows: dict[str, tuple[datetime, datetime, str]] = {}
+    runtime_by_key: dict[str, str] = {}
+    for key in sorted({event_sandbox_key(event) for event in sandbox_events}):
+        group = [event for event in sandbox_events if event_sandbox_key(event) == key]
+        start, end = event_time_range(group)
+        if not start or not end:
+            continue
+        windows[key] = (start - timedelta(seconds=2), end + timedelta(seconds=2), first_event_value(group, "criSandboxId", "sandboxId", "containerdId"))
+        runtime_by_key[key] = runtime_type_from_events(group, "unknown")
+    if not windows:
+        return events
+    result: list[dict[str, object]] = []
+    for event in events:
+        if event.get("role") != "cri" or event_sandbox_key(event) != "unknown":
+            result.append(event)
+            continue
+        ts = event_time(event)
+        candidates: list[tuple[float, str]] = []
+        if ts:
+            for key, (start, end, _cri_id) in windows.items():
+                if start <= ts <= end:
+                    center = start + (end - start) / 2
+                    candidates.append((abs((ts - center).total_seconds()), key))
+        if not candidates and len(windows) == 1:
+            candidates = [(0.0, next(iter(windows)))]
+        if not candidates:
+            result.append(event)
+            continue
+        _distance, key = sorted(candidates)[0]
+        _start, _end, cri_id = windows[key]
+        updated = dict(event)
+        updated["sandboxId"] = key
+        updated["criSandboxId"] = cri_id or key
+        updated["containerdId"] = cri_id or key
+        updated["runtimeType"] = runtime_by_key.get(key) or str(event.get("runtimeType") or "unknown")
+        attrs = dict(updated.get("attributes") or {})
+        attrs["startup.probe.correlation"] = "time-window"
+        attrs["startup.probe.correlation_sandbox_id"] = key
+        updated["attributes"] = attrs
+        result.append(updated)
+    return result
 
 
 def inherit_parent_context(obs: ExecObservation, parent: ExecObservation) -> None:
@@ -557,16 +932,83 @@ def summarize_events(events: list[dict[str, object]]) -> dict[str, float]:
     cni = [event for event in enter_events if event.get("role") == "cni"]
     oci = [event for event in enter_events if event.get("role") == "oci"]
     helper = [event for event in enter_events if event.get("role") == "helper" or is_helper_binary(basename(str(event.get("binary", ""))))]
+    cri = [event for event in enter_events if event.get("role") == "cri"]
     return {
         "observedExecCount": float(len(enter_events)),
+        "observedCriUprobeCount": float(len(cri)),
         "observedCniExecCount": float(len(cni)),
         "observedOciExecCount": float(len(oci)),
         "observedHelperExecCount": float(len(helper)),
     }
 
 
-def run_bpftrace(args: argparse.Namespace, candidates: set[str]) -> list[str]:
-    program = build_bpftrace_program(candidates, args.duration_ms, args.argv_slots, args.env_slots)
+def build_bcc_go_uprobe_program(go_uprobes: list[GoUprobeSpec]) -> str:
+    functions = ["#include <uapi/linux/ptrace.h>\n"]
+    for idx, _spec in enumerate(go_uprobes):
+        functions.append(f"""
+int trace_entry_{idx}(struct pt_regs *ctx) {{
+    u64 id = bpf_get_current_pid_tgid();
+    bpf_trace_printk("RP_GO_UPROBE_ENTER {idx} %llu %u %u\\n", bpf_ktime_get_ns(), id >> 32, (u32)id);
+    return 0;
+}}
+""")
+    return "\n".join(functions)
+
+
+def attach_bcc_go_uprobes(go_uprobes: list[GoUprobeSpec]):
+    if not go_uprobes:
+        return None, {}
+    try:
+        from bcc import BPF
+    except ImportError as exc:
+        raise SystemExit("python3-bcc is required for --enable-go-uprobes") from exc
+    bpf = BPF(text=build_bcc_go_uprobe_program(go_uprobes))
+    symbol_by_index: dict[int, GoUprobeSpec] = {}
+    for idx, spec in enumerate(go_uprobes):
+        bpf.attach_uprobe(name=spec.binary.encode(), addr=spec.attach_offset, fn_name=f"trace_entry_{idx}".encode())
+        symbol_by_index[idx] = spec
+    trace = bpf.trace_open(nonblocking=True)
+    fd = trace.fileno()
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    return bpf, symbol_by_index
+
+
+def read_bcc_go_uprobe_lines(bpf, symbol_by_index: dict[int, GoUprobeSpec]) -> list[str]:
+    if bpf is None:
+        return []
+    trace = bpf.trace_open(nonblocking=True)
+    lines: list[str] = []
+    pattern = re.compile(r"^\s*(?P<comm>.*?)\s*[-]\s*\d+\s+\[.*?\]\s+[^:]+:\s+(?:(?P<ip>0x[0-9a-fA-F]+):\s+)?(?:bpf_trace_printk:\s+)?(?P<kind>RP_GO_UPROBE_ENTER)\s+(?P<idx>\d+)\s+(?P<ts>\d+)\s+(?P<pid>\d+)\s+(?P<tid>\d+)")
+    monotonic_epoch_ns = time.time_ns() - time.monotonic_ns()
+    while True:
+        try:
+            raw = trace.readline(4096)
+        except (BlockingIOError, OSError):
+            break
+        if not raw:
+            break
+        text = raw.decode("utf-8", "replace").strip()
+        match = pattern.match(text)
+        if not match:
+            continue
+        if not symbol_by_index:
+            continue
+        spec = symbol_by_index.get(int(match.group("idx")))
+        if not spec:
+            continue
+        timestamp_ns = int(match.group('ts')) + monotonic_epoch_ns
+        lines.append(
+            f"{match.group('kind')}\t{timestamp_ns}\t{match.group('pid')}\t{match.group('tid')}\t"
+            f"{match.group('comm').strip()}\t{spec.function}\t{spec.symbol}\t{spec.binary}\n"
+        )
+    return lines
+
+
+def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: list[GoUprobeSpec] | None = None) -> list[str]:
+    go_uprobes = go_uprobes or []
+    bcc_bpf, bcc_symbols = attach_bcc_go_uprobes(go_uprobes) if go_uprobes else (None, {})
+    program = build_bpftrace_program(candidates, args.duration_ms, args.argv_slots, args.env_slots, [])
     bpftrace = shutil.which(args.bpftrace) or args.bpftrace
     if not bpftrace or not os.path.exists(bpftrace):
         raise SystemExit(f"bpftrace not found: {args.bpftrace}")
@@ -590,7 +1032,9 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str]) -> list[str]:
                     Path(args.ready_file).write_text(str(proc.pid))
                 if line.startswith("RP_"):
                     lines.append(line)
+                lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
                 continue
+            lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
             if proc.poll() is not None:
                 break
             time.sleep(0.01)
@@ -600,6 +1044,9 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str]) -> list[str]:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        if bcc_bpf is not None:
+            time.sleep(0.05)
+        lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
         stderr = proc.stderr.read() if proc.stderr else ""
         if proc.returncode not in (0, None) and not lines:
             raise SystemExit(f"bpftrace failed with {proc.returncode}: {stderr.strip()}")
@@ -751,10 +1198,20 @@ def export_command(args: argparse.Namespace) -> None:
     candidates.update(candidate_names(runtime_binaries))
     candidates.update(candidate_names(helper_binaries))
 
+    go_uprobes: list[GoUprobeSpec] = []
+    if args.enable_go_uprobes:
+        explicit_patterns = bool(args.go_uprobe_symbol)
+        patterns = args.go_uprobe_symbol or DEFAULT_GO_UPROBE_SYMBOL_PATTERNS
+        go_uprobes = discover_go_uprobes(args.containerd_binary, patterns)
+        if go_uprobes and not explicit_patterns:
+            go_uprobes = go_uprobes[:1]
+        if not go_uprobes:
+            raise SystemExit(f"no Go uprobe symbols matched in {args.containerd_binary}: {patterns}")
+
     if args.from_bpftrace_log:
         lines = Path(args.from_bpftrace_log).read_text().splitlines(True)
     else:
-        lines = run_bpftrace(args, candidates)
+        lines = run_bpftrace(args, candidates, go_uprobes)
 
     namespaces = set(split_csv(args.containerd_namespace)) if args.containerd_namespace else None
     events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(
@@ -778,6 +1235,8 @@ def export_command(args: argparse.Namespace) -> None:
 
 def self_test() -> None:
     lines = [
+        "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
+        "RP_GO_UPROBE_EXIT\t1779940000200000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
         "RP_EXEC_ENTER\t100\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
         "RP_PROC_EXIT\t100\tbridge\n",
         "RP_EXEC_ENTER\t102\t100\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=abc123\tCNI_NETNS=/run/netns/test\t\n",
@@ -786,10 +1245,11 @@ def self_test() -> None:
         "RP_PROC_EXIT\t101\tkata-runtime\n",
     ]
     events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(lines, 6, 4, "", "", None)
-    assert len([e for e in events if e.get("eventType") == "enter"]) == 3
+    assert len([e for e in events if e.get("eventType") == "enter"]) == 4
     assert runtime_type == "kata"
     assert sandbox_id == "abc123"
     assert cri_sandbox_id == "abc123"
+    assert summary["observedCriUprobeCount"] == 1.0
     assert summary["observedCniExecCount"] == 1.0
     assert summary["observedHelperExecCount"] == 1.0
     assert summary["observedOciExecCount"] == 1.0
@@ -827,6 +1287,9 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--runtime-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_BINARIES", "")]))
     export.add_argument("--include-binary", action="append", default=[])
     export.add_argument("--include-helpers", action="store_true", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS", "false").lower() == "true")
+    export.add_argument("--enable-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES"), help="attach high-precision Go uprobes to containerd RunPodSandbox symbols")
+    export.add_argument("--containerd-binary", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY", shutil.which("containerd") or next((path for path in DEFAULT_CONTAINERD_BINARIES if os.path.exists(path)), "containerd")))
+    export.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
     export.add_argument("--sandbox-id", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SANDBOX_ID", ""))
     export.add_argument("--containerd-namespace", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES", "")]), help="only keep OCI/runtime execs from these containerd namespaces; CNI execs are kept by CNI_CONTAINERID")
     export.add_argument("--runtime-type", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_TYPE", ""))
