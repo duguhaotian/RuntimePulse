@@ -689,6 +689,58 @@ def oci_bundle_metadata(bundle: str) -> dict[str, str]:
     return {key: value for key, value in metadata.items() if value}
 
 
+def fallback_containerd_bundle(namespace: str, container_id: str, argv: list[str]) -> str:
+    if not namespace or not container_id:
+        return ""
+    candidates: list[str] = []
+    for item in argv:
+        if not item or "io.containerd.runtime" not in item:
+            continue
+        path = item
+        # Shim start argv may include the runtime root only:
+        #   .../io.containerd.runtime.v2.task/k8s.io
+        parts = [part for part in Path(path).parts if part and part != os.sep]
+        for idx, part in enumerate(parts):
+            if part.startswith("io.containerd.runtime"):
+                if idx + 1 < len(parts) and parts[idx + 1] == namespace:
+                    if idx + 2 < len(parts):
+                        candidates.append(containerd_task_bundle_from_path(path))
+                    else:
+                        candidates.append(os.path.join(os.sep, *parts[:idx + 2], container_id))
+                break
+    candidates.extend([
+        f"/run/containerd/io.containerd.runtime.v2.task/{namespace}/{container_id}",
+        f"/var/run/containerd/io.containerd.runtime.v2.task/{namespace}/{container_id}",
+    ])
+    for root in configured_containerd_task_roots():
+        candidates.append(os.path.join(root, namespace, container_id))
+    for candidate in candidates:
+        if candidate and (Path(candidate) / "config.json").exists():
+            return candidate
+    return ""
+
+
+def configured_containerd_task_roots() -> list[str]:
+    roots: list[str] = []
+    for config in (
+        os.getenv("RUNTIMEPULSE_CONTAINERD_CONFIG", ""),
+        "/etc/containerd/config.toml",
+        "/tmp/runtimepulse-containerd-cri-test/config.toml",
+    ):
+        if not config:
+            continue
+        try:
+            text = Path(config).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for key in ("state", "root"):
+            match = re.search(rf"(?m)^\s*{key}\s*=\s*['\"]([^'\"]+)['\"]", text)
+            if not match:
+                continue
+            roots.append(os.path.join(match.group(1), "io.containerd.runtime.v2.task"))
+    return unique_realpaths(roots)
+
+
 def netns_identity(path: str) -> dict[str, object]:
     """Return a stable-ish netns identity for CNI correlation.
 
@@ -757,11 +809,13 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
     role = infer_role(binary, argv, env)
     cni_container_id = env.get("CNI_CONTAINERID", "") or cni_args.get("K8S_POD_INFRA_CONTAINER_ID", "")
     bundle = infer_oci_bundle(argv)
-    bundle_meta = oci_bundle_metadata(bundle)
     shim_info = infer_containerd_shim_info(argv)
     namespace = namespace_from_bundle(bundle)
     namespace = namespace or shim_info.get("namespace", "")
     containerd_id = cni_container_id or sandbox_id_from_bundle(bundle) or shim_info.get("id", "")
+    if not bundle:
+        bundle = shim_info.get("bundle", "") or fallback_containerd_bundle(namespace, containerd_id, argv)
+    bundle_meta = oci_bundle_metadata(bundle)
     stable_bundle_id = bundle_meta.get("startup.stable_sandbox_id", "")
     sandbox_id = forced_sandbox_id or stable_bundle_id or containerd_id
     runtime_type = infer_runtime_type(binary, argv, default_runtime_type)
@@ -1804,7 +1858,7 @@ def self_test() -> None:
         bundle_lines = [
             "RP_GO_UPROBE_ENTER\t1779940000300000000\t500\t501\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
             "RP_GO_UPROBE_EXIT\t1779940000310000000\t500\t501\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
-            "RP_EXEC_ENTER\t500\t1\t0\t0\tcontainerd\t/usr/bin/containerd-shim-runc-v2\t/usr/bin/containerd-shim-runc-v2\t-namespace\tk8s.io\t-id\traw-sandbox-id\t\t\t\t\n",
+            f"RP_EXEC_ENTER\t500\t1\t0\t0\tcontainerd\t/usr/bin/containerd-shim-runc-v2\t/usr/bin/containerd-shim-runc-v2\t-namespace\tk8s.io\t-id\traw-sandbox-id\tstart\t{bundle.parent}\t\t\t\t\n",
             f"RP_EXEC_ENTER\t500\t1\t0\t0\tcontainerd\t/usr/local/bin/kata-runtime\tkata-runtime\t--bundle\t{bundle}\tcreate\traw-sandbox-id\t\t\t\t\n",
             "RP_PROC_EXIT\t500\tkata-runtime\n",
         ]
