@@ -18,6 +18,7 @@ CONTAINERD_NAMESPACE="${CONTAINERD_NAMESPACE:-k8s.io}"
 INCLUDE_HELPERS="${INCLUDE_HELPERS:-true}"
 LOCAL_REPORT_URL="${LOCAL_REPORT_URL:-http://127.0.0.1:9091/api/local/ingest}"
 QUERY_API_URL="${QUERY_API_URL:-http://127.0.0.1:8081/api}"
+QUERY_API_RETRY_SECONDS="${QUERY_API_RETRY_SECONDS:-10}"
 VALIDATE_INGEST="${VALIDATE_INGEST:-false}"
 VALIDATE_QUERY_API="${VALIDATE_QUERY_API:-false}"
 CRI_ENDPOINT="${CRI_ENDPOINT:-}"
@@ -28,6 +29,8 @@ CLEANUP_POD="${CLEANUP_POD:-true}"
 EXPECT_RUNTIME_TYPE="${EXPECT_RUNTIME_TYPE:-$RUNTIME_TYPE}"
 EXPECT_ROLES="${EXPECT_ROLES:-}"
 EXPECT_SANDBOX_ID="${EXPECT_SANDBOX_ID:-}"
+EXPECT_ANALYSIS="${EXPECT_ANALYSIS:-false}"
+EXPECT_PARENT_LINKS="${EXPECT_PARENT_LINKS:-false}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
@@ -61,10 +64,13 @@ Common env:
   EXPECT_RUNTIME_TYPE=kata     Optional report runtime assertion. Defaults to RUNTIME_TYPE.
   EXPECT_ROLES=cni,kata        Optional required enter-event roles.
   EXPECT_SANDBOX_ID=...        Optional required sandbox id; auto-filled from runp.
+  EXPECT_PARENT_LINKS=true     Require at least one non-root trace span parent link.
+  EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
   LOCAL_REPORT_URL=http://127.0.0.1:9091/api/local/ingest
   QUERY_API_URL=http://127.0.0.1:8081/api
+  QUERY_API_RETRY_SECONDS=10   Wait for collector outlet to flush to Query API.
 USAGE
 }
 
@@ -300,6 +306,22 @@ for report in reports:
 PY
 }
 
+query_api_get() {
+  local url="$1"
+  local output="$2"
+  local deadline=$((SECONDS + QUERY_API_RETRY_SECONDS))
+  while true; do
+    if curl -fsS "$url" > "$output" 2>/dev/null; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      curl -fsS "$url" > "$output"
+      return $?
+    fi
+    sleep 1
+  done
+}
+
 validate_query_api_output() {
   if ! command -v curl >/dev/null 2>&1; then
     echo "curl not found; cannot validate Query API" >&2
@@ -313,18 +335,31 @@ validate_query_api_output() {
     [[ -n "$sandbox_id" ]] || continue
     trace_file="$OUT_DIR/query-trace-${sandbox_id}.json"
     metrics_file="$OUT_DIR/query-metrics-${sandbox_id}.json"
-    curl -fsS "$QUERY_API_URL/sandboxes/$sandbox_id/trace" > "$trace_file"
-    curl -fsS "$QUERY_API_URL/sandboxes/$sandbox_id/metrics" > "$metrics_file"
-    EXPECT_ROLES="$EXPECT_ROLES" EXPECT_RUNTIME_TYPE="$EXPECT_RUNTIME_TYPE" \
-    python3 - "$trace_file" "$metrics_file" "$sandbox_id" <<'PY'
+    analysis_file="$OUT_DIR/query-analysis-${sandbox_id}.json"
+    query_api_get "$QUERY_API_URL/sandboxes/$sandbox_id/trace" "$trace_file"
+    query_api_get "$QUERY_API_URL/sandboxes/$sandbox_id/metrics" "$metrics_file"
+    if [[ "$EXPECT_ANALYSIS" == "true" ]]; then
+      query_api_get "$QUERY_API_URL/sandboxes/$sandbox_id/analysis" "$analysis_file"
+    else
+      printf '{"data":null}' > "$analysis_file"
+    fi
+    EXPECT_ROLES="$EXPECT_ROLES" \
+    EXPECT_RUNTIME_TYPE="$EXPECT_RUNTIME_TYPE" \
+    EXPECT_PARENT_LINKS="$EXPECT_PARENT_LINKS" \
+    EXPECT_ANALYSIS="$EXPECT_ANALYSIS" \
+    python3 - "$trace_file" "$metrics_file" "$analysis_file" "$sandbox_id" <<'PY'
 import json, os, sys
-trace_path, metrics_path, sandbox_id = sys.argv[1:4]
+trace_path, metrics_path, analysis_path, sandbox_id = sys.argv[1:5]
 expect_roles = {item.strip().lower() for item in os.environ.get('EXPECT_ROLES', '').split(',') if item.strip()}
 expect_runtime = os.environ.get('EXPECT_RUNTIME_TYPE', '').strip().lower()
+expect_parent_links = os.environ.get('EXPECT_PARENT_LINKS', '').lower() == 'true'
+expect_analysis = os.environ.get('EXPECT_ANALYSIS', '').lower() == 'true'
 with open(trace_path, encoding='utf-8') as handle:
     traces = json.load(handle).get('data') or []
 with open(metrics_path, encoding='utf-8') as handle:
     metrics = json.load(handle).get('data') or []
+with open(analysis_path, encoding='utf-8') as handle:
+    analysis = json.load(handle).get('data')
 if not traces:
     raise SystemExit(f'Query API returned no traces for {sandbox_id}')
 if not metrics:
@@ -340,15 +375,25 @@ if missing_roles:
 runtime_types = {str(span.get('runtimeType') or '').lower() for span in traces if span.get('runtimeType')}
 if expect_runtime and expect_runtime not in runtime_types:
     raise SystemExit(f'Query API expected runtime {expect_runtime} for {sandbox_id}, observed {sorted(runtime_types)}')
+if expect_parent_links and not any(span.get('parentSpanId') for span in traces):
+    raise SystemExit(f'Query API returned no parentSpanId links for {sandbox_id}')
 metric_names = {series.get('name') for series in metrics}
 if 'sandbox.startup.callchain_duration_ms' not in metric_names:
     raise SystemExit(f'missing sandbox.startup.callchain_duration_ms metric for {sandbox_id}')
+finding_count = 0
+if expect_analysis:
+    findings = (analysis or {}).get('findings') or []
+    finding_count = len(findings)
+    if finding_count <= 0:
+        raise SystemExit(f'Query API returned no analysis findings for {sandbox_id}')
 print(json.dumps({
     'sandboxId': sandbox_id,
     'traces': len(traces),
     'metrics': len(metrics),
     'roles': sorted(roles),
     'runtimeTypes': sorted(runtime_types),
+    'parentLinks': sum(1 for span in traces if span.get('parentSpanId')),
+    'analysisFindings': finding_count,
 }, separators=(',', ':')))
 PY
   done < <(query_api_sandboxes)

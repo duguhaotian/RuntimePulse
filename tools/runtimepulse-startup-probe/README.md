@@ -67,6 +67,10 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup
 VALIDATE_QUERY_API=true QUERY_API_URL=http://127.0.0.1:8081/api \
 tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup-probe.json
 
+# Optionally require waterfall hierarchy and analysis findings after Query API ingest.
+VALIDATE_QUERY_API=true EXPECT_PARENT_LINKS=true EXPECT_ANALYSIS=true \
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup-probe.json
+
 # Capture mode: start this, wait for the ready message, then run crictl runp in
 # another shell before the capture window ends.
 CAPTURE=true RUNTIME_TYPE=kata DURATION_MS=12000 \
