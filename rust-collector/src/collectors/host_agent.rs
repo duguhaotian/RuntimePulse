@@ -1881,7 +1881,20 @@ fn containerd_startup_trace_output(
     attributes.insert("containerd.id".to_string(), json!(container_id));
     attributes.insert("containerd.short_id".to_string(), json!(short_id));
     attributes.insert("containerd.namespace".to_string(), json!(create.namespace));
+    attributes.insert(
+        "containerd.container_id".to_string(),
+        json!(identity.containerd_container_id),
+    );
+    attributes.insert(
+        "containerd.runtime_sandbox_id".to_string(),
+        json!(identity.runtime_sandbox_id),
+    );
+    attributes.insert(
+        "containerd.sandbox_container_id".to_string(),
+        json!(identity.containerd_sandbox_container_id),
+    );
     attributes.insert("containerd.runtime".to_string(), json!(create.runtime_name));
+    attributes.insert("startup.phase".to_string(), json!(identity.startup_phase));
     let runtime_type = runtime_type_from_containerd_name(&create.runtime_name);
     attributes.insert("runtime.type".to_string(), json!(runtime_type));
     attributes.insert("image.ref".to_string(), json!(create.image_ref));
@@ -2032,10 +2045,13 @@ impl CriContainerdStartupTraceTracker {
 
         let identity = sandbox_identity_from_containerd_event(event);
         let sandbox_id = identity.sandbox_id.clone();
+        let startup_phase = identity.startup_phase.clone();
+        let is_sandbox_phase = startup_phase == "sandbox";
         let key = self
             .known_alias([
                 sandbox_id.as_str(),
                 identity.runtime_sandbox_id.as_str(),
+                identity.containerd_sandbox_container_id.as_str(),
                 event.container_id.as_str(),
                 identity.pod_uid.as_str(),
             ])
@@ -2045,6 +2061,7 @@ impl CriContainerdStartupTraceTracker {
             [
                 &sandbox_id,
                 &identity.runtime_sandbox_id,
+                &identity.containerd_sandbox_container_id,
                 &event.container_id,
                 identity.pod_uid.as_str(),
             ],
@@ -2053,9 +2070,13 @@ impl CriContainerdStartupTraceTracker {
         let ready_at = {
             let state = self.pending.entry(key.clone()).or_default();
             merge_cri_startup_state_from_containerd_event(state, event, &identity);
-            state.cri_ready_at.filter(|_| {
-                !self.completed.contains(&key) && cri_startup_state_has_containerd_timing(state)
-            })
+            if is_sandbox_phase {
+                state.cri_ready_at.filter(|_| {
+                    !self.completed.contains(&key) && cri_startup_state_has_containerd_timing(state)
+                })
+            } else {
+                None
+            }
         };
 
         ready_at
@@ -2234,6 +2255,7 @@ fn merge_cri_startup_state_from_containerd_event(
     }
     state.containerd_container_id = first_non_empty_owned([
         state.containerd_container_id.as_str(),
+        identity.containerd_container_id.as_str(),
         event.container_id.as_str(),
     ]);
     state.containerd_namespace = first_non_empty_owned([
@@ -2267,27 +2289,29 @@ fn merge_cri_startup_state_from_containerd_event(
     state.k8s_pod_uid =
         first_non_empty_owned([state.k8s_pod_uid.as_str(), identity.pod_uid.as_str()]);
 
-    match event.action.as_str() {
-        "create" => {
-            state.containerd_create_at = Some(
-                state
-                    .containerd_create_at
-                    .map(|existing| existing.min(event.timestamp))
-                    .unwrap_or(event.timestamp),
-            );
+    if identity.startup_phase == "sandbox" {
+        match event.action.as_str() {
+            "create" => {
+                state.containerd_create_at = Some(
+                    state
+                        .containerd_create_at
+                        .map(|existing| existing.min(event.timestamp))
+                        .unwrap_or(event.timestamp),
+                );
+            }
+            "task_create" => {
+                state.containerd_task_create_at = Some(
+                    state
+                        .containerd_task_create_at
+                        .map(|existing| existing.min(event.timestamp))
+                        .unwrap_or(event.timestamp),
+                );
+            }
+            "start" | "resume" => {
+                state.containerd_task_start_at = Some(event.timestamp);
+            }
+            _ => {}
         }
-        "task_create" => {
-            state.containerd_task_create_at = Some(
-                state
-                    .containerd_task_create_at
-                    .map(|existing| existing.min(event.timestamp))
-                    .unwrap_or(event.timestamp),
-            );
-        }
-        "start" | "resume" => {
-            state.containerd_task_start_at = Some(event.timestamp);
-        }
-        _ => {}
     }
 }
 
@@ -2468,6 +2492,7 @@ fn base_cri_containerd_startup_attributes(
         "cri.sandbox_id".to_string(),
         json!(state.runtime_sandbox_id),
     );
+    attributes.insert("startup.phase".to_string(), json!("sandbox"));
     attributes.insert("image.ref".to_string(), json!(state.image_ref));
     attributes.insert("k8s.namespace".to_string(), json!(state.k8s_namespace));
     attributes.insert("k8s.pod".to_string(), json!(state.k8s_pod));
@@ -3180,6 +3205,131 @@ mod tests {
             .iter()
             .any(|span| span.span_name == "containerd.task.start"));
         assert_eq!(output.metrics[0].name, "sandbox.startup.e2e_duration_ms");
+    }
+
+    #[test]
+    fn cri_containerd_startup_trace_ignores_workload_container_task_timing() {
+        let config = test_config();
+        let mut tracker = CriContainerdStartupTraceTracker::default();
+        let sandbox_labels = HashMap::from([
+            (
+                "io.kubernetes.pod.namespace".to_string(),
+                "default".to_string(),
+            ),
+            (
+                "io.kubernetes.pod.name".to_string(),
+                "runtimepulse-demo".to_string(),
+            ),
+            (
+                "io.kubernetes.container.name".to_string(),
+                "POD".to_string(),
+            ),
+            (
+                "io.kubernetes.pod.uid".to_string(),
+                "runtimepulse-demo-uid".to_string(),
+            ),
+        ]);
+        let created = CriEvent {
+            container_id: String::new(),
+            sandbox_id: "sandboxabcdef1234567890".to_string(),
+            event_type: "SANDBOX_CREATED".to_string(),
+            reason: String::new(),
+            created_at: 1_779_415_900_000_000_000,
+            image_ref: "registry.k8s.io/pause:3.10".to_string(),
+            labels: sandbox_labels.clone(),
+            metadata: HashMap::new(),
+            annotations: HashMap::new(),
+            runtime_handler: String::new(),
+        };
+        assert!(tracker.outputs_from_cri_event(&created, &config).is_empty());
+
+        let workload_labels = HashMap::from([
+            (
+                "io.kubernetes.pod.namespace".to_string(),
+                "default".to_string(),
+            ),
+            (
+                "io.kubernetes.pod.name".to_string(),
+                "runtimepulse-demo".to_string(),
+            ),
+            (
+                "io.kubernetes.container.name".to_string(),
+                "app".to_string(),
+            ),
+            (
+                "io.kubernetes.pod.uid".to_string(),
+                "runtimepulse-demo-uid".to_string(),
+            ),
+            (
+                "io.kubernetes.cri.sandbox-id".to_string(),
+                "sandboxabcdef1234567890".to_string(),
+            ),
+        ]);
+        for (action, timestamp) in [
+            ("create", 1_779_415_900_100_000_000),
+            ("task_create", 1_779_415_900_200_000_000),
+            ("start", 1_779_415_900_300_000_000),
+        ] {
+            let event = ContainerdRuntimeEvent::Container(ContainerdEvent {
+                namespace: "k8s.io".to_string(),
+                action: action.to_string(),
+                container_id: "appabcdef1234567890".to_string(),
+                image: Some("docker.io/library/nginx:latest".to_string()),
+                runtime_name: Some("io.containerd.runc.v2".to_string()),
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
+                labels: workload_labels.clone(),
+                timestamp: DateTime::from_timestamp(timestamp / 1_000_000_000, 0).unwrap(),
+                exit_status: None,
+                pid: None,
+                topic: format!("/tasks/{action}"),
+            });
+            assert!(tracker
+                .outputs_from_containerd_event(&event, &config)
+                .is_empty());
+        }
+
+        let ready = CriEvent {
+            event_type: "SANDBOX_READY".to_string(),
+            created_at: 1_779_415_900_500_000_000,
+            ..created
+        };
+        assert!(tracker.outputs_from_cri_event(&ready, &config).is_empty());
+
+        for (action, timestamp) in [
+            ("create", 1_779_415_900_600_000_000),
+            ("task_create", 1_779_415_900_700_000_000),
+            ("start", 1_779_415_900_800_000_000),
+        ] {
+            let event = ContainerdRuntimeEvent::Container(ContainerdEvent {
+                namespace: "k8s.io".to_string(),
+                action: action.to_string(),
+                container_id: "sandboxabcdef1234567890".to_string(),
+                image: Some("registry.k8s.io/pause:3.10".to_string()),
+                runtime_name: Some("io.containerd.runc.v2".to_string()),
+                runtime_options_type_url: None,
+                runtime_binary_name: None,
+                labels: sandbox_labels.clone(),
+                timestamp: DateTime::from_timestamp(timestamp / 1_000_000_000, 0).unwrap(),
+                exit_status: None,
+                pid: None,
+                topic: format!("/tasks/{action}"),
+            });
+            let outputs = tracker.outputs_from_containerd_event(&event, &config);
+            if action != "create" {
+                assert!(outputs.is_empty());
+            } else {
+                assert_eq!(outputs.len(), 1);
+                assert!(outputs[0]
+                    .traces
+                    .iter()
+                    .any(|span| span.span_name == "containerd.container.create"));
+                assert!(!outputs[0]
+                    .traces
+                    .iter()
+                    .any(|span| span.span_name == "containerd.task.start"));
+            }
+        }
     }
 
     #[test]

@@ -1243,7 +1243,8 @@ fn infer_stage_role(function_name: &str, binary_name: &str) -> Option<String> {
     {
         return Some("cni".to_string());
     }
-    if function.contains("kata") || (binary_name.contains("kata") && binary_name != "kata-runtime") {
+    if function.contains("kata") || (binary_name.contains("kata") && binary_name != "kata-runtime")
+    {
         return Some("kata".to_string());
     }
     if function.contains("oci")

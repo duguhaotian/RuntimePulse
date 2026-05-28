@@ -73,6 +73,9 @@ pub struct ContainerdSandboxIdentity {
     pub workload_id: String,
     pub workload_name: String,
     pub runtime_sandbox_id: String,
+    pub containerd_container_id: String,
+    pub containerd_sandbox_container_id: String,
+    pub startup_phase: String,
     pub kubernetes_namespace: String,
     pub pod_name: String,
     pub container_name: String,
@@ -224,12 +227,15 @@ pub fn output_from_event(
             "runtime.source": "containerd",
             "containerd.namespace": event.namespace,
             "containerd.id": event.container_id,
+            "containerd.container_id": identity.containerd_container_id,
             "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
+            "containerd.sandbox_container_id": identity.containerd_sandbox_container_id,
             "containerd.runtime": runtime_version,
             "containerd.runtime.options_type_url": event.runtime_options_type_url,
             "containerd.runtime.binary_name": event.runtime_binary_name,
             "containerd.topic": event.topic,
             "containerd.action": event.action,
+            "startup.phase": identity.startup_phase,
             "k8s.namespace": identity.kubernetes_namespace,
             "k8s.pod": identity.pod_name,
             "k8s.container": identity.container_name,
@@ -255,11 +261,20 @@ pub fn output_from_event(
     attributes.insert("containerd.namespace".to_string(), json!(event.namespace));
     attributes.insert("containerd.id".to_string(), json!(event.container_id));
     attributes.insert(
+        "containerd.container_id".to_string(),
+        json!(identity.containerd_container_id),
+    );
+    attributes.insert(
         "containerd.runtime_sandbox_id".to_string(),
         json!(identity.runtime_sandbox_id),
     );
+    attributes.insert(
+        "containerd.sandbox_container_id".to_string(),
+        json!(identity.containerd_sandbox_container_id),
+    );
     attributes.insert("containerd.topic".to_string(), json!(event.topic));
     attributes.insert("containerd.action".to_string(), json!(event.action));
+    attributes.insert("startup.phase".to_string(), json!(identity.startup_phase));
     attributes.insert(
         "k8s.namespace".to_string(),
         json!(identity.kubernetes_namespace),
@@ -594,10 +609,12 @@ async fn collect_containerd_inventory_async(
                     "runtime.source": "containerd",
                     "containerd.namespace": namespace,
                     "containerd.id": container.id,
+                    "containerd.container_id": identity.containerd_container_id,
                     "containerd.taskStatus": task_status,
                     "containerd.pid": task_pid,
                     "containerd.exitedAt": exited_at,
                     "containerd.runtime_sandbox_id": identity.runtime_sandbox_id,
+                    "containerd.sandbox_container_id": identity.containerd_sandbox_container_id,
                     "containerd.runtime": runtime_version,
                     "containerd.runtime.options_type_url": runtime_options_type_url,
                     "containerd.runtime.binary_name": runtime_binary_name,
@@ -607,6 +624,7 @@ async fn collect_containerd_inventory_async(
                     "lifecycle.action": "inventory",
                     "lifecycle.current": current,
                     "snapshot.scope": snapshot_scope,
+                    "startup.phase": identity.startup_phase,
                     "startup.duration.source": "event-required",
                     "k8s.namespace": identity.kubernetes_namespace,
                     "k8s.pod": identity.pod_name,
@@ -1845,9 +1863,31 @@ fn containerd_identity_from_labels(
         .get("io.kubernetes.pod.uid")
         .cloned()
         .unwrap_or_default();
+    let containerd_container_id = containerd_sandbox_id(namespace, container_id);
+    let explicit_sandbox_container_id =
+        containerd_sandbox_container_id(labels).filter(|value| !value.is_empty());
+    let sandbox_container_id = explicit_sandbox_container_id
+        .clone()
+        .unwrap_or_else(|| container_id.to_string());
+    let containerd_sandbox_container_id = containerd_sandbox_id(namespace, &sandbox_container_id);
+    let startup_phase = if container_name == "POD" || container_name == "pod" {
+        "sandbox".to_string()
+    } else if explicit_sandbox_container_id
+        .as_deref()
+        .is_some_and(|value| value == container_id)
+    {
+        "sandbox".to_string()
+    } else {
+        "container".to_string()
+    };
 
     if namespace == "k8s.io" && !k8s_namespace.is_empty() && !pod_name.is_empty() {
-        let sandbox_id = kubernetes_sandbox_id(&k8s_namespace, &pod_name, &container_name);
+        let stable_container_name = if startup_phase == "sandbox" {
+            "pod"
+        } else {
+            &container_name
+        };
+        let sandbox_id = kubernetes_sandbox_id(&k8s_namespace, &pod_name, stable_container_name);
         let workload_name = if container_name == "POD" || container_name == "pod" {
             pod_name.clone()
         } else {
@@ -1858,7 +1898,10 @@ fn containerd_identity_from_labels(
             namespace: k8s_namespace.clone(),
             workload_id: pod_name.clone(),
             workload_name,
-            runtime_sandbox_id: containerd_sandbox_id(namespace, container_id),
+            runtime_sandbox_id: containerd_sandbox_container_id.clone(),
+            containerd_container_id,
+            containerd_sandbox_container_id,
+            startup_phase,
             kubernetes_namespace: k8s_namespace,
             pod_name,
             container_name,
@@ -1871,7 +1914,10 @@ fn containerd_identity_from_labels(
         namespace: namespace.to_string(),
         workload_id: container_name.clone(),
         workload_name: container_name,
-        runtime_sandbox_id: containerd_sandbox_id(namespace, container_id),
+        runtime_sandbox_id: containerd_sandbox_container_id.clone(),
+        containerd_container_id,
+        containerd_sandbox_container_id,
+        startup_phase,
         kubernetes_namespace: k8s_namespace,
         pod_name,
         container_name: labels
@@ -1880,6 +1926,18 @@ fn containerd_identity_from_labels(
             .unwrap_or_default(),
         pod_uid,
     }
+}
+
+fn containerd_sandbox_container_id(labels: &HashMap<String, String>) -> Option<String> {
+    [
+        "io.kubernetes.cri.sandbox-id",
+        "io.kubernetes.cri.sandboxID",
+        "io.kubernetes.sandbox.id",
+        "io.kubernetes.pod.sandbox.id",
+        "io.cri-containerd.sandbox-id",
+    ]
+    .iter()
+    .find_map(|key| labels.get(*key).cloned())
 }
 
 fn kubernetes_sandbox_id(namespace: &str, pod: &str, container: &str) -> String {
@@ -2070,6 +2128,44 @@ mod tests {
         assert_eq!(
             sandbox["attributes"]["containerd.runtime.binary_name"],
             "/usr/bin/kata-runtime"
+        );
+    }
+
+    #[test]
+    fn workload_container_identity_links_to_pod_sandbox_container() {
+        let mut labels = HashMap::new();
+        labels.insert(
+            "io.kubernetes.pod.namespace".to_string(),
+            "default".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.pod.name".to_string(),
+            "runtimepulse-demo".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.container.name".to_string(),
+            "app".to_string(),
+        );
+        labels.insert(
+            "io.kubernetes.cri.sandbox-id".to_string(),
+            "sandboxabcdef1234567890".to_string(),
+        );
+
+        let identity = containerd_identity_from_labels("k8s.io", "appabcdef1234567890", &labels);
+
+        assert_eq!(identity.startup_phase, "container");
+        assert_eq!(identity.sandbox_id, "k8s-default-runtimepulse-demo-app");
+        assert_eq!(
+            identity.containerd_container_id,
+            "containerd-k8s-io-appabcdef1234567890"
+        );
+        assert_eq!(
+            identity.containerd_sandbox_container_id,
+            "containerd-k8s-io-sandboxabcdef1234567890"
+        );
+        assert_eq!(
+            identity.runtime_sandbox_id,
+            "containerd-k8s-io-sandboxabcdef1234567890"
         );
     }
 
