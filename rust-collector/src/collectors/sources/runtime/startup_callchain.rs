@@ -919,8 +919,72 @@ fn normalize_uprobe_events(report: &StartupCallchainReport) -> UprobeNormalizati
         }
     }
 
+    attach_parent_spans_by_process_tree(&mut normalized.spans);
     normalized.span_count = normalized.spans.len() as u64;
     normalized
+}
+
+fn attach_parent_spans_by_process_tree(spans: &mut [StartupStageReport]) {
+    let mut spans_by_pid = HashMap::<u64, Vec<usize>>::new();
+    for (idx, span) in spans.iter().enumerate() {
+        if let Some(pid) = span.process_id {
+            spans_by_pid.entry(pid).or_default().push(idx);
+        }
+    }
+
+    for idx in 0..spans.len() {
+        if spans[idx].parent_span_id.is_some() {
+            continue;
+        }
+        let Some(ppid) = spans[idx].parent_process_id else {
+            continue;
+        };
+        let Some(parent_idx) = choose_parent_span(spans, idx, spans_by_pid.get(&ppid)) else {
+            continue;
+        };
+        if let Some(parent_span_id) = spans[parent_idx].span_id.clone() {
+            spans[idx].parent_span_id = Some(parent_span_id.clone());
+            if let Some(attributes) = spans[idx].attributes.as_mut() {
+                attributes.insert("startup.parent.pid".to_string(), json!(ppid));
+                attributes.insert("startup.parent.span_id".to_string(), json!(parent_span_id));
+            }
+        }
+    }
+}
+
+fn choose_parent_span(
+    spans: &[StartupStageReport],
+    child_idx: usize,
+    candidates: Option<&Vec<usize>>,
+) -> Option<usize> {
+    let child_start = spans[child_idx]
+        .start_time
+        .as_deref()
+        .and_then(parse_time)?;
+    let child_end = spans[child_idx].end_time.as_deref().and_then(parse_time);
+
+    candidates?
+        .iter()
+        .copied()
+        .filter(|candidate_idx| *candidate_idx != child_idx)
+        .filter_map(|candidate_idx| {
+            let parent = &spans[candidate_idx];
+            let parent_start = parent.start_time.as_deref().and_then(parse_time)?;
+            if parent_start > child_start {
+                return None;
+            }
+            if let Some(parent_end) = parent.end_time.as_deref().and_then(parse_time) {
+                if let Some(child_end) = child_end {
+                    if parent_end < child_end {
+                        return None;
+                    }
+                }
+            }
+            let delta_ms = (child_start - parent_start).num_milliseconds().abs();
+            Some((candidate_idx, delta_ms))
+        })
+        .min_by_key(|(_, delta_ms)| *delta_ms)
+        .map(|(candidate_idx, _)| candidate_idx)
 }
 
 fn span_from_uprobe_pair(
@@ -2642,6 +2706,87 @@ mod tests {
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.iptables_duration_ms" && metric.value == 30.0
         }));
+    }
+
+    #[test]
+    fn links_child_exec_spans_to_parent_process_span() {
+        let config = test_config();
+        let content = r#"
+        {
+          "sandboxId": "sandbox-proc-tree",
+          "runtimeType": "runc",
+          "events": [
+            {
+              "eventType": "enter",
+              "requestId": "cni-bridge",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.000Z",
+              "binary": "/opt/cni/bin/bridge",
+              "pid": 100,
+              "ppid": 1,
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-proc-tree"
+            },
+            {
+              "eventType": "enter",
+              "requestId": "iptables-child",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.020Z",
+              "binary": "/usr/sbin/iptables",
+              "role": "helper",
+              "pid": 102,
+              "ppid": 100,
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-proc-tree"
+            },
+            {
+              "eventType": "exit",
+              "requestId": "iptables-child",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.050Z",
+              "binary": "/usr/sbin/iptables",
+              "role": "helper",
+              "pid": 102,
+              "ppid": 100,
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-proc-tree"
+            },
+            {
+              "eventType": "exit",
+              "requestId": "cni-bridge",
+              "function": "execve",
+              "timestamp": "2026-05-26T01:00:00.100Z",
+              "binary": "/opt/cni/bin/bridge",
+              "pid": 100,
+              "ppid": 1,
+              "cniCommand": "ADD",
+              "cniContainerId": "sandbox-proc-tree"
+            }
+          ]
+        }
+        "#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+        let bridge = output
+            .traces
+            .iter()
+            .find(|span| span.span_name == "cni.plugin.bridge")
+            .expect("bridge span");
+        let iptables = output
+            .traces
+            .iter()
+            .find(|span| span.span_name == "process.exec.iptables")
+            .expect("iptables span");
+
+        assert_eq!(
+            iptables.parent_span_id.as_deref(),
+            Some(bridge.span_id.as_str())
+        );
+        assert_eq!(iptables.attributes["startup.parent.pid"], json!(100));
+        assert_eq!(
+            iptables.attributes["startup.parent.span_id"],
+            json!(bridge.span_id)
+        );
     }
 
     #[test]
