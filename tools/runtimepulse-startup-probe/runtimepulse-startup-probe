@@ -633,6 +633,62 @@ def parse_cni_args(value: str) -> dict[str, str]:
     return parsed
 
 
+def stable_kubernetes_sandbox_id(namespace: str, pod: str, container: str = "pod") -> str:
+    return f"k8s-{sanitize_id(namespace)}-{sanitize_id(pod)}-{sanitize_id(container or 'pod')}"
+
+
+def oci_bundle_metadata(bundle: str) -> dict[str, str]:
+    """Extract stable CRI/Kubernetes identity from an OCI bundle config.
+
+    containerd writes CRI labels/annotations into the OCI runtime spec. Reading
+    the bundle config lets runtime exec observations carry the same stable
+    sandbox id as CRI/containerd event collectors, instead of only the raw
+    containerd task id.
+    """
+    if not bundle:
+        return {}
+    config_path = Path(bundle) / "config.json"
+    try:
+        spec = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    annotations = spec.get("annotations") or {}
+    if not isinstance(annotations, dict):
+        return {}
+    labels = {str(key): str(value) for key, value in annotations.items() if value is not None}
+    namespace = labels.get("io.kubernetes.pod.namespace", "")
+    pod = labels.get("io.kubernetes.pod.name", "")
+    container = labels.get("io.kubernetes.container.name", "")
+    pod_uid = labels.get("io.kubernetes.pod.uid", "")
+    runtime_handler = (
+        labels.get("io.kubernetes.cri.runtime-handler", "")
+        or labels.get("io.kubernetes.runtime.handler", "")
+        or labels.get("io.kubernetes.cri-o.RuntimeHandler", "")
+    )
+    sandbox_container_id = (
+        labels.get("io.kubernetes.cri.sandbox-id", "")
+        or labels.get("io.kubernetes.sandbox.id", "")
+        or labels.get("io.kubernetes.pod.sandbox.id", "")
+        or labels.get("io.cri-containerd.sandbox-id", "")
+    )
+    phase = "sandbox" if container.lower() in {"", "pod"} else "container"
+    stable_id = stable_kubernetes_sandbox_id(namespace, pod, "pod") if namespace and pod and phase == "sandbox" else ""
+    if namespace and pod and phase == "container":
+        stable_id = stable_kubernetes_sandbox_id(namespace, pod, container)
+    metadata = {
+        "k8s.namespace": namespace,
+        "k8s.pod": pod,
+        "k8s.container": container,
+        "k8s.pod_uid": pod_uid,
+        "cri.runtime_handler": runtime_handler,
+        "cri.sandbox_container_id": sandbox_container_id,
+        "startup.phase": phase,
+        "startup.phase.source": "oci-bundle-config",
+        "startup.stable_sandbox_id": stable_id,
+    }
+    return {key: value for key, value in metadata.items() if value}
+
+
 def netns_identity(path: str) -> dict[str, object]:
     """Return a stable-ish netns identity for CNI correlation.
 
@@ -701,11 +757,13 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
     role = infer_role(binary, argv, env)
     cni_container_id = env.get("CNI_CONTAINERID", "") or cni_args.get("K8S_POD_INFRA_CONTAINER_ID", "")
     bundle = infer_oci_bundle(argv)
+    bundle_meta = oci_bundle_metadata(bundle)
     shim_info = infer_containerd_shim_info(argv)
     namespace = namespace_from_bundle(bundle)
     namespace = namespace or shim_info.get("namespace", "")
     containerd_id = cni_container_id or sandbox_id_from_bundle(bundle) or shim_info.get("id", "")
-    sandbox_id = forced_sandbox_id or containerd_id
+    stable_bundle_id = bundle_meta.get("startup.stable_sandbox_id", "")
+    sandbox_id = forced_sandbox_id or stable_bundle_id or containerd_id
     runtime_type = infer_runtime_type(binary, argv, default_runtime_type)
     oci_runtime = basename(binary) if role in {"oci", "kata"} and basename(binary).startswith("containerd-shim-") else (basename(binary) if role == "oci" else "")
     oci_operation = infer_oci_operation(argv) if role in {"oci", "kata"} else ""
@@ -723,6 +781,13 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
     }
     if containerd_id:
         attributes["containerd.container_id"] = containerd_id
+    attributes.update(bundle_meta)
+    if stable_bundle_id and containerd_id and stable_bundle_id != containerd_id:
+        attributes["containerd.raw_id"] = containerd_id
+        attributes["startup.probe.correlation"] = "oci-bundle-config"
+        attributes["startup.probe.correlation_sandbox_id"] = stable_bundle_id
+    if bundle_meta.get("cri.sandbox_container_id"):
+        attributes["containerd.sandbox_container_id"] = bundle_meta["cri.sandbox_container_id"]
     if cni_container_id:
         attributes["cni.container_id"] = cni_container_id
     attributes.update(netns_attrs)
@@ -752,7 +817,7 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
         observed_at=observed_at,
         role=role,
         sandbox_id=sandbox_id,
-        cri_sandbox_id=cni_container_id or containerd_id,
+        cri_sandbox_id=cni_container_id or stable_bundle_id or containerd_id,
         containerd_id=containerd_id,
         runtime_type=runtime_type,
         cni_plugin=cni_plugin,
@@ -1646,6 +1711,32 @@ def self_test() -> None:
     assert netns_reports[0]["sandboxId"] == "sandbox-netns"
     assert netns_summary["observedCniExecCount"] == 2.0
     assert any((event.get("attributes") or {}).get("startup.probe.correlation") == "netns" for event in netns_events)
+
+    with tempfile.TemporaryDirectory(prefix="runtimepulse-oci-bundle-") as tmp:
+        bundle = Path(tmp) / "io.containerd.runtime.v2.task" / "k8s.io" / "raw-sandbox-id"
+        bundle.mkdir(parents=True)
+        (bundle / "config.json").write_text(json.dumps({
+            "ociVersion": "1.1.0",
+            "annotations": {
+                "io.kubernetes.pod.namespace": "default",
+                "io.kubernetes.pod.name": "bundle-demo",
+                "io.kubernetes.container.name": "POD",
+                "io.kubernetes.pod.uid": "bundle-demo-uid",
+                "io.kubernetes.cri.runtime-handler": "kata",
+            },
+        }))
+        bundle_lines = [
+            f"RP_EXEC_ENTER\t500\t1\t0\t0\tcontainerd\t/usr/local/bin/kata-runtime\tkata-runtime\t--bundle\t{bundle}\tcreate\traw-sandbox-id\t\t\t\t\n",
+            "RP_PROC_EXIT\t500\tkata-runtime\n",
+        ]
+        bundle_events, _bundle_summary, _bundle_runtime, bundle_sandbox, bundle_cri = collect_from_stream(bundle_lines, 6, 4, "", "", None)
+        assert bundle_sandbox == "k8s-default-bundle-demo-pod"
+        assert bundle_cri == "k8s-default-bundle-demo-pod"
+        assert grouped_reports(bundle_events, "kata", "", "", "self-test")[0]["sandboxId"] == "k8s-default-bundle-demo-pod"
+        bundle_attrs = bundle_events[0]["attributes"]
+        assert bundle_attrs["containerd.raw_id"] == "raw-sandbox-id"
+        assert bundle_attrs["k8s.pod"] == "bundle-demo"
+        assert bundle_attrs["startup.phase"] == "sandbox"
     print("self-test ok")
 
 
