@@ -124,7 +124,9 @@ The repository includes a minimal exporter at
 plugin binaries, OCI/Kata runtime binaries, containerd shims, and optional helper
 binaries. When a capture window observes multiple sandbox ids, the exporter emits
 one lightweight report per sandbox under `reports` so concurrent starts keep
-separate CNI/helper/runtime metrics. This is the first concrete exporter bridge;
+separate CNI/helper/runtime metrics. Each generated report carries its own
+`startTime`/`endTime`/`durationMs` event window for the call-chain root span.
+This is the first concrete exporter bridge;
 native containerd `RunPodSandbox` Go uprobes can be added behind the same JSON
 contract later.
 

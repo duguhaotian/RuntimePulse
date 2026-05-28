@@ -635,6 +635,28 @@ def first_event_value(events: list[dict[str, object]], *keys: str) -> str:
     return ""
 
 
+def report_time_window(events: list[dict[str, object]]) -> tuple[str, str, float | None]:
+    timestamps = [str(event.get("timestamp", "") or "") for event in events]
+    timestamps = [timestamp for timestamp in timestamps if timestamp]
+    if not timestamps:
+        return "", "", None
+    start_time = min(timestamps)
+    end_time = max(timestamps)
+    start_dt = parse_iso8601(start_time)
+    end_dt = parse_iso8601(end_time)
+    duration_ms = None
+    if start_dt and end_dt:
+        duration_ms = max((end_dt - start_dt).total_seconds() * 1000.0, 1.0)
+    return start_time, end_time, duration_ms
+
+
+def parse_iso8601(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def report_from_events(
     events: list[dict[str, object]],
     runtime_type: str,
@@ -648,7 +670,8 @@ def report_from_events(
     report_cri_sandbox_id = cri_sandbox_id or first_event_value(
         events, "criSandboxId", "sandboxId", "containerdId"
     )
-    return {
+    start_time, end_time, duration_ms = report_time_window(events)
+    report = {
         "source": source,
         "timestamp": utc_now(),
         "runtimeType": runtime_type_from_events(events, runtime_type),
@@ -658,6 +681,11 @@ def report_from_events(
         "summary": summarize_events(events),
         "events": events,
     }
+    if start_time and end_time and duration_ms is not None:
+        report["startTime"] = start_time
+        report["endTime"] = end_time
+        report["durationMs"] = duration_ms
+    return report
 
 
 def grouped_reports(
@@ -783,6 +811,8 @@ def self_test() -> None:
     assert len(reports) == 2
     assert {report["sandboxId"] for report in reports} == {"sandbox-a", "sandbox-b"}
     assert all(report["summary"]["observedCniExecCount"] == 1.0 for report in reports)
+    assert all(report["startTime"] <= report["endTime"] for report in reports)
+    assert all(report["durationMs"] >= 1.0 for report in reports)
     print("self-test ok")
 
 

@@ -37,8 +37,10 @@ tools/runtimepulse-startup-probe/runtimepulse-startup-probe self-test
 
 By default the exporter groups captured events into one report per observed
 `sandboxId`/`criSandboxId` and emits a top-level `reports` array when more than
-one sandbox is seen. Use `--no-group-by-sandbox` only for legacy debugging where
-a single capture-window report is required.
+one sandbox is seen. Each report includes `startTime`, `endTime`, and `durationMs`
+computed from its own event window, allowing RuntimePulse to render a
+`sandbox.startup.callchain` root span per sandbox. Use `--no-group-by-sandbox`
+only for legacy debugging where a single capture-window report is required.
 
 Limitations:
 
