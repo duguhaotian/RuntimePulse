@@ -2,10 +2,10 @@
 # Validate RuntimePulse CRI+containerd startup call-chain ingestion from a real
 # runtimepulse-startup-probe capture or an existing report file.
 #
-# This script intentionally does not create a CRI/containerd sandbox by itself.
-# In capture mode it starts the probe; run `crictl runp` (runc or kata) in the
-# capture window. With VALIDATE_INGEST=true it then normalizes the report through
-# the Rust startup-callchain path and verifies traces/metrics/events.
+# Existing report mode validates a probe JSON report. Capture mode starts the
+# probe and can optionally run `crictl runp` automatically when POD_CONFIG is
+# provided. With VALIDATE_INGEST=true it normalizes the report through the Rust
+# startup-callchain path and verifies traces/metrics/events.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -18,11 +18,18 @@ CONTAINERD_NAMESPACE="${CONTAINERD_NAMESPACE:-k8s.io}"
 INCLUDE_HELPERS="${INCLUDE_HELPERS:-true}"
 LOCAL_REPORT_URL="${LOCAL_REPORT_URL:-http://127.0.0.1:9091/api/local/ingest}"
 VALIDATE_INGEST="${VALIDATE_INGEST:-false}"
+CRI_ENDPOINT="${CRI_ENDPOINT:-}"
+IMAGE_ENDPOINT="${IMAGE_ENDPOINT:-$CRI_ENDPOINT}"
+POD_CONFIG="${POD_CONFIG:-}"
+CRI_RUNTIME_HANDLER="${CRI_RUNTIME_HANDLER:-$RUNTIME_TYPE}"
+CLEANUP_POD="${CLEANUP_POD:-true}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
 COLLECTOR_LOG="$OUT_DIR/startup-callchain-collector.log"
 READY_FILE="$OUT_DIR/startup-probe.ready"
+RUNP_LOG="$OUT_DIR/crictl-runp.log"
+SANDBOX_ID_FILE="$OUT_DIR/crictl-sandbox-id"
 
 usage() {
   cat <<USAGE
@@ -30,16 +37,22 @@ Usage:
   REPORT_PATH=/path/to/probe.json $0
   $0 /path/to/probe.json
   CAPTURE=true RUNTIME_TYPE=kata $0
+  CAPTURE=true POD_CONFIG=/path/to/pod.json CRI_ENDPOINT=unix:///run/containerd/containerd.sock $0
 
 Modes:
   Existing report (default): validate REPORT_PATH shape.
   Capture mode: CAPTURE=true runs runtimepulse-startup-probe and writes REPORT_PATH.
+  Automatic RunPod: set POD_CONFIG and CRI_ENDPOINT to run crictl runp during capture.
   Ingest validation: VALIDATE_INGEST=true also normalizes through host-startup-callchain.
 
 Common env:
   RUNTIME_TYPE=runc|kata       Expected runtime type hint for capture mode.
   CONTAINERD_NAMESPACE=k8s.io  Namespace filter for runtime/shim events.
   INCLUDE_HELPERS=true|false   Include helper binaries such as iptables/nft/ip/tc.
+  POD_CONFIG=/path/pod.json    Optional crictl runp pod config for automatic E2E.
+  CRI_ENDPOINT=unix://...      Runtime endpoint used by crictl.
+  CRI_RUNTIME_HANDLER=kata     Optional --runtime passed to crictl runp.
+  CLEANUP_POD=true|false       Stop/remove the sandbox after automatic RunPod.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   LOCAL_REPORT_URL=http://127.0.0.1:9091/api/local/ingest
 USAGE
@@ -57,6 +70,68 @@ require_file() {
   fi
 }
 
+crictl_args() {
+  local args=()
+  if [[ -n "$CRI_ENDPOINT" ]]; then
+    args+=(--runtime-endpoint "$CRI_ENDPOINT")
+  fi
+  if [[ -n "$IMAGE_ENDPOINT" ]]; then
+    args+=(--image-endpoint "$IMAGE_ENDPOINT")
+  fi
+  printf '%s\0' "${args[@]}"
+}
+
+run_crictl() {
+  local args=()
+  while IFS= read -r -d '' item; do
+    args+=("$item")
+  done < <(crictl_args)
+  crictl "${args[@]}" "$@"
+}
+
+cleanup_sandbox() {
+  [[ "$CLEANUP_POD" == "true" ]] || return 0
+  [[ -s "$SANDBOX_ID_FILE" ]] || return 0
+  local sandbox_id
+  sandbox_id="$(cat "$SANDBOX_ID_FILE")"
+  [[ -n "$sandbox_id" ]] || return 0
+  run_crictl stopp "$sandbox_id" >/dev/null 2>&1 || true
+  run_crictl rmp "$sandbox_id" >/dev/null 2>&1 || true
+}
+
+run_pod_sandbox() {
+  [[ -n "$POD_CONFIG" ]] || return 0
+  require_file "$POD_CONFIG"
+  if ! command -v crictl >/dev/null 2>&1; then
+    echo "crictl not found; install crictl or unset POD_CONFIG" >&2
+    exit 1
+  fi
+
+  local runtime_args=()
+  if [[ -n "$CRI_RUNTIME_HANDLER" ]]; then
+    runtime_args+=(--runtime "$CRI_RUNTIME_HANDLER")
+  fi
+
+  echo "running crictl runp: $POD_CONFIG" >&2
+  set +e
+  run_crictl runp "${runtime_args[@]}" "$POD_CONFIG" > "$RUNP_LOG" 2>&1
+  local rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    cat "$RUNP_LOG" >&2 || true
+    exit $rc
+  fi
+  local sandbox_id
+  sandbox_id="$(tail -n 1 "$RUNP_LOG" | tr -d '[:space:]')"
+  if [[ -z "$sandbox_id" ]]; then
+    echo "crictl runp did not return a sandbox id" >&2
+    cat "$RUNP_LOG" >&2 || true
+    exit 1
+  fi
+  echo "$sandbox_id" > "$SANDBOX_ID_FILE"
+  echo "created sandbox: $sandbox_id" >&2
+}
+
 capture_probe() {
   local helper_args=()
   local runtime_args=()
@@ -67,7 +142,8 @@ capture_probe() {
     runtime_args+=(--runtime-type "$RUNTIME_TYPE")
   fi
 
-  rm -f "$READY_FILE" "$REPORT_PATH"
+  rm -f "$READY_FILE" "$REPORT_PATH" "$RUNP_LOG" "$SANDBOX_ID_FILE"
+  trap cleanup_sandbox EXIT
   echo "starting startup probe capture: $REPORT_PATH" >&2
   sudo "$PROBE_BIN" export \
     --once \
@@ -88,8 +164,19 @@ capture_probe() {
     sleep 0.05
   done
 
-  echo "probe is ready; run crictl runp now if not already running" >&2
+  if [[ -e "$READY_FILE" ]]; then
+    if [[ -n "$POD_CONFIG" ]]; then
+      run_pod_sandbox
+    else
+      echo "probe is ready; run crictl runp now before the capture window ends" >&2
+    fi
+  else
+    echo "probe did not report ready before timeout" >&2
+  fi
+
   wait "$probe_pid"
+  cleanup_sandbox
+  trap - EXIT
   require_file "$REPORT_PATH"
 }
 

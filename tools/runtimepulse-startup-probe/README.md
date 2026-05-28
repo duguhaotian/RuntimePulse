@@ -63,6 +63,14 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh /tmp/startup
 # another shell before the capture window ends.
 CAPTURE=true RUNTIME_TYPE=kata DURATION_MS=12000 \
 tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
+
+# Fully automated runp capture when a standalone/containerd CRI endpoint and pod
+# config are available. The script starts the probe, runs crictl runp, cleans up
+# the sandbox, and validates collector ingestion.
+CAPTURE=true VALIDATE_INGEST=true RUNTIME_TYPE=kata CRI_RUNTIME_HANDLER=kata \
+CRI_ENDPOINT=unix:///tmp/runtimepulse-containerd-cri-test/containerd.sock \
+POD_CONFIG=/tmp/runtimepulse-containerd-cri-test/pod-config-kata.json \
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 ```
 
 Limitations:
