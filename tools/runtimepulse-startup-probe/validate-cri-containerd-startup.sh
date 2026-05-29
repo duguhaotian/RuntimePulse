@@ -621,13 +621,54 @@ PY
 query_api_sandboxes() {
   python3 - "$REPORT_PATH" <<'PY'
 import json, sys
+
+def sanitize_id(value):
+    out = []
+    last_dash = False
+    for ch in str(value or '').strip().lower():
+        if ch.isalnum():
+            out.append(ch)
+            last_dash = False
+        elif not last_dash:
+            out.append('-')
+            last_dash = True
+    return ''.join(out).strip('-') or 'unknown'
+
+def attrs_from_event(event):
+    attrs = event.get('attributes') or {}
+    return attrs if isinstance(attrs, dict) else {}
+
+def first_report_value(report, keys):
+    for key in keys:
+        value = str(report.get(key) or '').strip()
+        if value:
+            return value
+    for event in report.get('events') or []:
+        attrs = attrs_from_event(event)
+        for key in keys:
+            value = str(event.get(key) or attrs.get(key) or '').strip()
+            if value:
+                return value
+    return ''
+
+def stable_query_sandbox_id(report):
+    explicit_stable = first_report_value(report, ['startup.stable_sandbox_id'])
+    if explicit_stable:
+        return explicit_stable
+    namespace = first_report_value(report, ['namespace', 'k8s_namespace', 'podNamespace', 'k8s.namespace'])
+    pod = first_report_value(report, ['podName', 'pod_name', 'k8s.pod'])
+    container = first_report_value(report, ['containerName', 'container_name', 'k8s.container']) or 'pod'
+    if namespace and pod:
+        return f'k8s-{sanitize_id(namespace)}-{sanitize_id(pod)}-{sanitize_id(container)}'
+    return str(report.get('sandboxId') or report.get('criSandboxId') or '').strip()
+
 with open(sys.argv[1], encoding='utf-8') as handle:
     payload = json.load(handle)
 reports = payload.get('reports') if isinstance(payload, dict) else None
 if reports is None:
     reports = [payload]
 for report in reports:
-    sandbox = report.get('sandboxId') or report.get('criSandboxId')
+    sandbox = stable_query_sandbox_id(report)
     if sandbox:
         print(sandbox)
 PY
