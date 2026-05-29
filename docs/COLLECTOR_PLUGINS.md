@@ -478,7 +478,7 @@ Useful native containerd settings:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `RUNTIMEPULSE_CONTAINERD_SOCKET` | `/run/containerd/containerd.sock` | containerd gRPC socket. |
-| `RUNTIMEPULSE_CONTAINERD_NAMESPACES` | all namespaces | Comma-separated namespaces to inspect, for example `k8s.io`. |
+| `RUNTIMEPULSE_CONTAINERD_NAMESPACES` | all namespaces | Comma-separated namespaces to inspect. Use `k8s.io` for CRI/containerd when Docker collectors are also enabled, so Docker's internal `moby` namespace is not reported twice. |
 | `RUNTIMEPULSE_CONTAINERD_DIAGNOSTIC_CONTAINERS` | all containers | Comma-separated container ids, short ids, sandbox ids, or workload names to export. |
 | `RUNTIMEPULSE_CONTAINERD_DIAGNOSTIC_OUTPUT_DIR` | `/tmp/runtimepulse/diagnostics/containerd` | Directory for raw native containerd metadata artifacts. |
 

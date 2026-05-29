@@ -142,13 +142,18 @@ Both sources connect directly to containerd's gRPC API over
 
 ```text
 RUNTIMEPULSE_CONTAINERD_SOCKET=/run/containerd/containerd.sock
-RUNTIMEPULSE_CONTAINERD_NAMESPACES=moby,k8s.io
+RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io
 ```
 
 If `RUNTIMEPULSE_CONTAINERD_NAMESPACES` is empty, namespaces are discovered from
 the containerd namespace service for inventory. Event streaming subscribes to
 all namespaces unless this variable is set, in which case it applies
-containerd namespace filters.
+containerd namespace filters. When Docker collectors are enabled on the same
+node, avoid collecting Docker's internal containerd `moby` namespace through
+the containerd sources; those rows represent the same Docker containers and
+will duplicate the Docker sandbox rows. For a Docker + CRI/containerd host,
+point `RUNTIMEPULSE_CONTAINERD_SOCKET` at the CRI containerd socket and set
+`RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io`.
 
 The Docker sandbox cgroupfs source initializes from Docker's running-container
 inventory and then uses Docker lifecycle events to maintain the active set.

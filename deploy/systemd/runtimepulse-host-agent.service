@@ -1,6 +1,5 @@
 [Unit]
 Description=RuntimePulse host agent
-Documentation=README.md
 After=network-online.target docker.service
 Wants=network-online.target
 
