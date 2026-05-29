@@ -342,8 +342,15 @@ stage timing or lazy-loading block cache counters. RuntimePulse does not infer
 these values from Docker metadata and does not run `docker pull` just to create
 measurements.
 
+Runtime collection is currently optimized for CRI + containerd. Docker sources
+are optional validation/demo sources and can be disabled entirely; see
+[`CRI_CONTAINERD_COLLECTION.md`](CRI_CONTAINERD_COLLECTION.md) for the
+recommended source set and why the Docker `moby` namespace should not be
+collected through containerd when Docker validation is enabled.
+
 ```bash
-RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,docker-inventory,docker-events,docker-sandbox-cgroupfs,image-cache
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,containerd-sandbox-cgroupfs,image-cache
+RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io
 RUNTIMEPULSE_IMAGE_CACHE_REPORT_PATH=/var/lib/runtimepulse/image-cache-report.json
 runtimepulse-collector host-agent
 ```

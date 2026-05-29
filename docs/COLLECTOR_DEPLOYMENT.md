@@ -155,6 +155,12 @@ will duplicate the Docker sandbox rows. For a Docker + CRI/containerd host,
 point `RUNTIMEPULSE_CONTAINERD_SOCKET` at the CRI containerd socket and set
 `RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io`.
 
+For the current RuntimePulse production target, Docker is only a local
+validation path and the real runtime scope is CRI + containerd. Keep Docker
+sources disabled unless validating Docker-specific plumbing. See
+[`CRI_CONTAINERD_COLLECTION.md`](CRI_CONTAINERD_COLLECTION.md) for the runtime
+collector trigger model and deployment policy.
+
 The Docker sandbox cgroupfs source initializes from Docker's running-container
 inventory and then uses Docker lifecycle events to maintain the active set.
 Only the active set is sampled.
