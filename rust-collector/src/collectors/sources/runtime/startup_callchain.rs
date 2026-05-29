@@ -702,8 +702,10 @@ fn runtime_type_from_name(value: &str) -> String {
         "kata".to_string()
     } else if value.contains("firecracker") {
         "firecracker".to_string()
-    } else {
+    } else if value.contains("runc") || value.contains("crun") || !value.trim().is_empty() {
         "runc".to_string()
+    } else {
+        "unknown".to_string()
     }
 }
 
@@ -735,23 +737,17 @@ fn apply_event_report_defaults(report: &mut StartupCallchainReport, fallback_tim
     }
 
     if report.sandbox_id.trim().is_empty() {
-        if let Some(value) =
-            first_event_string(&report.raw_events, |event| event.sandbox_id.as_deref())
-        {
+        if let Some(value) = first_event_string(&report.raw_events, event_sandbox_id) {
             report.sandbox_id = value;
         }
     }
     if report.cri_sandbox_id.trim().is_empty() {
-        if let Some(value) =
-            first_event_string(&report.raw_events, |event| event.cri_sandbox_id.as_deref())
-        {
+        if let Some(value) = first_event_string(&report.raw_events, event_cri_sandbox_id) {
             report.cri_sandbox_id = value;
         }
     }
     if report.containerd_id.trim().is_empty() {
-        if let Some(value) =
-            first_event_string(&report.raw_events, |event| event.containerd_id.as_deref())
-        {
+        if let Some(value) = first_event_string(&report.raw_events, event_containerd_id) {
             report.containerd_id = value;
         }
     }
@@ -782,12 +778,14 @@ fn apply_event_report_defaults(report: &mut StartupCallchainReport, fallback_tim
         }
     }
     if report.runtime_type.is_none() {
-        report.runtime_type =
-            first_event_string(&report.raw_events, |event| event.runtime_type.as_deref());
+        report.runtime_type = first_event_string(&report.raw_events, event_runtime_type);
+        if report.runtime_type.is_none() {
+            report.runtime_type = first_event_string(&report.raw_events, event_runtime_handler)
+                .map(|handler| runtime_type_from_name(&handler));
+        }
     }
     if report.runtime_handler.is_none() {
-        report.runtime_handler =
-            first_event_string(&report.raw_events, |event| event.runtime_handler.as_deref());
+        report.runtime_handler = first_event_string(&report.raw_events, event_runtime_handler);
     }
     if report.start_time.is_none() {
         report.start_time = earliest_event_timestamp(&report.raw_events)
@@ -818,6 +816,56 @@ where
         .map(ToOwned::to_owned)
 }
 
+fn event_sandbox_id(event: &UprobeEventReport) -> Option<&str> {
+    event.sandbox_id.as_deref().or_else(|| {
+        event_attribute_string(
+            event,
+            &[
+                "sandboxId",
+                "sandbox_id",
+                "startup.stable_sandbox_id",
+                "startup.probe.correlation_sandbox_id",
+                "cni.container_id",
+                "cni.args.K8S_POD_INFRA_CONTAINER_ID",
+            ],
+        )
+    })
+}
+
+fn event_cri_sandbox_id(event: &UprobeEventReport) -> Option<&str> {
+    event.cri_sandbox_id.as_deref().or_else(|| {
+        event_attribute_string(
+            event,
+            &[
+                "criSandboxId",
+                "cri_sandbox_id",
+                "cri.sandbox_id",
+                "cri.sandbox_container_id",
+                "cni.container_id",
+                "cni.args.K8S_POD_INFRA_CONTAINER_ID",
+                "startup.probe.correlation_sandbox_id",
+            ],
+        )
+    })
+}
+
+fn event_containerd_id(event: &UprobeEventReport) -> Option<&str> {
+    event.containerd_id.as_deref().or_else(|| {
+        event_attribute_string(
+            event,
+            &[
+                "containerdId",
+                "containerd_id",
+                "containerd.id",
+                "containerd.container_id",
+                "containerd.raw_id",
+                "containerd.sandbox_container_id",
+                "startup.probe.correlation_sandbox_id",
+            ],
+        )
+    })
+}
+
 fn event_k8s_namespace(event: &UprobeEventReport) -> Option<&str> {
     event
         .k8s_namespace
@@ -844,6 +892,28 @@ fn event_pod_uid(event: &UprobeEventReport) -> Option<&str> {
         .pod_uid
         .as_deref()
         .or_else(|| event_attribute_string(event, &["k8s.pod_uid", "podUid"]))
+}
+
+fn event_runtime_type(event: &UprobeEventReport) -> Option<&str> {
+    event
+        .runtime_type
+        .as_deref()
+        .or_else(|| event_attribute_string(event, &["runtime.type", "runtimeType"]))
+        .filter(|value| !value.eq_ignore_ascii_case("unknown"))
+}
+
+fn event_runtime_handler(event: &UprobeEventReport) -> Option<&str> {
+    event.runtime_handler.as_deref().or_else(|| {
+        event_attribute_string(
+            event,
+            &[
+                "runtime.handler",
+                "runtimeHandler",
+                "cri.runtime_handler",
+                "cri.runtimeHandler",
+            ],
+        )
+    })
 }
 
 fn event_attribute_string<'a>(event: &'a UprobeEventReport, keys: &[&str]) -> Option<&'a str> {
@@ -3152,6 +3222,55 @@ mod tests {
         assert_eq!(
             output.events[0].attributes["k8s.namespace"],
             json!("default")
+        );
+    }
+
+    #[test]
+    fn derives_report_runtime_ids_from_probe_attributes() {
+        let config = test_config();
+        let content = r#"{
+          "source":"runtimepulse-startup-probe",
+          "events":[{
+            "eventType":"enter",
+            "requestId":"runpod-runtime-attrs",
+            "function":"RunPodSandbox",
+            "timestamp":"2026-05-26T01:00:00.000Z",
+            "attributes":{
+              "startup.probe.correlation_sandbox_id":"sandbox-from-correlation",
+              "containerd.container_id":"raw-containerd-id",
+              "cri.runtime_handler":"kata"
+            }
+          },{
+            "eventType":"exit",
+            "requestId":"runpod-runtime-attrs",
+            "function":"RunPodSandbox",
+            "timestamp":"2026-05-26T01:00:00.200Z",
+            "attributes":{
+              "startup.probe.correlation_sandbox_id":"sandbox-from-correlation",
+              "containerd.container_id":"raw-containerd-id",
+              "cri.runtime_handler":"kata"
+            }
+          }]
+        }"#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert_eq!(
+            output.metadata.sandboxes[0]["id"],
+            json!("sandbox-from-correlation")
+        );
+        assert_eq!(output.metadata.sandboxes[0]["runtimeType"], json!("kata"));
+        assert_eq!(
+            output.metadata.sandboxes[0]["runtimeVersion"],
+            json!("kata")
+        );
+        assert_eq!(
+            output.events[0].attributes["cri.sandbox_id"],
+            json!("sandbox-from-correlation")
+        );
+        assert_eq!(
+            output.events[0].attributes["containerd.id"],
+            json!("raw-containerd-id")
         );
     }
 
