@@ -105,7 +105,8 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 # the real sandbox id through CNI env identity.
 CAPTURE=true VALIDATE_INGEST=true CONCURRENT_RUNPODS=2 \
 EXPECT_PROCESS_BINARY_METRICS=true EXPECT_CNI_CONTAINER_ID=true \
-EXPECT_RUNPOD_REQUEST_IDENTITY=true EXPECT_CNISETUP_DEBUG_PENDING=true EXPECT_ROLES=cni,kata \
+EXPECT_RUNPOD_REQUEST_IDENTITY=true EXPECT_TOP_LEVEL_IDENTITY=true \
+EXPECT_CNISETUP_DEBUG_PENDING=true EXPECT_RUNTIME_BOUNDARY_CORRELATION=true EXPECT_ROLES=cni,kata \
 RUNTIME_TYPE=kata CRI_RUNTIME_HANDLER=kata \
 ENABLE_GO_UPROBES=true ENABLE_CNI_GO_UPROBES=true ENABLE_RUNTIME_GO_UPROBES=true \
 CONTAINERD_BINARY=/usr/bin/containerd \
@@ -159,6 +160,8 @@ sandbox id through CNI identity. Decoded RunPod and CNI_ARGS identity is emitted
 as both attributes and top-level `namespace`/`podName`/`podUid`/`runtimeHandler`
 fields so downstream normalizers can derive stable `k8s-{namespace}-{pod}-pod`
 ids even when a report is consumed outside the bundled Rust collector. Use
+`EXPECT_TOP_LEVEL_IDENTITY=true` to assert that those top-level identity fields
+are present in real captures. Use
 `EXPECT_CNISETUP_DEBUG_PENDING=true` in concurrent CNI uprobe captures to assert
 CNISetup remains a pending debug boundary instead of being used for core CNI
 cost attribution. Use
