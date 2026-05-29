@@ -613,6 +613,9 @@ def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type
         "uprobe.binary": obs.binary,
         "process.thread_id": obs.tid,
     }
+    if role == "cni" and obs.function.startswith("CNISetup"):
+        attributes["startup.probe.debug_boundary"] = True
+        attributes["startup.probe.identity_source"] = "cni-exec-env-required"
     request_metadata = obs.metadata if obs.function == "RunPodSandbox" else {}
     for key, value in request_metadata.items():
         if value:
@@ -2030,11 +2033,13 @@ def report_from_events(
 
 def pending_go_uprobe_summary(pending_events: list[dict[str, object]], assigned_count: int) -> dict[str, object]:
     functions = sorted({str(event.get("function") or "unknown") for event in pending_events})
+    debug_events = [event for event in pending_events if str((event.get("attributes") or {}).get("startup.probe.debug_boundary") or "").lower() == "true"]
     return {
         "pendingGoUprobeEventCount": float(len(pending_events)),
         "assignedPendingGoUprobeEventCount": float(assigned_count),
         "unassignedPendingGoUprobeEventCount": float(max(0, len(pending_events) - assigned_count)),
         "pendingGoUprobeFunctions": functions[:16],
+        "pendingDebugGoUprobeEventCount": float(len(debug_events)),
     }
 
 

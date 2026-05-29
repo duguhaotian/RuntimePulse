@@ -131,10 +131,12 @@ sudo runtimepulse-startup-probe export \
 
 The default uprobe profile attaches to the first matching containerd
 `RunPodSandbox` Go symbol and emits a `cri.run_pod_sandbox` span after Rust
-normalization. With `--enable-cni-go-uprobes`, it also attaches to
-`setupPodNetwork`/`go-cni` setup symbols and emits `cni.setup` spans, so the
-RunPodSandbox envelope can be separated from the containerd CNI setup boundary
-and individual CNI plugin binary exec spans. With `--enable-runtime-go-uprobes`,
+normalization. The authoritative CNI plugin timing comes from `execve` events
+for the real CNI plugin binaries and their `CNI_CONTAINERID`/`CNI_ARGS` env.
+`--enable-cni-go-uprobes` is a debug-only containerd internal boundary for
+`setupPodNetwork`/`go-cni`; it is not used as the primary CNI cost source and
+remains pending when it cannot be attributed exactly. With
+`--enable-runtime-go-uprobes`,
 it also emits `oci.shim.*`, `oci.runc.*`, `kata.shim.*`, and
 `kata.sandbox.*` boundary spans from runtime shim binaries. Runtime-shim uprobe
 events are attributed by exact shim PID first to avoid pulling unrelated host
@@ -161,11 +163,12 @@ standalone CRI+containerd test deployments whose task root is not `/run`.
 
 Limitations:
 
-- The bundled uprobe mode captures RunPodSandbox/CNI setup/runtime-shim entries
-  by default and synthesizes minimal exits so missing return data is visible
-  instead of dropping spans. Go uretprobes can capture real returns, but remain
-  an opt-in experimental mode until request decoding provides exact end
-  attribution without perturbing Go stacks.
+- The bundled uprobe mode captures RunPodSandbox/runtime-shim entries and can
+  optionally capture containerd CNI setup debug boundaries. CNI plugin cost is
+  measured from real plugin `execve` events, not from CNISetup uprobes. Go
+  uretprobes can capture real returns, but remain an opt-in experimental mode
+  until request decoding provides exact end attribution without perturbing Go
+  stacks.
 - Concurrent sandbox starts are correlated by stable sandbox ids when those ids
   are available in CNI env, CNI netns inode id, shim args, or bundle paths. The
   CNI path uses the standard `CNI_CONTAINERID` and `CNI_ARGS`
@@ -174,6 +177,5 @@ Limitations:
   the same sandbox id. RunPodSandbox uprobes on amd64 try to decode the CRI
   request pointer and attach `k8s.namespace`, `k8s.pod`, `k8s.pod_uid`, and
   `cri.runtime_handler` directly to the CRI span. Containerd CNI setup uprobes
-  that do not expose request identity are backfilled from the CNI env identity
-  only when there is a single plausible CNI candidate; otherwise they remain
-  pending and are reported through the pending-go-uprobe quality counters.
+  that do not expose request identity stay pending in concurrent captures and
+  are reported through the pending-go-uprobe quality counters.
