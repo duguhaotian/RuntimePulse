@@ -4,8 +4,10 @@
 #
 # Existing report mode validates a probe JSON report. Capture mode starts the
 # probe and can optionally run `crictl runp` automatically when POD_CONFIG is
-# provided. With VALIDATE_INGEST=true it normalizes the report through the Rust
-# startup-callchain path and verifies traces/metrics/events.
+# provided. When CONTAINER_CONFIG is provided it also creates/starts a real
+# workload container in the sandbox, so OCI/Kata container startup events can be
+# validated end-to-end. With VALIDATE_INGEST=true it normalizes the report
+# through the Rust startup-callchain path and verifies traces/metrics/events.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -24,6 +26,8 @@ VALIDATE_QUERY_API="${VALIDATE_QUERY_API:-false}"
 CRI_ENDPOINT="${CRI_ENDPOINT:-}"
 IMAGE_ENDPOINT="${IMAGE_ENDPOINT:-$CRI_ENDPOINT}"
 POD_CONFIG="${POD_CONFIG:-}"
+CONTAINER_CONFIG="${CONTAINER_CONFIG:-}"
+RUN_CONTAINER="${RUN_CONTAINER:-}"
 CONCURRENT_RUNPODS="${CONCURRENT_RUNPODS:-1}"
 CRI_RUNTIME_HANDLER="${CRI_RUNTIME_HANDLER:-$RUNTIME_TYPE}"
 CLEANUP_POD="${CLEANUP_POD:-true}"
@@ -39,6 +43,7 @@ EXPECT_RUNPOD_REQUEST_IDENTITY="${EXPECT_RUNPOD_REQUEST_IDENTITY:-false}"
 EXPECT_CNISETUP_DEBUG_PENDING="${EXPECT_CNISETUP_DEBUG_PENDING:-false}"
 EXPECT_RUNTIME_BOUNDARY_CORRELATION="${EXPECT_RUNTIME_BOUNDARY_CORRELATION:-false}"
 EXPECT_TOP_LEVEL_IDENTITY="${EXPECT_TOP_LEVEL_IDENTITY:-false}"
+EXPECT_WORKLOAD_CONTAINER_RUNTIME="${EXPECT_WORKLOAD_CONTAINER_RUNTIME:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
@@ -55,7 +60,10 @@ REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
 COLLECTOR_LOG="$OUT_DIR/startup-callchain-collector.log"
 READY_FILE="$OUT_DIR/startup-probe.ready"
 RUNP_LOG="$OUT_DIR/crictl-runp.log"
+CREATE_LOG="$OUT_DIR/crictl-create.log"
+START_LOG="$OUT_DIR/crictl-start.log"
 SANDBOX_ID_FILE="$OUT_DIR/crictl-sandbox-id"
+CONTAINER_ID_FILE="$OUT_DIR/crictl-container-id"
 
 usage() {
   cat <<USAGE
@@ -69,6 +77,7 @@ Modes:
   Existing report (default): validate REPORT_PATH shape.
   Capture mode: CAPTURE=true runs runtimepulse-startup-probe and writes REPORT_PATH.
   Automatic RunPod: set POD_CONFIG and CRI_ENDPOINT to run crictl runp during capture.
+  Workload container: set CONTAINER_CONFIG with POD_CONFIG to run crictl create/start.
   Ingest validation: VALIDATE_INGEST=true also normalizes through host-startup-callchain.
 
 Common env:
@@ -76,6 +85,8 @@ Common env:
   CONTAINERD_NAMESPACE=k8s.io  Namespace filter for runtime/shim events.
   INCLUDE_HELPERS=true|false   Include helper binaries such as iptables/nft/ip/tc.
   POD_CONFIG=/path/pod.json    Optional crictl runp pod config for automatic E2E.
+  CONTAINER_CONFIG=/path/container.json Optional crictl create config for workload startup E2E.
+  RUN_CONTAINER=true|false     Force workload startup when CONTAINER_CONFIG is set; defaults to true when set.
   CONCURRENT_RUNPODS=3         Run this many POD_CONFIG variants during one capture.
   CRI_ENDPOINT=unix://...      Runtime endpoint used by crictl.
   CRI_RUNTIME_HANDLER=kata     Optional --runtime passed to crictl runp.
@@ -91,6 +102,7 @@ Common env:
   EXPECT_CNISETUP_DEBUG_PENDING=true Require CNISetup uprobes remain pending debug boundaries in concurrent reports.
   EXPECT_RUNTIME_BOUNDARY_CORRELATION=true Require OCI/Kata exec/uprobe boundaries to carry exact correlation markers.
   EXPECT_TOP_LEVEL_IDENTITY=true Require decoded pod/runtime identity on top-level event fields.
+  EXPECT_WORKLOAD_CONTAINER_RUNTIME=true Require workload container runtime events linked to the pod sandbox.
   EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
@@ -141,8 +153,28 @@ run_crictl() {
   crictl "${args[@]}" "$@"
 }
 
+should_run_container() {
+  if [[ -n "$RUN_CONTAINER" ]]; then
+    [[ "$RUN_CONTAINER" == "true" ]]
+    return $?
+  fi
+  [[ -n "$CONTAINER_CONFIG" ]]
+}
+
+cleanup_container() {
+  [[ "$CLEANUP_POD" == "true" ]] || return 0
+  [[ -s "$CONTAINER_ID_FILE" ]] || return 0
+  local container_id
+  while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] || continue
+    run_crictl stop "$container_id" >/dev/null 2>&1 || true
+    run_crictl rm "$container_id" >/dev/null 2>&1 || true
+  done < "$CONTAINER_ID_FILE"
+}
+
 cleanup_sandbox() {
   [[ "$CLEANUP_POD" == "true" ]] || return 0
+  cleanup_container
   [[ -s "$SANDBOX_ID_FILE" ]] || return 0
   local sandbox_id
   while IFS= read -r sandbox_id; do
@@ -181,6 +213,83 @@ PY
   printf '%s' "$target"
 }
 
+container_config_variant() {
+  local source="$1"
+  local index="$2"
+  if [[ "$index" -le 1 ]]; then
+    printf '%s' "$source"
+    return 0
+  fi
+  local target="$OUT_DIR/container-config-$index.json"
+  python3 - "$source" "$target" "$index" <<'PY'
+import json, sys
+source, target, index = sys.argv[1:4]
+with open(source, encoding='utf-8') as handle:
+    container = json.load(handle)
+suffix = f"concurrent-{index}"
+metadata = container.setdefault('metadata', {})
+base_name = metadata.get('name') or 'runtimepulse-workload'
+metadata['name'] = f"{base_name}-{suffix}"
+metadata['attempt'] = int(metadata.get('attempt') or 1)
+if container.get('log_path'):
+    stem = str(container['log_path'])
+    if '/' in stem:
+        head, tail = stem.rsplit('/', 1)
+        container['log_path'] = f"{head}/{suffix}-{tail}"
+    else:
+        container['log_path'] = f"{suffix}-{stem}"
+else:
+    container['log_path'] = f"runtimepulse-workload-{suffix}.log"
+labels = container.setdefault('labels', {})
+labels['io.kubernetes.container.name'] = metadata['name']
+with open(target, 'w', encoding='utf-8') as handle:
+    json.dump(container, handle)
+PY
+  printf '%s' "$target"
+}
+
+run_one_workload_container() {
+  local sandbox_id="$1"
+  local pod_config="$2"
+  local index="$3"
+  local container_config
+  local create_log_file="$OUT_DIR/crictl-create-$index.log"
+  local start_log_file="$OUT_DIR/crictl-start-$index.log"
+
+  require_file "$CONTAINER_CONFIG"
+  container_config="$(container_config_variant "$CONTAINER_CONFIG" "$index")"
+  echo "running crictl create/start[$index]: sandbox=$sandbox_id config=$container_config" >&2
+
+  set +e
+  run_crictl create "$sandbox_id" "$container_config" "$pod_config" > "$create_log_file" 2>&1
+  local create_rc=$?
+  set -e
+  if [[ $create_rc -ne 0 ]]; then
+    cat "$create_log_file" >&2 || true
+    return $create_rc
+  fi
+
+  local container_id
+  container_id="$(tail -n 1 "$create_log_file" | tr -d '[:space:]')"
+  if [[ -z "$container_id" ]]; then
+    echo "crictl create[$index] did not return a container id" >&2
+    cat "$create_log_file" >&2 || true
+    return 1
+  fi
+  echo "$container_id" >> "$CONTAINER_ID_FILE"
+  echo "created container[$index]: $container_id for sandbox $sandbox_id" >&2
+
+  set +e
+  run_crictl start "$container_id" > "$start_log_file" 2>&1
+  local start_rc=$?
+  set -e
+  if [[ $start_rc -ne 0 ]]; then
+    cat "$start_log_file" >&2 || true
+    return $start_rc
+  fi
+  echo "started container[$index]: $container_id" >&2
+}
+
 run_one_pod_sandbox() {
   local config="$1"
   local index="$2"
@@ -208,6 +317,9 @@ run_one_pod_sandbox() {
   fi
   echo "$sandbox_id" >> "$SANDBOX_ID_FILE"
   echo "created sandbox[$index]: $sandbox_id" >&2
+  if should_run_container; then
+    run_one_workload_container "$sandbox_id" "$config" "$index"
+  fi
 }
 
 run_pod_sandbox() {
@@ -217,6 +329,13 @@ run_pod_sandbox() {
     echo "crictl not found; install crictl or unset POD_CONFIG" >&2
     exit 1
   fi
+  if should_run_container; then
+    if [[ -z "$CONTAINER_CONFIG" ]]; then
+      echo "RUN_CONTAINER=true requires CONTAINER_CONFIG=/path/container.json" >&2
+      exit 1
+    fi
+    require_file "$CONTAINER_CONFIG"
+  fi
 
   local count="$CONCURRENT_RUNPODS"
   if ! [[ "$count" =~ ^[0-9]+$ ]] || [[ "$count" -lt 1 ]]; then
@@ -225,7 +344,10 @@ run_pod_sandbox() {
   fi
 
   : > "$SANDBOX_ID_FILE"
+  : > "$CONTAINER_ID_FILE"
   : > "$RUNP_LOG"
+  : > "$CREATE_LOG"
+  : > "$START_LOG"
   local pids=()
   local idx config
   for idx in $(seq 1 "$count"); do
@@ -241,6 +363,8 @@ run_pod_sandbox() {
     fi
   done
   cat "$OUT_DIR"/crictl-runp-*.log > "$RUNP_LOG" 2>/dev/null || true
+  cat "$OUT_DIR"/crictl-create-*.log > "$CREATE_LOG" 2>/dev/null || true
+  cat "$OUT_DIR"/crictl-start-*.log > "$START_LOG" 2>/dev/null || true
   if [[ $rc -ne 0 ]]; then
     exit $rc
   fi
@@ -307,7 +431,7 @@ capture_probe() {
     fi
   fi
 
-  rm -f "$READY_FILE" "$REPORT_PATH" "$RUNP_LOG" "$SANDBOX_ID_FILE"
+  rm -f "$READY_FILE" "$REPORT_PATH" "$RUNP_LOG" "$CREATE_LOG" "$START_LOG" "$SANDBOX_ID_FILE" "$CONTAINER_ID_FILE"
   trap cleanup_sandbox EXIT
   echo "starting startup probe capture: $REPORT_PATH" >&2
   sudo "$PROBE_BIN" export \
@@ -366,6 +490,7 @@ validate_report_shape() {
   EXPECT_CNISETUP_DEBUG_PENDING="$EXPECT_CNISETUP_DEBUG_PENDING" \
   EXPECT_RUNTIME_BOUNDARY_CORRELATION="$EXPECT_RUNTIME_BOUNDARY_CORRELATION" \
   EXPECT_TOP_LEVEL_IDENTITY="$EXPECT_TOP_LEVEL_IDENTITY" \
+  EXPECT_WORKLOAD_CONTAINER_RUNTIME="$EXPECT_WORKLOAD_CONTAINER_RUNTIME" \
   python3 - "$REPORT_PATH" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -378,6 +503,7 @@ expect_runpod_request_identity = os.environ.get('EXPECT_RUNPOD_REQUEST_IDENTITY'
 expect_cnisetup_debug_pending = os.environ.get('EXPECT_CNISETUP_DEBUG_PENDING', '').lower() == 'true'
 expect_runtime_boundary_correlation = os.environ.get('EXPECT_RUNTIME_BOUNDARY_CORRELATION', '').lower() == 'true'
 expect_top_level_identity = os.environ.get('EXPECT_TOP_LEVEL_IDENTITY', '').lower() == 'true'
+expect_workload_container_runtime = os.environ.get('EXPECT_WORKLOAD_CONTAINER_RUNTIME', '').lower() == 'true'
 
 def parse_cni_args(value):
     result = {}
@@ -411,6 +537,68 @@ def cni_identity_candidates(event):
         if infra:
             candidates.add(infra)
     return candidates
+
+def event_attrs(event):
+    attrs = event.get('attributes') or {}
+    return attrs if isinstance(attrs, dict) else {}
+
+def startup_phase(event):
+    return str(event_attrs(event).get('startup.phase') or '').strip().lower()
+
+def report_aliases(report, sandbox):
+    aliases = {sandbox}
+    for key in ('startup.stable_sandbox_id', 'criSandboxId', 'containerdId'):
+        value = str(report.get(key) or '').strip()
+        if value:
+            aliases.add(value)
+    for event in report.get('events') or []:
+        attrs = event_attrs(event)
+        direct = {
+            str(event.get('sandboxId') or '').strip(),
+            str(event.get('criSandboxId') or '').strip(),
+            str(attrs.get('startup.probe.correlation_sandbox_id') or '').strip(),
+            str(attrs.get('containerd.sandbox_container_id') or '').strip(),
+            str(attrs.get('cri.sandbox_container_id') or '').strip(),
+        }
+        if direct & aliases or cni_identity_candidates(event) & aliases:
+            for value in (
+                event.get('sandboxId'),
+                event.get('criSandboxId'),
+                attrs.get('startup.stable_sandbox_id'),
+                attrs.get('startup.probe.correlation_sandbox_id'),
+                attrs.get('containerd.sandbox_container_id'),
+                attrs.get('cri.sandbox_container_id'),
+            ):
+                value = str(value or '').strip()
+                if value:
+                    aliases.add(value)
+    return aliases
+
+def event_links_report_sandbox(event, aliases):
+    attrs = event_attrs(event)
+    candidates = {
+        str(event.get('sandboxId') or '').strip(),
+        str(event.get('criSandboxId') or '').strip(),
+        str(attrs.get('startup.stable_sandbox_id') or '').strip(),
+        str(attrs.get('startup.probe.correlation_sandbox_id') or '').strip(),
+        str(attrs.get('containerd.sandbox_container_id') or '').strip(),
+        str(attrs.get('cri.sandbox_container_id') or '').strip(),
+    }
+    candidates |= cni_identity_candidates(event)
+    candidates.discard('')
+    return bool(candidates & aliases)
+
+def is_workload_runtime_event(event):
+    if str(event.get('role') or '').lower() not in {'oci', 'kata'}:
+        return False
+    attrs = event_attrs(event)
+    container_name = str(event.get('containerName') or attrs.get('k8s.container') or '').strip().lower()
+    if startup_phase(event) == 'container':
+        return True
+    if attrs.get('startup.stable_container_id') and attrs.get('startup.stable_container_id') != attrs.get('startup.stable_sandbox_id'):
+        return True
+    return bool(container_name and container_name not in {'pod', 'sandbox'})
+
 with open(path, encoding='utf-8') as handle:
     payload = json.load(handle)
 reports = payload.get('reports') if isinstance(payload, dict) else None
@@ -432,6 +620,7 @@ for idx, report in enumerate(reports):
         raise SystemExit(f'report {idx} has no sandbox id')
     sandbox = str(sandbox)
     sandboxes.append(sandbox)
+    aliases = report_aliases(report, sandbox)
     event_ids = set()
     for event in events:
         for key in ('sandboxId', 'criSandboxId', 'containerdId'):
@@ -440,9 +629,17 @@ for idx, report in enumerate(reports):
                 event_ids.add(value)
     if sandbox not in event_ids:
         raise SystemExit(f'report {idx} sandbox id {sandbox} is not present in event identities {sorted(event_ids)}')
-    foreign_ids = sorted(event_ids - {sandbox})
+    foreign_ids = []
+    for event in events:
+        for key in ('sandboxId', 'criSandboxId', 'containerdId'):
+            value = str(event.get(key) or '').strip()
+            if not value or value in aliases:
+                continue
+            if key == 'containerdId' and is_workload_runtime_event(event) and event_links_report_sandbox(event, aliases):
+                continue
+            foreign_ids.append({'key': key, 'value': value, 'role': event.get('role'), 'function': event.get('function')})
     if foreign_ids:
-        raise SystemExit(f'report {idx} for sandbox {sandbox} contains foreign sandbox/container ids {foreign_ids}')
+        raise SystemExit(f'report {idx} for sandbox {sandbox} contains foreign sandbox/container ids {foreign_ids[:8]} aliases={sorted(aliases)}')
     report_runtime = str(report.get('runtimeType') or '').lower()
     if report_runtime:
         runtime_types.add(report_runtime)
@@ -459,7 +656,7 @@ for idx, report in enumerate(reports):
             if str(event.get('role') or '').lower() != 'cni':
                 continue
             candidates = cni_identity_candidates(event)
-            if sandbox in candidates:
+            if candidates & aliases:
                 matching_cni.append(event)
             elif candidates:
                 mismatched_cni.append(sorted(candidates))
@@ -480,7 +677,7 @@ for idx, report in enumerate(reports):
             if attrs.get('startup.probe.req_identity') != 'runpod-request':
                 continue
             pod_identity = (attrs.get('k8s.namespace'), attrs.get('k8s.pod'), attrs.get('k8s.pod_uid'))
-            if str(event.get('sandboxId') or '') == sandbox and all(pod_identity[:2]):
+            if str(event.get('sandboxId') or '') in aliases and all(pod_identity[:2]):
                 matching_runpod.append(event)
             else:
                 decoded_unmatched.append({
@@ -525,8 +722,8 @@ for idx, report in enumerate(reports):
                 attrs = {}
             corr = str(attrs.get('startup.probe.correlation') or '').strip()
             corr_id = str(attrs.get('startup.probe.correlation_sandbox_id') or '').strip()
-            legacy_exact = str(event.get('sandboxId') or '').strip() == sandbox and str(event.get('containerdId') or '').strip() == sandbox
-            if not corr or corr_id != sandbox:
+            legacy_exact = str(event.get('sandboxId') or '').strip() in aliases and str(event.get('containerdId') or '').strip() in aliases
+            if not corr or corr_id not in aliases:
                 if legacy_exact and str(event.get('function') or '') == 'execve':
                     attrs['startup.probe.correlation'] = 'legacy-containerd-task-id'
                     attrs['startup.probe.correlation_sandbox_id'] = sandbox
@@ -571,6 +768,39 @@ for idx, report in enumerate(reports):
             raise SystemExit(
                 f'report {idx} sandbox {sandbox} has events missing top-level identity fields: {missing[:8]}'
             )
+    if expect_workload_container_runtime:
+        workload_events = [event for event in events if event.get('eventType') == 'enter' and is_workload_runtime_event(event)]
+        matching_workload = []
+        unmatched_workload = []
+        for event in workload_events:
+            attrs = event_attrs(event)
+            container_name = str(event.get('containerName') or attrs.get('k8s.container') or '').strip()
+            stable_container = str(attrs.get('startup.stable_container_id') or '').strip()
+            raw_container = str(event.get('containerdId') or attrs.get('containerd.container_id') or attrs.get('containerd.raw_id') or '').strip()
+            linked = event_links_report_sandbox(event, aliases)
+            has_workload_identity = (
+                (container_name and container_name.lower() not in {'pod', 'sandbox'})
+                or stable_container
+                or startup_phase(event) == 'container'
+            )
+            if linked and has_workload_identity and raw_container and raw_container not in aliases:
+                matching_workload.append(event)
+            else:
+                unmatched_workload.append({
+                    'function': event.get('function'),
+                    'role': event.get('role'),
+                    'binary': event.get('binary'),
+                    'containerName': container_name,
+                    'stableContainerId': stable_container,
+                    'containerdId': raw_container,
+                    'linkedToSandbox': linked,
+                    'phase': startup_phase(event),
+                })
+        if not matching_workload:
+            raise SystemExit(
+                f'report {idx} sandbox {sandbox} has no workload container runtime event linked to pod sandbox; '
+                f'observed workload candidates {unmatched_workload[:8]} aliases={sorted(aliases)}'
+            )
 if expected_report_count > 1 and len(set(sandboxes)) != len(sandboxes):
     raise SystemExit(f'concurrent reports contain duplicate sandbox ids: {sandboxes}')
 if expect_runtime and expect_runtime not in runtime_types:
@@ -591,6 +821,7 @@ print(json.dumps({
     'validatedCniSetupDebugPending': expect_cnisetup_debug_pending,
     'validatedRuntimeBoundaryCorrelation': expect_runtime_boundary_correlation,
     'validatedTopLevelIdentity': expect_top_level_identity,
+    'validatedWorkloadContainerRuntime': expect_workload_container_runtime,
 }, separators=(',', ':')))
 PY
 }
@@ -750,6 +981,7 @@ validate_query_api_output() {
     EXPECT_PROCESS_BINARY_METRICS="$EXPECT_PROCESS_BINARY_METRICS" \
     EXPECT_HELPER_BINARY_METRICS="$EXPECT_HELPER_BINARY_METRICS" \
     EXPECT_ANALYSIS="$EXPECT_ANALYSIS" \
+    EXPECT_WORKLOAD_CONTAINER_RUNTIME="$EXPECT_WORKLOAD_CONTAINER_RUNTIME" \
     python3 - "$trace_file" "$metrics_file" "$analysis_file" "$sandbox_id" <<'PY'
 import json, os, sys
 trace_path, metrics_path, analysis_path, sandbox_id = sys.argv[1:5]
@@ -759,6 +991,7 @@ expect_parent_links = os.environ.get('EXPECT_PARENT_LINKS', '').lower() == 'true
 expect_analysis = os.environ.get('EXPECT_ANALYSIS', '').lower() == 'true'
 expect_process_binary_metrics = os.environ.get('EXPECT_PROCESS_BINARY_METRICS', '').lower() == 'true'
 expect_helper_binary_metrics = os.environ.get('EXPECT_HELPER_BINARY_METRICS', '').lower() == 'true'
+expect_workload_container_runtime = os.environ.get('EXPECT_WORKLOAD_CONTAINER_RUNTIME', '').lower() == 'true'
 with open(trace_path, encoding='utf-8') as handle:
     traces = json.load(handle).get('data') or []
 with open(metrics_path, encoding='utf-8') as handle:
@@ -795,6 +1028,32 @@ if expect_helper_binary_metrics:
     ]
     if not helper_metrics:
         raise SystemExit(f'missing helper process binary metrics for {sandbox_id}')
+workload_spans = [
+    span for span in traces
+    if ((span.get('attributes') or {}).get('startup.phase') == 'container')
+    and str((span.get('attributes') or {}).get('process.role') or '').lower() in {'oci', 'kata'}
+]
+if expect_workload_container_runtime:
+    linked_workload_spans = []
+    for span in workload_spans:
+        attrs = span.get('attributes') or {}
+        raw_container = str(
+            attrs.get('startup.workload_container_id')
+            or attrs.get('containerd.raw_id')
+            or attrs.get('containerd.container_id')
+            or attrs.get('containerd.id')
+            or ''
+        ).strip()
+        sandbox_link = str(
+            attrs.get('containerd.sandbox_container_id')
+            or attrs.get('cri.sandbox_container_id')
+            or attrs.get('startup.stable_sandbox_id')
+            or ''
+        ).strip()
+        if raw_container and sandbox_link and raw_container != sandbox_link:
+            linked_workload_spans.append(span)
+    if not linked_workload_spans:
+        raise SystemExit(f'Query API missing workload container runtime spans for {sandbox_id}')
 finding_count = 0
 if expect_analysis:
     findings = (analysis or {}).get('findings') or []
@@ -810,6 +1069,7 @@ print(json.dumps({
     'parentLinks': sum(1 for span in traces if span.get('parentSpanId')),
     'analysisFindings': finding_count,
     'processBinaryMetrics': sum(1 for name in metric_names if str(name or '').startswith('sandbox.startup.process.binary.')),
+    'workloadRuntimeSpans': len(workload_spans),
 }, separators=(',', ':')))
 PY
   done < <(query_api_sandboxes)

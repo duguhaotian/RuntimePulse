@@ -114,6 +114,23 @@ CONTAINERD_CONFIG=/tmp/runtimepulse-containerd-cri-test/config.toml \
 CRI_ENDPOINT=unix:///tmp/runtimepulse-containerd-cri-test/containerd.sock \
 POD_CONFIG=/tmp/runtimepulse-containerd-cri-test/pod-config-kata.json \
 tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
+
+# Workload-container startup capture: after RunPodSandbox, also run
+# crictl create/start inside the sandbox and assert that later OCI/Kata runtime
+# events remain linked to the pod sandbox while preserving the raw workload task
+# id. Use a unique pod name when validating Query API readback repeatedly.
+CAPTURE=true VALIDATE_INGEST=true VALIDATE_QUERY_API=true \
+EXPECT_WORKLOAD_CONTAINER_RUNTIME=true EXPECT_RUNTIME_BOUNDARY_CORRELATION=true \
+EXPECT_TOP_LEVEL_IDENTITY=true EXPECT_CNI_CONTAINER_ID=true \
+RUNTIME_TYPE=runc CRI_RUNTIME_HANDLER= \
+ENABLE_GO_UPROBES=true ENABLE_CNI_GO_UPROBES=true ENABLE_RUNTIME_GO_UPROBES=true \
+CONTAINERD_BINARY=/usr/bin/containerd \
+CONTAINERD_CONFIG=/tmp/runtimepulse-containerd-cri-test/config.toml \
+RUNTIME_UPROBE_BINARIES=/usr/bin/containerd-shim-runc-v2 \
+CRI_ENDPOINT=unix:///tmp/runtimepulse-containerd-cri-test/containerd.sock \
+POD_CONFIG=/tmp/runtimepulse-containerd-cri-test/pod-config-runc-workload.json \
+CONTAINER_CONFIG=/tmp/runtimepulse-containerd-cri-test/container-config-pause.json \
+tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 ```
 
 High-precision RunPodSandbox uprobe mode:
@@ -167,15 +184,21 @@ CNISetup remains a pending debug boundary instead of being used for core CNI
 cost attribution. Use
 `EXPECT_RUNTIME_BOUNDARY_CORRELATION=true` to assert OCI/Kata exec/uprobe
 runtime boundaries carry an exact sandbox correlation marker instead of relying
-on broad time-window attribution. For workload-container runtime events, OCI
-bundle metadata keeps `startup.stable_sandbox_id` at the pod sandbox level and
-adds `startup.stable_container_id` for the workload container, while preserving
-`containerd.sandbox_container_id` and the raw workload `containerdId`. This lets
-later container events remain linked to their pod sandbox without losing the
-workload task id. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
-points the probe at the same `config.toml` used by the target containerd so it
-can infer `state`/`root` task bundle directories even when the shim argv only
-contains `-namespace`/`-id` plus the runtime root. This is especially useful for
+on broad time-window attribution. Use `CONTAINER_CONFIG=...` plus
+`EXPECT_WORKLOAD_CONTAINER_RUNTIME=true` to assert a real workload
+`crictl create/start` path after RunPodSandbox. For workload-container runtime
+events, OCI bundle metadata keeps `startup.stable_sandbox_id` at the pod
+sandbox level and adds `startup.stable_container_id` for the workload container
+when Kubernetes labels are present, while preserving
+`containerd.sandbox_container_id` and the raw workload `containerdId`. If a CRI
+bundle only contains the raw pod sandbox id, the probe still marks
+`startup.phase=container`, sets `startup.workload_container_id`, and groups the
+runtime event under the raw pod sandbox id. This lets later container events
+remain linked to their pod sandbox without losing the workload task id.
+`--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`) points the probe at
+the same `config.toml` used by the target containerd so it can infer
+`state`/`root` task bundle directories even when the shim argv only contains
+`-namespace`/`-id` plus the runtime root. This is especially useful for
 standalone CRI+containerd test deployments whose task root is not `/run`.
 
 Limitations:

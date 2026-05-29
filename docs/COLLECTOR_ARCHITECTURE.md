@@ -138,7 +138,13 @@ same `k8s-{namespace}-{pod}-pod` sandbox id as CRI/containerd events. OCI bundle
 metadata also distinguishes pod-sandbox identity from workload-container
 identity with `startup.stable_sandbox_id` and `startup.stable_container_id`, so
 later container runtime events can stay attached to the pod sandbox while still
-preserving the raw workload task id. Future native depth should broaden
+preserving the raw workload task id. When CRI/containerd workload specs omit
+Kubernetes labels but include `io.kubernetes.cri.sandbox-id`, the probe falls
+back to the raw pod sandbox id, sets `startup.phase=container`, and records the
+raw workload id as `startup.workload_container_id`/`containerd.raw_id`.
+Automated runc/Kata validation now covers real `crictl runp` plus workload
+`crictl create/start` and verifies Query API readback contains workload runtime
+spans linked to the pod sandbox. Future native depth should broaden
 runtime-boundary profiles and repeated validation while preserving the same
 startup-callchain JSON contract.
 
@@ -428,7 +434,7 @@ starting each source manually.
 1. Keep the non-Kubernetes P1 path first. Kata, Firecracker, and gVisor now have baseline host-agent/outlet report sources, and `sandbox-reconcile` can remove stale live sandboxes for report-only runtimes via `snapshot.scope`/`snapshot.sandboxIds`.
 2. Deepen snapshotter/image-cache fidelity next. The generic `image-cache` report path accepts file reports, exporter commands, common snapshotter state/index JSON and JSONL, Prometheus text exposition, layer-level cache counters, prefetch records, and timeline spans; add native parsers for nydus, stargz, overlaybd, or other snapshotters once their real local formats are selected.
 3. Deepen runtime diagnostic and profile artifact workflows without moving eBPF-specific work forward yet. Generic diagnostic-report ingestion supports files, exporter commands, and artifact-index aliases, Docker diagnostics can be exported with `runtimepulse-collector docker-diagnostics`, and CRI/containerd diagnostics are available through `crictl-diagnostics` and `containerd-diagnostics`. Generic profile reports and artifact-index aliases plus native perf-script target/duration inference and perf folded-stack conversion with command input is available; eBPF backend deepening remains deferred.
-4. Complete the CRI+containerd runc/Kata path before broader Kubernetes integration: the current path decodes RunPodSandbox request identity, attributes CNI/helper-binary cost from real plugin/helper `execve` events, and treats containerd CNI setup uprobes as debug-only pending boundaries unless exact identity is available. Next depth is OCI/Kata runtime boundary fidelity and broader repeated validation, without introducing a CRI proxy.
+4. Keep CRI+containerd runc/Kata as the primary non-Kubernetes validation path before broader Kubernetes integration: the current path decodes RunPodSandbox request identity, attributes CNI/helper-binary cost from real plugin/helper `execve` events, links real workload-container OCI/Kata runtime events back to the pod sandbox, and treats containerd CNI setup uprobes as debug-only pending boundaries unless exact identity is available. Next depth is broader repeated validation and backend-specific runtime-boundary profiles, without introducing a CRI proxy.
 5. Complete the Kubernetes path on containerd after the CRI+containerd runtime path: treat `containerd-inventory` and `containerd-events` in the `k8s.io` namespace as the primary source, and use CRI/Kubelet JSONL events only as lifecycle enrichment until a native CRI client is needed.
 6. Expand the Kubernetes metrics adapter beyond the first Prometheus vector queries when real cluster label shapes are known; keep direct cgroup sampling as a fallback only.
 7. Split active sandbox sampling into separate processes only if the single host-agent process becomes too coarse.

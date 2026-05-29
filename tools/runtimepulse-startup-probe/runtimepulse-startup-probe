@@ -878,8 +878,25 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
     if not bundle:
         bundle = shim_info.get("bundle", "") or fallback_containerd_bundle(namespace, containerd_id, argv)
     bundle_meta = oci_bundle_metadata(bundle)
+    bundle_sandbox_container_id = str(bundle_meta.get("cri.sandbox_container_id", "") or "").strip()
+    is_workload_container_task = (
+        role in {"oci", "kata"}
+        and bool(bundle_sandbox_container_id)
+        and bool(containerd_id)
+        and bundle_sandbox_container_id != containerd_id
+    )
+    if is_workload_container_task:
+        # Some CRI/containerd workload OCI specs only expose the raw pod sandbox
+        # id (io.kubernetes.cri.sandbox-id) and omit pod/container labels.  The
+        # raw sandbox id is still enough to keep workload container runtime
+        # events in the RunPodSandbox report instead of creating a second report
+        # keyed by the workload container id.
+        bundle_meta["startup.phase"] = "container"
+        bundle_meta["startup.phase.source"] = "oci-bundle-config-sandbox-id"
+        bundle_meta["startup.workload_container_id"] = containerd_id
     stable_bundle_id = bundle_meta.get("startup.stable_sandbox_id", "")
-    sandbox_id = forced_sandbox_id or stable_bundle_id or containerd_id
+    bundle_report_sandbox_id = stable_bundle_id or (bundle_sandbox_container_id if is_workload_container_task else "")
+    sandbox_id = forced_sandbox_id or bundle_report_sandbox_id or containerd_id
     runtime_type = infer_runtime_type(binary, argv, default_runtime_type)
     oci_runtime = basename(binary) if role in {"oci", "kata"} and basename(binary).startswith("containerd-shim-") else (basename(binary) if role == "oci" else "")
     oci_operation = infer_oci_operation(argv) if role in {"oci", "kata"} else ""
@@ -898,10 +915,10 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
     if containerd_id:
         attributes["containerd.container_id"] = containerd_id
     attributes.update(bundle_meta)
-    if stable_bundle_id and containerd_id and stable_bundle_id != containerd_id:
+    if bundle_report_sandbox_id and containerd_id and bundle_report_sandbox_id != containerd_id:
         attributes["containerd.raw_id"] = containerd_id
         attributes["startup.probe.correlation"] = "oci-bundle-config"
-        attributes["startup.probe.correlation_sandbox_id"] = stable_bundle_id
+        attributes["startup.probe.correlation_sandbox_id"] = bundle_report_sandbox_id
     if role in {"oci", "kata"} and containerd_id:
         if "startup.probe.correlation" not in attributes:
             if bundle_meta:
@@ -945,7 +962,7 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
         observed_at=observed_at,
         role=role,
         sandbox_id=sandbox_id,
-        cri_sandbox_id=cni_container_id or stable_bundle_id or containerd_id,
+        cri_sandbox_id=cni_container_id or bundle_report_sandbox_id or containerd_id,
         containerd_id=containerd_id,
         runtime_type=runtime_type,
         cni_plugin=cni_plugin,
