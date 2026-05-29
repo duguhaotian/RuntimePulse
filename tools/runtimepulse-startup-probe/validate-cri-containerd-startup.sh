@@ -547,12 +547,15 @@ for idx, report in enumerate(reports):
         identity_events = [
             event for event in events
             if event.get('eventType') == 'enter'
-            and (str(event.get('function') or '') == 'RunPodSandbox' or str(event.get('role') or '').lower() == 'cni')
+            and (
+                str(event.get('function') or '') == 'RunPodSandbox'
+                or str(event.get('role') or '').lower() in {'cni', 'oci', 'kata'}
+            )
         ]
         missing = []
         for event in identity_events:
             required = ['namespace', 'podName']
-            if str(event.get('function') or '') == 'RunPodSandbox':
+            if str(event.get('function') or '') == 'RunPodSandbox' or str(event.get('role') or '').lower() in {'oci', 'kata'}:
                 required.append('runtimeHandler')
             missing_keys = [key for key in required if not str(event.get(key) or '').strip()]
             if missing_keys:

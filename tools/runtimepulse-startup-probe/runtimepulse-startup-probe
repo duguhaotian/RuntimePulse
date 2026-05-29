@@ -1201,6 +1201,7 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
     events = correlate_oci_bundle_metadata_events(events)
     events = correlate_containerd_go_uprobes_by_cni_identity(events)
     events = correlate_go_uprobe_events(events)
+    events = propagate_sandbox_identity_fields(events)
     sandbox_id = first_event_value(events, "sandboxId", "criSandboxId", "containerdId") or sandbox_id
     cri_sandbox_id = first_event_value(events, "criSandboxId", "sandboxId", "containerdId") or cri_sandbox_id
     summary = summarize_events(events)
@@ -1993,6 +1994,66 @@ def event_sandbox_key(event: dict[str, object]) -> str:
             return value
     return "unknown"
 
+
+def event_identity_fields(event: dict[str, object]) -> dict[str, str]:
+    attrs = event.get("attributes") or {}
+    attrs = attrs if isinstance(attrs, dict) else {}
+    fields = {
+        "namespace": str(event.get("namespace") or attrs.get("k8s.namespace") or attrs.get("cni.args.K8S_POD_NAMESPACE") or "").strip(),
+        "podName": str(event.get("podName") or attrs.get("k8s.pod") or attrs.get("cni.args.K8S_POD_NAME") or "").strip(),
+        "podUid": str(event.get("podUid") or attrs.get("k8s.pod_uid") or attrs.get("cni.args.K8S_POD_UID") or "").strip(),
+        "containerName": str(event.get("containerName") or attrs.get("k8s.container") or "").strip(),
+        "runtimeHandler": str(event.get("runtimeHandler") or attrs.get("cri.runtime_handler") or attrs.get("runtime.handler") or "").strip(),
+    }
+    return {key: value for key, value in fields.items() if value}
+
+
+def propagate_sandbox_identity_fields(events: list[dict[str, object]]) -> list[dict[str, object]]:
+    identity_by_sandbox: dict[str, dict[str, str]] = {}
+    for event in events:
+        key = event_sandbox_key(event)
+        if key == "unknown":
+            continue
+        identity = event_identity_fields(event)
+        if not identity:
+            continue
+        merged = identity_by_sandbox.setdefault(key, {})
+        for field, value in identity.items():
+            merged.setdefault(field, value)
+    if not identity_by_sandbox:
+        return events
+
+    attr_for_top_level = {
+        "namespace": "k8s.namespace",
+        "podName": "k8s.pod",
+        "podUid": "k8s.pod_uid",
+        "containerName": "k8s.container",
+        "runtimeHandler": "cri.runtime_handler",
+    }
+    result: list[dict[str, object]] = []
+    for event in events:
+        key = event_sandbox_key(event)
+        identity = identity_by_sandbox.get(key)
+        if not identity:
+            result.append(event)
+            continue
+        updated = dict(event)
+        attrs = dict(updated.get("attributes") or {})
+        changed = False
+        for field, value in identity.items():
+            if value and not str(updated.get(field) or "").strip():
+                updated[field] = value
+                changed = True
+            attr_key = attr_for_top_level.get(field)
+            if attr_key and value and not str(attrs.get(attr_key) or "").strip():
+                attrs[attr_key] = value
+                changed = True
+        if changed:
+            updated["attributes"] = attrs
+        result.append(updated)
+    return result
+
+
 def runtime_type_from_events(events: list[dict[str, object]], default: str) -> str:
     runtime_type = default or "unknown"
     for event in events:
@@ -2303,6 +2364,7 @@ def self_test() -> None:
         "RP_GO_UPROBE_META\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\tcri.runtime_handler\trunc\n",
         "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
         "RP_EXEC_ENTER\t210\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=k8s-default-request-demo-pod\tCNI_ARGS=K8S_POD_INFRA_CONTAINER_ID=k8s-default-request-demo-pod;K8S_POD_UID=request-demo-uid;K8S_POD_NAMESPACE=default;K8S_POD_NAME=request-demo\t\n",
+        "RP_EXEC_ENTER\t211\t1\t0\t0\tcontainerd\t/usr/bin/containerd-shim-runc-v2\t/usr/bin/containerd-shim-runc-v2\t-namespace\tk8s.io\t-id\tk8s-default-request-demo-pod\tstart\t/run/containerd/io.containerd.runtime.v2.task/k8s.io\t\t\t\t\n",
     ]
     request_meta_events, _request_meta_summary, request_meta_runtime, _request_meta_sandbox, _request_meta_cri = collect_from_stream(request_meta_lines, 6, 4, "runc", "", None)
     request_meta_reports = grouped_reports(request_meta_events, request_meta_runtime, "", "", "self-test")
@@ -2319,6 +2381,11 @@ def self_test() -> None:
     assert request_cni_event["namespace"] == "default"
     assert request_cni_event["podName"] == "request-demo"
     assert request_cni_event["podUid"] == "request-demo-uid"
+    request_runtime_event = next(event for event in request_meta_reports[0]["events"] if event.get("role") == "oci")
+    assert request_runtime_event["namespace"] == "default"
+    assert request_runtime_event["podName"] == "request-demo"
+    assert request_runtime_event["podUid"] == "request-demo-uid"
+    assert request_runtime_event["runtimeHandler"] == "runc"
 
     ambiguous_go_lines = [
         "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
