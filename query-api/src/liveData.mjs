@@ -414,6 +414,8 @@ function pseudoImageRef(value) {
   return text === 'collector/unknown:latest'
     || text === 'containerd/unknown:latest'
     || text === 'docker/unknown:latest'
+    || text === 'collector/startup-callchain:unknown'
+    || text.includes('collector-startup-callchain-unknown')
     || text.includes('containerd-unknown-latest')
     || text.startsWith('containerd-snapshot:')
     || text.includes('containerd-snapshot-');

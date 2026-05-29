@@ -702,6 +702,11 @@ test('filters pseudo containerd image rows from live image list', async () => {
           ref: 'containerd-snapshot:k8s.io:sandboxabcdef',
           digest: 'snapshot:sandboxabcdef',
         },
+        {
+          id: 'collector-collector-startup-callchain-unknown',
+          ref: 'collector/startup-callchain:unknown',
+          digest: 'collector:collector-collector-startup-callchain-unknown',
+        },
       ],
       sandboxes: [],
     },
