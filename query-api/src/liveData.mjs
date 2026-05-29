@@ -26,6 +26,7 @@ export function createLiveStore() {
     diagnosticArtifactsByScope: new Map(),
     sourceByDiagnosticArtifact: new Map(),
     snapshotScopeBySandbox: new Map(),
+    derivedEventState: new Map(),
     lastUpdatedAt: undefined,
   };
 }
@@ -101,7 +102,25 @@ export function liveEventsForSandbox(store, sandboxId) {
 }
 
 export function liveEventsForNode(store, nodeId) {
-  return store.eventsByNode.get(nodeId) ?? [];
+  const byId = new Map();
+  for (const event of store.eventsByNode.get(nodeId) ?? []) {
+    byId.set(rowKey(event), event);
+  }
+
+  for (const [sandboxId, events] of store.eventsBySandbox.entries()) {
+    const sandboxNodeId = nodeIdForSandbox(store, sandboxId);
+    if (sandboxNodeId !== nodeId) continue;
+    for (const event of events) {
+      byId.set(rowKey(event), {
+        ...event,
+        nodeId: stringValue(event.nodeId) ?? sandboxNodeId,
+      });
+    }
+  }
+
+  return Array.from(byId.values())
+    .sort((left, right) => Date.parse(rowTime(left)) - Date.parse(rowTime(right)))
+    .slice(-rowLimit('events'));
 }
 
 export function liveEventsForImage(store, imageId) {
@@ -455,6 +474,12 @@ function mergeSandbox(existing, incoming) {
   const incomingCpu = numberOr(incoming.cpuAvg, 0);
   const existingCpu = numberOr(existing.cpuAvg, 0);
   const metadataCpu = incomingCpu > 0 ? incomingCpu : existingCpu;
+  const attributes = { ...existing.attributes, ...incoming.attributes };
+
+  if (keepTraceStartup) {
+    preserveAttribute(attributes, existing.attributes, 'startup.duration.source');
+    preserveAttribute(attributes, existing.attributes, 'startup.duration.plugin');
+  }
 
   return {
     ...existing,
@@ -469,8 +494,12 @@ function mergeSandbox(existing, incoming) {
     memoryPeakBytes: Math.max(incoming.memoryPeakBytes, existing.memoryPeakBytes),
     eventCount: Math.max(incoming.eventCount, existing.eventCount),
     labels: { ...existing.labels, ...incoming.labels },
-    attributes: { ...existing.attributes, ...incoming.attributes },
+    attributes,
   };
+}
+
+function preserveAttribute(target, source, key) {
+  if (source?.[key] !== undefined) target[key] = source[key];
 }
 
 function startupDurationSource(sandbox) {
@@ -632,9 +661,7 @@ function rememberEvent(store, event, source) {
   if (source) store.sourceByEvent.set(rowKey(event), source);
   rememberRow(store.eventsBySandbox, event.sandboxId, event, rowLimit('events'));
 
-  const nodeId = stringValue(event.nodeId)
-    ?? stringValue(event.attributes?.['snapshot.nodeId'])
-    ?? stringValue(event.attributes?.nodeId);
+  const nodeId = nodeIdForEvent(store, event);
   rememberRow(store.eventsByNode, nodeId, { ...event, nodeId }, rowLimit('events'));
 
   const imageId = stringValue(event.imageId)
@@ -642,6 +669,19 @@ function rememberEvent(store, event, source) {
     ?? stringValue(event.attributes?.imageId);
   if (imageId && imageRemovalEvent(event)) removeLiveImage(store, imageId);
   rememberRow(store.eventsByImage, imageId, { ...event, imageId }, rowLimit('events'));
+}
+
+function nodeIdForEvent(store, event) {
+  return stringValue(event.nodeId)
+    ?? stringValue(event.attributes?.['snapshot.nodeId'])
+    ?? stringValue(event.attributes?.nodeId)
+    ?? nodeIdForSandbox(store, stringValue(event.sandboxId));
+}
+
+function nodeIdForSandbox(store, sandboxId) {
+  if (!sandboxId) return undefined;
+  return stringValue(store.sandboxes.get(sandboxId)?.nodeId)
+    ?? stringValue(store.sandboxHistory.get(sandboxId)?.nodeId);
 }
 
 
@@ -713,6 +753,7 @@ function rememberMetric(store, metric, source) {
       attributes: isObject(metric.attributes) ? metric.attributes : {},
       points: [point],
     });
+    rememberDerivedEventFromMetric(store, metric, source);
     refreshSandboxFromMetric(store, metric);
     return;
   }
@@ -731,7 +772,135 @@ function rememberMetric(store, metric, source) {
     attributes: isObject(metric.attributes) ? { ...(existing.attributes ?? {}), ...metric.attributes } : existing.attributes,
     points,
   });
+  rememberDerivedEventFromMetric(store, metric, source);
   refreshSandboxFromMetric(store, metric);
+}
+
+function rememberDerivedEventFromMetric(store, metric, source) {
+  const nodeId = stringValue(metric.nodeId);
+  const name = stringValue(metric.name);
+  if (!nodeId || !name?.startsWith('host_agent.')) return;
+
+  const attributes = isObject(metric.attributes) ? metric.attributes : {};
+
+  if (name === 'host_agent.up') {
+    if (numberOr(metric.value, 0) <= 0) return;
+    const key = `host-agent-up:${nodeId}`;
+    if (store.derivedEventState.has(key)) return;
+    store.derivedEventState.set(key, true);
+    rememberDerivedNodeEvent(store, nodeId, metric, source, {
+      eventName: 'host_agent.started',
+      severity: 'info',
+      message: `RuntimePulse host-agent reported up on ${nodeId}.`,
+      attributes: {
+        'collector.component': 'host-agent',
+      },
+    });
+    return;
+  }
+
+  if (name === 'host_agent.source.collect.success') {
+    const collectorSource = stringValue(attributes['collector.source']);
+    if (!collectorSource) return;
+    const stateKey = `source-success:${nodeId}:${collectorSource}`;
+    const previous = store.derivedEventState.get(stateKey);
+    const current = numberOr(metric.value, 0) > 0;
+    store.derivedEventState.set(stateKey, current);
+    if (previous === undefined || previous === current) return;
+    rememberDerivedNodeEvent(store, nodeId, metric, source, {
+      eventName: current ? 'host_agent.collector.recovered' : 'host_agent.collector.failed',
+      severity: current ? 'info' : 'error',
+      message: current
+        ? `Collector source ${collectorSource} recovered on ${nodeId}.`
+        : `Collector source ${collectorSource} failed on ${nodeId}.`,
+      attributes: {
+        'collector.component': 'host-agent',
+        'collector.source': collectorSource,
+      },
+    });
+    return;
+  }
+
+  const stream = stringValue(attributes['collector.event_stream']);
+  if (!stream) return;
+
+  if (name === 'host_agent.event_stream.enabled') {
+    store.derivedEventState.set(`event-stream-enabled:${nodeId}:${stream}`, numberOr(metric.value, 0) > 0);
+    return;
+  }
+
+  if (name === 'host_agent.event_stream.running') {
+    const enabled = store.derivedEventState.get(`event-stream-enabled:${nodeId}:${stream}`);
+    if (enabled === false) return;
+    const stateKey = `event-stream-running:${nodeId}:${stream}`;
+    const previous = store.derivedEventState.get(stateKey);
+    const current = numberOr(metric.value, 0) > 0;
+    store.derivedEventState.set(stateKey, current);
+    if (previous !== undefined && previous === current) return;
+    rememberDerivedNodeEvent(store, nodeId, metric, source, {
+      eventName: current ? 'host_agent.event_stream.connected' : 'host_agent.event_stream.disconnected',
+      severity: current ? 'info' : 'warning',
+      message: current
+        ? `${stream} event stream is running on ${nodeId}.`
+        : `${stream} event stream is not running on ${nodeId}.`,
+      attributes: {
+        'collector.component': 'host-agent',
+        'collector.event_stream': stream,
+      },
+    });
+    return;
+  }
+
+  if (name === 'host_agent.event_stream.restarts_total' || name === 'host_agent.event_stream.errors_total') {
+    const stateKey = `${name}:${nodeId}:${stream}`;
+    const previous = store.derivedEventState.get(stateKey);
+    const current = numberOr(metric.value, 0);
+    store.derivedEventState.set(stateKey, current);
+    if (previous === undefined || current <= previous) return;
+    const isError = name.endsWith('.errors_total');
+    rememberDerivedNodeEvent(store, nodeId, metric, source, {
+      eventName: isError ? 'host_agent.event_stream.error' : 'host_agent.event_stream.restarted',
+      severity: isError ? 'error' : 'warning',
+      message: isError
+        ? `${stream} event stream reported ${current - previous} new error(s) on ${nodeId}.`
+        : `${stream} event stream restarted on ${nodeId}.`,
+      attributes: {
+        'collector.component': 'host-agent',
+        'collector.event_stream': stream,
+        'collector.counter.previous': previous,
+        'collector.counter.current': current,
+      },
+    });
+  }
+}
+
+function rememberDerivedNodeEvent(store, nodeId, metric, source, event) {
+  const attributes = {
+    ...(isObject(metric.attributes) ? metric.attributes : {}),
+    ...(event.attributes ?? {}),
+    'derived.fromMetric': metric.name,
+    'derived.source': 'query-api',
+  };
+  const row = {
+    id: [
+      'node',
+      sanitizeMetricIdPart(nodeId),
+      sanitizeMetricIdPart(event.eventName),
+      sanitizeMetricIdPart(stringValue(attributes['collector.source']) ?? stringValue(attributes['collector.event_stream']) ?? 'host-agent'),
+      sanitizeMetricIdPart(metric.timestamp),
+    ].join('-'),
+    timestamp: metric.timestamp,
+    severity: event.severity,
+    eventType: 'node',
+    eventName: event.eventName,
+    nodeId,
+    message: event.message,
+    source: source ? `${source}/derived` : 'runtimepulse-query-api/derived',
+    attributes,
+  };
+
+  if (source) store.sourceByEvent.set(rowKey(row), source);
+  rememberRow(store.eventsByNode, nodeId, row, rowLimit('events'));
 }
 
 function metricSeriesSourceKey(scope, scopeId, seriesId) {
@@ -878,9 +1047,12 @@ function applySandboxStartupDuration(sandbox, durationMs, span, source = 'metric
 }
 
 function startupDurationPriority(source, plugin) {
+  if ((source === 'trace' || source === 'metric') && plugin === 'startup-callchain') return 5;
+  if (source === 'trace' && plugin === 'cri-startup-trace') return 4;
+  if (source === 'metric' && plugin === 'cri-startup-trace') return 3.9;
   if (source === 'trace' && runtimeStartupTracePlugin(plugin)) return 3;
   if (source === 'trace') return 2;
-  if (source === 'metric' && runtimeStartupTracePlugin(plugin)) return 3;
+  if (source === 'metric' && runtimeStartupTracePlugin(plugin)) return 2.9;
   if (source === 'metric') return 1;
   return 0;
 }
@@ -891,6 +1063,34 @@ function runtimeStartupTracePlugin(plugin) {
 
 function refreshSandboxDerivedFields(store, sandbox) {
   sandbox.eventCount = (store.eventsBySandbox.get(sandbox.id) ?? []).length;
+  refreshSandboxStartupFromStoredData(store, sandbox);
+}
+
+function refreshSandboxStartupFromStoredData(store, sandbox) {
+  for (const span of store.tracesBySandbox.get(sandbox.id) ?? []) {
+    if (!startupTraceSpan(span)) continue;
+    const durationMs = numberOr(span.durationMs, 0);
+    if (durationMs <= 0) continue;
+    applySandboxStartupDuration(sandbox, durationMs, span, 'trace');
+    applySandboxRuntimeTypeFromTrace(sandbox, span);
+  }
+
+  for (const series of store.metricsBySandbox.get(sandbox.id)?.values() ?? []) {
+    if (!startupDurationMetric(series)) continue;
+    const point = latestMetricPoint(series);
+    if (!point) continue;
+    applySandboxStartupDuration(sandbox, numberOr(point.value, 0), {
+      ...series,
+      timestamp: point.timestamp,
+    }, 'metric');
+  }
+}
+
+function latestMetricPoint(series) {
+  return array(series?.points)
+    .slice()
+    .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp))
+    .at(-1);
 }
 
 function rememberRow(collection, key, row, limit) {

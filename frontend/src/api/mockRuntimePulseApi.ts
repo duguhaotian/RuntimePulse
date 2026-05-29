@@ -50,8 +50,10 @@ export const mockRuntimePulseApi: RuntimePulseApi = {
   async getNodeMetrics() {
     return [];
   },
-  async getNodeEvents() {
-    return [];
+  async getNodeEvents(id) {
+    return sandboxes
+      .filter((sandbox) => sandbox.nodeId === id)
+      .flatMap((sandbox) => eventsForSandbox(sandbox.id).map((event) => ({ ...event, nodeId: event.nodeId ?? id })));
   },
   async getImageMetrics() {
     return [];

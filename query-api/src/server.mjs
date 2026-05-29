@@ -152,7 +152,7 @@ function sendNodeResource(response, id, child, range) {
 
   if (!child) return sendData(response, node);
   if (child === 'metrics') return sendData(response, filterMetricSeries(liveMetricsForNode(liveStore, id), range));
-  if (child === 'events') return sendData(response, filterTimestamped(liveEventsForNode(liveStore, id), range, 'timestamp'));
+  if (child === 'events') return sendData(response, filterTimestamped(eventsForNodeMerged(id), range, 'timestamp'));
 
   return sendJson(response, 404, { error: 'not_found' });
 }
@@ -231,6 +231,15 @@ function metricsForSandboxMerged(id) {
 function eventsForSandboxMerged(id) {
   const base = seedMockData && mockSandboxExists(id) ? eventsForSandbox(id) : [];
   return mergeById(base, liveEventsForSandbox(liveStore, id));
+}
+
+function eventsForNodeMerged(id) {
+  const base = seedMockData
+    ? sandboxes
+      .filter((sandbox) => sandbox.nodeId === id)
+      .flatMap((sandbox) => eventsForSandbox(sandbox.id).map((event) => ({ ...event, nodeId: event.nodeId ?? id })))
+    : [];
+  return mergeById(base, liveEventsForNode(liveStore, id));
 }
 
 function traceForSandboxMerged(id) {

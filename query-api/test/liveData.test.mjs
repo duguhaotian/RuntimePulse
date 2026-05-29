@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createLiveStore, liveMetricsForSandbox, liveSandboxes, liveStoreSnapshot, recordLiveBatch } from '../src/liveData.mjs';
+import { createLiveStore, liveEventsForNode, liveMetricsForSandbox, liveSandboxes, liveStoreSnapshot, recordLiveBatch } from '../src/liveData.mjs';
 
 test('attaches pod scoped network metrics to matching k8s container sandbox', () => {
   const store = createLiveStore();
@@ -416,6 +416,125 @@ test('keeps event source attribution when node metadata is refreshed by another 
   assert.equal(cgroupfs?.events ?? 0, 0);
 });
 
+test('projects sandbox events without explicit node id onto the sandbox node', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'containerd-events',
+    metadata: {
+      clusters: [],
+      nodes: [{ id: 'node-a' }],
+      images: [],
+      sandboxes: [{
+        id: 'k8s-default-demo-app',
+        nodeId: 'node-a',
+        imageRef: 'pause:latest',
+        runtimeType: 'runc',
+      }],
+    },
+    metrics: [],
+    events: [{
+      id: 'event-without-node',
+      timestamp: '2026-05-22T02:00:00.000Z',
+      eventType: 'container',
+      eventName: 'containerd.container.start',
+      severity: 'info',
+      source: 'runtimepulse-rust-collector/node-a/containerd-events',
+      message: 'containerd container demo emitted start.',
+      sandboxId: 'k8s-default-demo-app',
+      attributes: { 'containerd.action': 'start' },
+    }],
+    traces: [],
+    profiles: [],
+  });
+
+  const events = liveEventsForNode(store, 'node-a');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].id, 'event-without-node');
+  assert.equal(events[0].nodeId, 'node-a');
+});
+
+test('derives node events from host-agent status metrics', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'host-agent-self',
+    metadata: {
+      clusters: [],
+      nodes: [{ id: 'node-a' }],
+      images: [],
+      sandboxes: [],
+    },
+    metrics: [
+      {
+        timestamp: '2026-05-22T02:00:00.000Z',
+        name: 'host_agent.up',
+        value: 1,
+        unit: 'state',
+        group: 'collector',
+        nodeId: 'node-a',
+      },
+      {
+        timestamp: '2026-05-22T02:00:00.000Z',
+        name: 'host_agent.event_stream.enabled',
+        value: 1,
+        unit: 'state',
+        group: 'collector',
+        nodeId: 'node-a',
+        attributes: { 'collector.event_stream': 'containerd-events' },
+      },
+      {
+        timestamp: '2026-05-22T02:00:00.000Z',
+        name: 'host_agent.event_stream.running',
+        value: 1,
+        unit: 'state',
+        group: 'collector',
+        nodeId: 'node-a',
+        attributes: { 'collector.event_stream': 'containerd-events' },
+      },
+      {
+        timestamp: '2026-05-22T02:00:01.000Z',
+        name: 'host_agent.event_stream.errors_total',
+        value: 1,
+        unit: 'count',
+        group: 'collector',
+        nodeId: 'node-a',
+        attributes: { 'collector.event_stream': 'containerd-events' },
+      },
+    ],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'host-agent-self',
+    metadata: {
+      clusters: [],
+      nodes: [{ id: 'node-a' }],
+      images: [],
+      sandboxes: [],
+    },
+    metrics: [{
+      timestamp: '2026-05-22T02:00:02.000Z',
+      name: 'host_agent.event_stream.errors_total',
+      value: 3,
+      unit: 'count',
+      group: 'collector',
+      nodeId: 'node-a',
+      attributes: { 'collector.event_stream': 'containerd-events' },
+    }],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  const events = liveEventsForNode(store, 'node-a');
+  assert.deepEqual(events.map((event) => event.eventName), [
+    'host_agent.started',
+    'host_agent.event_stream.connected',
+    'host_agent.event_stream.error',
+  ]);
+});
+
 test('derives sandbox startup duration from cri startup trace spans and callchain metrics', () => {
   const store = createLiveStore();
   recordLiveBatch(store, {
@@ -468,6 +587,8 @@ test('derives sandbox startup duration from cri startup trace spans and callchai
     profiles: [],
   });
   assert.equal(liveSandboxes(store)[0].runtimeType, 'kata');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.source'], 'trace');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
 
   recordLiveBatch(store, {
     source: 'startup-callchain',
@@ -490,4 +611,67 @@ test('derives sandbox startup duration from cri startup trace spans and callchai
 
   assert.equal(liveSandboxes(store)[0].startupDurationMs, 1500);
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'startup-callchain');
+});
+
+test('applies stored cri startup trace when sandbox metadata arrives later', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'cri-startup-trace',
+    metadata: { clusters: [], nodes: [], images: [], sandboxes: [] },
+    metrics: [{
+      timestamp: '2026-05-22T02:00:01.500Z',
+      name: 'sandbox.startup.e2e_duration_ms',
+      value: 1500,
+      unit: 'ms',
+      group: 'startup',
+      sandboxId: 'k8s-default-late-pod',
+      nodeId: 'node-a',
+      runtimeType: 'runc',
+      attributes: { plugin: 'cri-startup-trace' },
+    }],
+    events: [],
+    traces: [{
+      traceId: 'cri-containerd-startup-k8s-default-late-pod',
+      spanId: 'cri-containerd-startup-k8s-default-late-pod-e2e',
+      spanName: 'sandbox.startup.e2e',
+      startTime: '2026-05-22T02:00:00.000Z',
+      endTime: '2026-05-22T02:00:01.500Z',
+      durationMs: 1500,
+      status: 'ok',
+      attributes: { plugin: 'cri-startup-trace', 'runtime.type': 'runc' },
+      sandboxId: 'k8s-default-late-pod',
+      runtimeType: 'runc',
+    }],
+    profiles: [],
+  });
+
+  assert.equal(liveSandboxes(store).length, 0);
+
+  recordLiveBatch(store, {
+    source: 'containerd-events',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{
+        id: 'k8s-default-late-pod',
+        nodeId: 'node-a',
+        imageRef: 'pause:latest',
+        runtimeType: 'runc',
+        startupDurationMs: 0,
+        attributes: {
+          'startup.duration.source': 'event-required',
+          'startup.duration.plugin': 'containerd-startup-trace',
+        },
+      }],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 1500);
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.source'], 'trace');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
 });
