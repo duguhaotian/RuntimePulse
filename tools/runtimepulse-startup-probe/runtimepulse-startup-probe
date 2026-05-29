@@ -601,6 +601,24 @@ def metadata_stable_sandbox_id(metadata: dict[str, str]) -> str:
     return stable_kubernetes_sandbox_id(namespace, pod, "pod") if namespace and pod else ""
 
 
+def add_top_level_identity_fields(event: dict[str, object], attributes: dict[str, object]) -> None:
+    namespace = str(attributes.get("k8s.namespace") or attributes.get("cni.args.K8S_POD_NAMESPACE") or "").strip()
+    pod = str(attributes.get("k8s.pod") or attributes.get("cni.args.K8S_POD_NAME") or "").strip()
+    pod_uid = str(attributes.get("k8s.pod_uid") or attributes.get("cni.args.K8S_POD_UID") or "").strip()
+    container = str(attributes.get("k8s.container") or "").strip()
+    runtime_handler = str(attributes.get("cri.runtime_handler") or attributes.get("runtime.handler") or "").strip()
+    if namespace:
+        event["namespace"] = namespace
+    if pod:
+        event["podName"] = pod
+    if pod_uid:
+        event["podUid"] = pod_uid
+    if container:
+        event["containerName"] = container
+    if runtime_handler:
+        event["runtimeHandler"] = runtime_handler
+
+
 def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type: str, sandbox_id: str = "", cri_sandbox_id: str = "") -> dict[str, object]:
     role = go_uprobe_role(obs.function)
     phase = go_uprobe_startup_phase(role)
@@ -647,6 +665,7 @@ def event_from_go_uprobe(obs: GoUprobeObservation, event_type: str, runtime_type
     }
     if span_name:
         event["spanName"] = span_name
+    add_top_level_identity_fields(event, attributes)
     return event
 
 
@@ -1092,6 +1111,7 @@ def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str
         event["ociBundle"] = obs.oci_bundle
     if obs.containerd_namespace:
         event.setdefault("attributes", {})["containerd.namespace"] = obs.containerd_namespace
+    add_top_level_identity_fields(event, event.get("attributes") or {})
     return event
 
 
@@ -2291,6 +2311,14 @@ def self_test() -> None:
     request_meta_event = next(event for event in request_meta_reports[0]["events"] if event.get("function") == "RunPodSandbox")
     assert request_meta_event["attributes"]["startup.probe.req_identity"] == "runpod-request"
     assert request_meta_event["attributes"]["k8s.pod"] == "request-demo"
+    assert request_meta_event["namespace"] == "default"
+    assert request_meta_event["podName"] == "request-demo"
+    assert request_meta_event["podUid"] == "request-demo-uid"
+    assert request_meta_event["runtimeHandler"] == "runc"
+    request_cni_event = next(event for event in request_meta_reports[0]["events"] if event.get("role") == "cni")
+    assert request_cni_event["namespace"] == "default"
+    assert request_cni_event["podName"] == "request-demo"
+    assert request_cni_event["podUid"] == "request-demo-uid"
 
     ambiguous_go_lines = [
         "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
