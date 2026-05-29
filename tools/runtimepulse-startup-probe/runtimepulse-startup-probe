@@ -1618,6 +1618,15 @@ def correlate_go_uprobe_events(events: list[dict[str, object]]) -> list[dict[str
                 result.append(assigned)
             continue
 
+        if str(event.get("role") or "").lower() == "cni" and len(windows) > 1:
+            # Containerd CNI setup uprobes often run on worker threads that do
+            # not expose the RunPod request pointer. In concurrent captures,
+            # broad report time windows overlap, so assigning these by timestamp
+            # can split enter/exit across different sandboxes. Keep them pending
+            # unless an earlier exact request/CNI identity pass has assigned them.
+            result.append(event)
+            continue
+
         ts = event_time(event)
         candidates: list[tuple[float, str]] = []
         if ts:
@@ -2050,6 +2059,8 @@ def attach_pending_go_uprobes_to_reports(reports: list[dict[str, object]], pendi
         if start and end:
             concrete_windows.append((start - timedelta(seconds=2), end + timedelta(seconds=2), report))
     for event in pending_events:
+        if str(event.get("role") or "").lower() == "cni" and len(concrete_reports) > 1:
+            continue
         ts = event_time(event)
         matches = [report for start, end, report in concrete_windows if ts and start <= ts <= end]
         if len(matches) == 1:
@@ -2258,6 +2269,7 @@ def self_test() -> None:
 
     ambiguous_go_lines = [
         "RP_GO_UPROBE_ENTER\t1779940000000000000\t90\t91\tcontainerd\tRunPodSandbox\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).RunPodSandbox\t/usr/bin/containerd\n",
+        "RP_GO_UPROBE_ENTER\t1779940000001000000\t90\t91\tcontainerd\tCNISetup\tgithub.com/containerd/containerd/v2/internal/cri/server.(*criService).setupPodNetwork\t/usr/bin/containerd\n",
         "RP_EXEC_ENTER\t210\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
         "RP_EXEC_ENTER\t211\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-b\t\n",
     ]
@@ -2265,7 +2277,7 @@ def self_test() -> None:
     ambiguous_reports = grouped_reports(ambiguous_events, ambiguous_runtime, "", "", "self-test")
     assert len(ambiguous_reports) == 2
     assert all(report["summary"].get("assignedPendingGoUprobeEventCount") == 0.0 for report in ambiguous_reports)
-    assert all(report["summary"].get("unassignedPendingGoUprobeEventCount") == 1.0 for report in ambiguous_reports)
+    assert all(report["summary"].get("unassignedPendingGoUprobeEventCount") == 3.0 for report in ambiguous_reports)
 
     orphan_runtime_lines = [
         "RP_GO_UPROBE_ENTER\t1779940000160000000\t999\t1000\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
