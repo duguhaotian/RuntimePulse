@@ -710,6 +710,9 @@ fn runtime_type_from_name(value: &str) -> String {
 }
 
 fn stable_sandbox_id(report: &StartupCallchainReport) -> String {
+    if report.sandbox_id.trim().starts_with("k8s-") {
+        return report.sandbox_id.trim().to_string();
+    }
     if !report.k8s_namespace.trim().is_empty()
         && !report.pod_name.trim().is_empty()
         && !report.container_name.trim().is_empty()
@@ -3331,6 +3334,61 @@ mod tests {
             span.span_name == "cni.plugin.bridge"
                 && span.trace_id == "cri-containerd-startup-k8s-default-runtimepulse-cni-only-pod"
         }));
+    }
+
+    #[test]
+    fn keeps_explicit_pod_sandbox_id_for_workload_container_events() {
+        let config = test_config();
+        let content = r#"{
+          "source":"runtimepulse-startup-probe",
+          "events":[{
+            "eventType":"enter",
+            "requestId":"workload-runtime",
+            "function":"execve",
+            "timestamp":"2026-05-26T01:00:00.000Z",
+            "sandboxId":"k8s-default-workload-demo-pod",
+            "containerdId":"raw-container-id",
+            "namespace":"default",
+            "podName":"workload-demo",
+            "containerName":"app",
+            "runtimeHandler":"runc",
+            "binary":"/usr/bin/runc",
+            "role":"oci",
+            "attributes":{
+              "startup.stable_sandbox_id":"k8s-default-workload-demo-pod",
+              "startup.stable_container_id":"k8s-default-workload-demo-app",
+              "startup.phase":"container"
+            }
+          },{
+            "eventType":"exit",
+            "requestId":"workload-runtime",
+            "function":"execve",
+            "timestamp":"2026-05-26T01:00:00.050Z",
+            "sandboxId":"k8s-default-workload-demo-pod",
+            "containerdId":"raw-container-id",
+            "namespace":"default",
+            "podName":"workload-demo",
+            "containerName":"app",
+            "runtimeHandler":"runc",
+            "binary":"/usr/bin/runc",
+            "role":"oci"
+          }]
+        }"#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert_eq!(
+            output.metadata.sandboxes[0]["id"],
+            json!("k8s-default-workload-demo-pod")
+        );
+        assert!(output.traces.iter().all(|span| {
+            span.trace_id == "cri-containerd-startup-k8s-default-workload-demo-pod"
+                && span.sandbox_id.as_deref() == Some("k8s-default-workload-demo-pod")
+        }));
+        assert_eq!(
+            output.traces[1].attributes["startup.stable_container_id"],
+            json!("k8s-default-workload-demo-app")
+        );
     }
 
     #[test]

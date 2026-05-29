@@ -730,9 +730,10 @@ def oci_bundle_metadata(bundle: str) -> dict[str, str]:
         or labels.get("io.cri-containerd.sandbox-id", "")
     )
     phase = "sandbox" if container.lower() in {"", "pod"} else "container"
-    stable_id = stable_kubernetes_sandbox_id(namespace, pod, "pod") if namespace and pod and phase == "sandbox" else ""
+    stable_sandbox_id = stable_kubernetes_sandbox_id(namespace, pod, "pod") if namespace and pod else ""
+    stable_container_id = ""
     if namespace and pod and phase == "container":
-        stable_id = stable_kubernetes_sandbox_id(namespace, pod, container)
+        stable_container_id = stable_kubernetes_sandbox_id(namespace, pod, container)
     metadata = {
         "k8s.namespace": namespace,
         "k8s.pod": pod,
@@ -742,7 +743,8 @@ def oci_bundle_metadata(bundle: str) -> dict[str, str]:
         "cri.sandbox_container_id": sandbox_container_id,
         "startup.phase": phase,
         "startup.phase.source": "oci-bundle-config",
-        "startup.stable_sandbox_id": stable_id,
+        "startup.stable_sandbox_id": stable_sandbox_id,
+        "startup.stable_container_id": stable_container_id,
     }
     return {key: value for key, value in metadata.items() if value}
 
@@ -1535,6 +1537,7 @@ def correlate_oci_bundle_metadata_events(events: list[dict[str, object]]) -> lis
                     "startup.phase",
                     "startup.phase.source",
                     "startup.stable_sandbox_id",
+                    "startup.stable_container_id",
                 }
             },
         })
@@ -2461,6 +2464,34 @@ def self_test() -> None:
         assert uprobe_event["sandboxId"] == "k8s-default-bundle-demo-pod"
         assert uprobe_event["containerdId"] == "raw-sandbox-id"
         assert uprobe_event["attributes"]["startup.probe.correlation"] == "pid"
+        workload_bundle = Path(tmp) / "io.containerd.runtime.v2.task" / "k8s.io" / "raw-container-id"
+        workload_bundle.mkdir(parents=True)
+        (workload_bundle / "config.json").write_text(json.dumps({
+            "ociVersion": "1.1.0",
+            "annotations": {
+                "io.kubernetes.pod.namespace": "default",
+                "io.kubernetes.pod.name": "bundle-demo",
+                "io.kubernetes.container.name": "app",
+                "io.kubernetes.pod.uid": "bundle-demo-uid",
+                "io.kubernetes.cri.runtime-handler": "runc",
+                "io.kubernetes.cri.sandbox-id": "raw-sandbox-id",
+            },
+        }))
+        workload_lines = [
+            f"RP_EXEC_ENTER\t510\t1\t0\t0\tcontainerd\t/usr/bin/runc\trunc\t--bundle\t{workload_bundle}\tcreate\traw-container-id\t\t\t\t\n",
+            "RP_PROC_EXIT\t510\trunc\n",
+        ]
+        workload_events, _workload_summary, _workload_runtime, workload_sandbox, _workload_cri = collect_from_stream(workload_lines, 6, 4, "runc", "", None)
+        assert workload_sandbox == "k8s-default-bundle-demo-pod"
+        workload_event = next(event for event in workload_events if event.get("eventType") == "enter")
+        workload_attrs = workload_event["attributes"]
+        assert workload_event["sandboxId"] == "k8s-default-bundle-demo-pod"
+        assert workload_event["containerdId"] == "raw-container-id"
+        assert workload_event["containerName"] == "app"
+        assert workload_attrs["startup.phase"] == "container"
+        assert workload_attrs["startup.stable_sandbox_id"] == "k8s-default-bundle-demo-pod"
+        assert workload_attrs["startup.stable_container_id"] == "k8s-default-bundle-demo-app"
+        assert workload_attrs["containerd.sandbox_container_id"] == "raw-sandbox-id"
     print("self-test ok")
 
 
