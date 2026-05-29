@@ -36,6 +36,7 @@ EXPECT_PROCESS_BINARY_METRICS="${EXPECT_PROCESS_BINARY_METRICS:-false}"
 EXPECT_HELPER_BINARY_METRICS="${EXPECT_HELPER_BINARY_METRICS:-false}"
 EXPECT_CNI_CONTAINER_ID="${EXPECT_CNI_CONTAINER_ID:-false}"
 EXPECT_RUNPOD_REQUEST_IDENTITY="${EXPECT_RUNPOD_REQUEST_IDENTITY:-false}"
+EXPECT_CNISETUP_DEBUG_PENDING="${EXPECT_CNISETUP_DEBUG_PENDING:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
@@ -85,6 +86,7 @@ Common env:
   EXPECT_HELPER_BINARY_METRICS=true Require helper process-binary metrics.
   EXPECT_CNI_CONTAINER_ID=true Require CNI_CONTAINERID/CNI_ARGS infra id matches report sandbox id.
   EXPECT_RUNPOD_REQUEST_IDENTITY=true Require RunPodSandbox uprobe identity decoded and matched to sandbox.
+  EXPECT_CNISETUP_DEBUG_PENDING=true Require CNISetup uprobes remain pending debug boundaries in concurrent reports.
   EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
@@ -357,6 +359,7 @@ validate_report_shape() {
   CONCURRENT_RUNPODS="$CONCURRENT_RUNPODS" \
   EXPECT_CNI_CONTAINER_ID="$EXPECT_CNI_CONTAINER_ID" \
   EXPECT_RUNPOD_REQUEST_IDENTITY="$EXPECT_RUNPOD_REQUEST_IDENTITY" \
+  EXPECT_CNISETUP_DEBUG_PENDING="$EXPECT_CNISETUP_DEBUG_PENDING" \
   python3 - "$REPORT_PATH" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -366,6 +369,7 @@ expect_sandbox = os.environ.get('EXPECT_SANDBOX_ID', '').strip()
 expected_report_count = int(os.environ.get('CONCURRENT_RUNPODS', '1') or '1')
 expect_cni_container_id = os.environ.get('EXPECT_CNI_CONTAINER_ID', '').lower() == 'true'
 expect_runpod_request_identity = os.environ.get('EXPECT_RUNPOD_REQUEST_IDENTITY', '').lower() == 'true'
+expect_cnisetup_debug_pending = os.environ.get('EXPECT_CNISETUP_DEBUG_PENDING', '').lower() == 'true'
 
 def parse_cni_args(value):
     result = {}
@@ -481,6 +485,23 @@ for idx, report in enumerate(reports):
                 f'report {idx} sandbox {sandbox} has no RunPodSandbox event with decoded request identity; '
                 f'observed decoded RunPod events {decoded_unmatched}'
             )
+    if expect_cnisetup_debug_pending:
+        assigned_cnisetup = [
+            event for event in events
+            if str(event.get('function') or '') == 'CNISetup'
+        ]
+        pending_functions = {str(item) for item in (report.get('summary') or {}).get('pendingGoUprobeFunctions') or []}
+        pending_debug_count = float((report.get('summary') or {}).get('pendingDebugGoUprobeEventCount') or 0.0)
+        if assigned_cnisetup:
+            raise SystemExit(
+                f'report {idx} sandbox {sandbox} has assigned CNISetup uprobe events; '
+                'CNISetup is debug-only and should stay pending in concurrent captures'
+            )
+        if 'CNISetup' not in pending_functions or pending_debug_count <= 0:
+            raise SystemExit(
+                f'report {idx} sandbox {sandbox} missing pending debug CNISetup quality markers; '
+                f'functions={sorted(pending_functions)} pendingDebug={pending_debug_count}'
+            )
 if expected_report_count > 1 and len(set(sandboxes)) != len(sandboxes):
     raise SystemExit(f'concurrent reports contain duplicate sandbox ids: {sandboxes}')
 if expect_runtime and expect_runtime not in runtime_types:
@@ -498,6 +519,7 @@ print(json.dumps({
     'roles': sorted(all_roles),
     'validatedCniContainerId': expect_cni_container_id,
     'validatedRunPodRequestIdentity': expect_runpod_request_identity,
+    'validatedCniSetupDebugPending': expect_cnisetup_debug_pending,
 }, separators=(',', ':')))
 PY
 }

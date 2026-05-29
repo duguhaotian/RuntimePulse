@@ -105,7 +105,7 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 # the real sandbox id through CNI env identity.
 CAPTURE=true VALIDATE_INGEST=true CONCURRENT_RUNPODS=2 \
 EXPECT_PROCESS_BINARY_METRICS=true EXPECT_CNI_CONTAINER_ID=true \
-EXPECT_RUNPOD_REQUEST_IDENTITY=true EXPECT_ROLES=cni,kata \
+EXPECT_RUNPOD_REQUEST_IDENTITY=true EXPECT_CNISETUP_DEBUG_PENDING=true EXPECT_ROLES=cni,kata \
 RUNTIME_TYPE=kata CRI_RUNTIME_HANDLER=kata \
 ENABLE_GO_UPROBES=true ENABLE_CNI_GO_UPROBES=true ENABLE_RUNTIME_GO_UPROBES=true \
 CONTAINERD_BINARY=/usr/bin/containerd \
@@ -155,7 +155,9 @@ containerd builds. After normalization, each observed process binary also gets
 `validate-cri-containerd-startup.sh` to assert that this attribution path is
 present in real captures. Use `EXPECT_RUNPOD_REQUEST_IDENTITY=true` to assert
 that RunPodSandbox request metadata was decoded and matched back to the real
-sandbox id through CNI identity. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
+sandbox id through CNI identity. Use `EXPECT_CNISETUP_DEBUG_PENDING=true` in
+concurrent CNI uprobe captures to assert CNISetup remains a pending debug
+boundary instead of being used for core CNI cost attribution. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
 points the probe at the same `config.toml` used by the target containerd so it
 can infer `state`/`root` task bundle directories even when the shim argv only
 contains `-namespace`/`-id` plus the runtime root. This is especially useful for
