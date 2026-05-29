@@ -22,7 +22,7 @@ RUN apt-get update \
 COPY --from=build /src/target/debug/runtimepulse-collector /usr/local/bin/runtimepulse-collector
 
 ENV INGEST_URL=http://runtimepulse-query-api:8081/api/ingest/batch
-ENV RUNTIMEPULSE_COLLECTOR_NODE_ID=rust-node-a
+ENV RUNTIMEPULSE_COLLECTOR_NODE_ID=runtimepulse-host
 ENV RUNTIMEPULSE_COLLECTOR_CLUSTER_ID=runtimepulse-local
 ENV RUNTIMEPULSE_COLLECTOR_INTERVAL_MS=5000
 ENV RUNTIMEPULSE_COLLECTOR_PLUGINS=none

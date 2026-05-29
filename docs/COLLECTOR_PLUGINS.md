@@ -208,7 +208,7 @@ Useful host tool settings:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `RUNTIMEPULSE_COLLECTOR_NODE_ID` | `rust-node-a` | Node id attached to host samples. |
+| `RUNTIMEPULSE_COLLECTOR_NODE_ID` | `runtimepulse-host` | Node id attached to host samples. |
 | `RUNTIMEPULSE_LOCAL_REPORT_URL` | `http://localhost:9091/api/local/ingest` | Collector outlet endpoint. |
 | `RUNTIMEPULSE_COLLECTOR_INTERVAL_MS` | `5000` | Sampling interval for loop mode. |
 | `RUNTIMEPULSE_COLLECTOR_ONCE` | `false` | Set `true` to collect once and exit. |
