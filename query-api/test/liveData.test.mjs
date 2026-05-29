@@ -675,3 +675,41 @@ test('applies stored cri startup trace when sandbox metadata arrives later', () 
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.source'], 'trace');
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
 });
+
+test('filters pseudo containerd image rows from live image list', async () => {
+  const { liveImages } = await import('../src/liveData.mjs');
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'test/containerd',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [
+        {
+          id: 'containerd-image-k8s-io-registry-k8s-io-pause-3-10',
+          ref: 'registry.k8s.io/pause:3.10',
+          digest: 'sha256:real',
+          sizeBytes: 123,
+          layerCount: 1,
+        },
+        {
+          id: 'containerd-image-k8s-io-containerd-unknown-latest',
+          ref: 'containerd/unknown:latest',
+          digest: 'containerd:unknown',
+        },
+        {
+          id: 'containerd-image-k8s-io-containerd-snapshot-k8s-io-sandboxabcdef',
+          ref: 'containerd-snapshot:k8s.io:sandboxabcdef',
+          digest: 'snapshot:sandboxabcdef',
+        },
+      ],
+      sandboxes: [],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  assert.deepEqual(liveImages(store).map((image) => image.ref), ['registry.k8s.io/pause:3.10']);
+});

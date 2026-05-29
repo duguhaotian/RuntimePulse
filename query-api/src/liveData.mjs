@@ -56,7 +56,7 @@ export function liveNodes(store) {
 }
 
 export function liveImages(store) {
-  return Array.from(store.images.values());
+  return Array.from(store.images.values()).filter((image) => !pseudoImage(image));
 }
 
 export function liveSandboxes(store) {
@@ -186,7 +186,7 @@ function rememberMetadata(store, metadata, source) {
 
   for (const image of array(metadata?.images)) {
     const normalized = normalizeImage(image);
-    if (normalized) {
+    if (normalized && !pseudoImage(normalized)) {
       store.images.set(normalized.id, mergeImage(store.images.get(normalized.id), normalized));
       if (source) store.sourceByImage.set(normalized.id, source);
     }
@@ -403,8 +403,24 @@ function mergeImage(existing, incoming) {
   };
 }
 
+function pseudoImage(image) {
+  return pseudoImageRef(image?.ref)
+    || pseudoImageRef(image?.id)
+    || String(image?.digest ?? '').startsWith('snapshot:');
+}
+
+function pseudoImageRef(value) {
+  const text = String(value ?? '');
+  return text === 'collector/unknown:latest'
+    || text === 'containerd/unknown:latest'
+    || text === 'docker/unknown:latest'
+    || text.includes('containerd-unknown-latest')
+    || text.startsWith('containerd-snapshot:')
+    || text.includes('containerd-snapshot-');
+}
+
 function meaningfulImageRef(value) {
-  return Boolean(value) && value !== 'collector/unknown:latest' && value !== 'containerd/unknown:latest' && value !== 'docker/unknown:latest';
+  return Boolean(value) && !pseudoImageRef(value);
 }
 
 function meaningfulImageDigest(value) {

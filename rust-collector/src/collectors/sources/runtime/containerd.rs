@@ -392,15 +392,20 @@ fn output_from_image_event(
         "detail": image_stage_detail(&event),
     });
 
-    let mut image = image_row(
-        &image_id,
-        &event.image_ref,
-        &event.image_digest,
-        event.bytes.unwrap_or(0),
-        0,
-        &event.namespace,
-    );
-    image["downloadTimeline"] = json!([timeline_step]);
+    let image = if containerd_image_event_has_image_identity(&event) {
+        let mut image = image_row(
+            &image_id,
+            &event.image_ref,
+            &event.image_digest,
+            event.bytes.unwrap_or(0),
+            0,
+            &event.namespace,
+        );
+        image["downloadTimeline"] = json!([timeline_step]);
+        Some(image)
+    } else {
+        None
+    };
 
     let mut attributes = Map::new();
     attributes.insert("plugin".to_string(), json!("containerd-events"));
@@ -446,7 +451,7 @@ fn output_from_image_event(
                     "scope": config.collection_scope,
                 }
             })],
-            images: vec![image],
+            images: image.into_iter().collect(),
             sandboxes: Vec::new(),
         },
         metrics: Vec::new(),
@@ -570,16 +575,18 @@ async fn collect_containerd_inventory_async(
                 None
             };
 
-            images.entry(image_id.clone()).or_insert_with(|| {
-                image_row(
-                    &image_id,
-                    &image_ref,
-                    "containerd:unknown",
-                    0,
-                    0,
-                    &namespace,
-                )
-            });
+            if is_meaningful_containerd_image_ref(&image_ref) {
+                images.entry(image_id.clone()).or_insert_with(|| {
+                    image_row(
+                        &image_id,
+                        &image_ref,
+                        "containerd:unknown",
+                        0,
+                        0,
+                        &namespace,
+                    )
+                });
+            }
 
             sandboxes.push(json!({
                 "id": identity.sandbox_id,
@@ -1771,6 +1778,19 @@ fn image_event_severity(action: &str) -> &'static str {
     }
 }
 
+
+fn containerd_image_event_has_image_identity(event: &ContainerdImageEvent) -> bool {
+    is_meaningful_containerd_image_ref(&event.image_ref)
+        && !event.image_ref.starts_with("containerd-content:")
+        && !event.image_digest.starts_with("snapshot:")
+}
+
+fn is_meaningful_containerd_image_ref(image_ref: &str) -> bool {
+    !image_ref.trim().is_empty()
+        && image_ref != "containerd/unknown:latest"
+        && !image_ref.starts_with("containerd-snapshot:")
+}
+
 fn image_stage_name(event: &ContainerdImageEvent) -> &'static str {
     match event.action.as_str() {
         "content_create" => "Content blob available",
@@ -2173,6 +2193,38 @@ mod tests {
     fn containerd_inventory_does_not_fabricate_started_at() {
         assert_eq!(containerd_inventory_started_at("running"), None);
         assert_eq!(containerd_inventory_started_at("stopped"), None);
+    }
+
+    #[test]
+    fn snapshot_image_event_does_not_create_image_metadata() {
+        let event = ContainerdImageEvent {
+            namespace: "k8s.io".to_string(),
+            action: "snapshot_remove".to_string(),
+            image_ref: snapshot_image_ref("k8s.io", "sandboxabcdef"),
+            image_digest: "snapshot:sandboxabcdef".to_string(),
+            content_digest: None,
+            snapshot_key: Some("sandboxabcdef".to_string()),
+            snapshotter: Some("overlayfs".to_string()),
+            bytes: None,
+            phase: "snapshot".to_string(),
+            timestamp: Utc::now(),
+            topic: "/snapshot/remove".to_string(),
+        };
+
+        let output = output_from_image_event(event, &test_config())
+            .unwrap()
+            .expect("snapshot event output");
+
+        assert!(output.metadata.images.is_empty());
+        assert_eq!(output.events.len(), 1);
+        assert_eq!(output.events[0].event_name, "containerd.image.snapshot_remove");
+    }
+
+    #[test]
+    fn meaningful_containerd_image_ref_excludes_unknown_and_snapshots() {
+        assert!(!is_meaningful_containerd_image_ref("containerd/unknown:latest"));
+        assert!(!is_meaningful_containerd_image_ref("containerd-snapshot:k8s.io:sandboxabcdef"));
+        assert!(is_meaningful_containerd_image_ref("registry.k8s.io/pause:3.10"));
     }
 
     #[test]
