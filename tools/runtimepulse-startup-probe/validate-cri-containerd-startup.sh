@@ -38,6 +38,7 @@ EXPECT_CNI_CONTAINER_ID="${EXPECT_CNI_CONTAINER_ID:-false}"
 EXPECT_RUNPOD_REQUEST_IDENTITY="${EXPECT_RUNPOD_REQUEST_IDENTITY:-false}"
 EXPECT_CNISETUP_DEBUG_PENDING="${EXPECT_CNISETUP_DEBUG_PENDING:-false}"
 EXPECT_RUNTIME_BOUNDARY_CORRELATION="${EXPECT_RUNTIME_BOUNDARY_CORRELATION:-false}"
+EXPECT_TOP_LEVEL_IDENTITY="${EXPECT_TOP_LEVEL_IDENTITY:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
@@ -89,6 +90,7 @@ Common env:
   EXPECT_RUNPOD_REQUEST_IDENTITY=true Require RunPodSandbox uprobe identity decoded and matched to sandbox.
   EXPECT_CNISETUP_DEBUG_PENDING=true Require CNISetup uprobes remain pending debug boundaries in concurrent reports.
   EXPECT_RUNTIME_BOUNDARY_CORRELATION=true Require OCI/Kata exec/uprobe boundaries to carry exact correlation markers.
+  EXPECT_TOP_LEVEL_IDENTITY=true Require decoded pod/runtime identity on top-level event fields.
   EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
@@ -363,6 +365,7 @@ validate_report_shape() {
   EXPECT_RUNPOD_REQUEST_IDENTITY="$EXPECT_RUNPOD_REQUEST_IDENTITY" \
   EXPECT_CNISETUP_DEBUG_PENDING="$EXPECT_CNISETUP_DEBUG_PENDING" \
   EXPECT_RUNTIME_BOUNDARY_CORRELATION="$EXPECT_RUNTIME_BOUNDARY_CORRELATION" \
+  EXPECT_TOP_LEVEL_IDENTITY="$EXPECT_TOP_LEVEL_IDENTITY" \
   python3 - "$REPORT_PATH" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -374,6 +377,7 @@ expect_cni_container_id = os.environ.get('EXPECT_CNI_CONTAINER_ID', '').lower() 
 expect_runpod_request_identity = os.environ.get('EXPECT_RUNPOD_REQUEST_IDENTITY', '').lower() == 'true'
 expect_cnisetup_debug_pending = os.environ.get('EXPECT_CNISETUP_DEBUG_PENDING', '').lower() == 'true'
 expect_runtime_boundary_correlation = os.environ.get('EXPECT_RUNTIME_BOUNDARY_CORRELATION', '').lower() == 'true'
+expect_top_level_identity = os.environ.get('EXPECT_TOP_LEVEL_IDENTITY', '').lower() == 'true'
 
 def parse_cni_args(value):
     result = {}
@@ -539,6 +543,31 @@ for idx, report in enumerate(reports):
             raise SystemExit(
                 f'report {idx} sandbox {sandbox} has runtime boundary events without exact correlation: {missing[:8]}'
             )
+    if expect_top_level_identity:
+        identity_events = [
+            event for event in events
+            if event.get('eventType') == 'enter'
+            and (str(event.get('function') or '') == 'RunPodSandbox' or str(event.get('role') or '').lower() == 'cni')
+        ]
+        missing = []
+        for event in identity_events:
+            required = ['namespace', 'podName']
+            if str(event.get('function') or '') == 'RunPodSandbox':
+                required.append('runtimeHandler')
+            missing_keys = [key for key in required if not str(event.get(key) or '').strip()]
+            if missing_keys:
+                missing.append({
+                    'function': event.get('function'),
+                    'role': event.get('role'),
+                    'binary': event.get('binary'),
+                    'missing': missing_keys,
+                })
+        if not identity_events:
+            raise SystemExit(f'report {idx} sandbox {sandbox} has no RunPod/CNI identity events')
+        if missing:
+            raise SystemExit(
+                f'report {idx} sandbox {sandbox} has events missing top-level identity fields: {missing[:8]}'
+            )
 if expected_report_count > 1 and len(set(sandboxes)) != len(sandboxes):
     raise SystemExit(f'concurrent reports contain duplicate sandbox ids: {sandboxes}')
 if expect_runtime and expect_runtime not in runtime_types:
@@ -558,6 +587,7 @@ print(json.dumps({
     'validatedRunPodRequestIdentity': expect_runpod_request_identity,
     'validatedCniSetupDebugPending': expect_cnisetup_debug_pending,
     'validatedRuntimeBoundaryCorrelation': expect_runtime_boundary_correlation,
+    'validatedTopLevelIdentity': expect_top_level_identity,
 }, separators=(',', ':')))
 PY
 }
