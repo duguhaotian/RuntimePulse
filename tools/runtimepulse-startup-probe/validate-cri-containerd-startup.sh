@@ -37,6 +37,7 @@ EXPECT_HELPER_BINARY_METRICS="${EXPECT_HELPER_BINARY_METRICS:-false}"
 EXPECT_CNI_CONTAINER_ID="${EXPECT_CNI_CONTAINER_ID:-false}"
 EXPECT_RUNPOD_REQUEST_IDENTITY="${EXPECT_RUNPOD_REQUEST_IDENTITY:-false}"
 EXPECT_CNISETUP_DEBUG_PENDING="${EXPECT_CNISETUP_DEBUG_PENDING:-false}"
+EXPECT_RUNTIME_BOUNDARY_CORRELATION="${EXPECT_RUNTIME_BOUNDARY_CORRELATION:-false}"
 ENABLE_GO_UPROBES="${ENABLE_GO_UPROBES:-false}"
 CONTAINERD_BINARY="${CONTAINERD_BINARY:-}"
 CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-${RUNTIMEPULSE_CONTAINERD_CONFIG:-}}"
@@ -87,6 +88,7 @@ Common env:
   EXPECT_CNI_CONTAINER_ID=true Require CNI_CONTAINERID/CNI_ARGS infra id matches report sandbox id.
   EXPECT_RUNPOD_REQUEST_IDENTITY=true Require RunPodSandbox uprobe identity decoded and matched to sandbox.
   EXPECT_CNISETUP_DEBUG_PENDING=true Require CNISetup uprobes remain pending debug boundaries in concurrent reports.
+  EXPECT_RUNTIME_BOUNDARY_CORRELATION=true Require OCI/Kata exec/uprobe boundaries to carry exact correlation markers.
   EXPECT_ANALYSIS=true         Require Query API analysis findings for each sandbox.
   VALIDATE_INGEST=true         Also send normalized output to LOCAL_REPORT_URL.
   VALIDATE_QUERY_API=true      Verify sandbox trace/metrics via QUERY_API_URL.
@@ -360,6 +362,7 @@ validate_report_shape() {
   EXPECT_CNI_CONTAINER_ID="$EXPECT_CNI_CONTAINER_ID" \
   EXPECT_RUNPOD_REQUEST_IDENTITY="$EXPECT_RUNPOD_REQUEST_IDENTITY" \
   EXPECT_CNISETUP_DEBUG_PENDING="$EXPECT_CNISETUP_DEBUG_PENDING" \
+  EXPECT_RUNTIME_BOUNDARY_CORRELATION="$EXPECT_RUNTIME_BOUNDARY_CORRELATION" \
   python3 - "$REPORT_PATH" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -370,6 +373,7 @@ expected_report_count = int(os.environ.get('CONCURRENT_RUNPODS', '1') or '1')
 expect_cni_container_id = os.environ.get('EXPECT_CNI_CONTAINER_ID', '').lower() == 'true'
 expect_runpod_request_identity = os.environ.get('EXPECT_RUNPOD_REQUEST_IDENTITY', '').lower() == 'true'
 expect_cnisetup_debug_pending = os.environ.get('EXPECT_CNISETUP_DEBUG_PENDING', '').lower() == 'true'
+expect_runtime_boundary_correlation = os.environ.get('EXPECT_RUNTIME_BOUNDARY_CORRELATION', '').lower() == 'true'
 
 def parse_cni_args(value):
     result = {}
@@ -502,6 +506,39 @@ for idx, report in enumerate(reports):
                 f'report {idx} sandbox {sandbox} missing pending debug CNISetup quality markers; '
                 f'functions={sorted(pending_functions)} pendingDebug={pending_debug_count}'
             )
+    if expect_runtime_boundary_correlation:
+        runtime_events = [
+            event for event in events
+            if event.get('eventType') == 'enter'
+            and str(event.get('role') or '').lower() in {'oci', 'kata'}
+        ]
+        if not runtime_events:
+            raise SystemExit(f'report {idx} sandbox {sandbox} has no OCI/Kata runtime boundary enter events')
+        missing = []
+        for event in runtime_events:
+            attrs = event.get('attributes') or {}
+            if not isinstance(attrs, dict):
+                attrs = {}
+            corr = str(attrs.get('startup.probe.correlation') or '').strip()
+            corr_id = str(attrs.get('startup.probe.correlation_sandbox_id') or '').strip()
+            legacy_exact = str(event.get('sandboxId') or '').strip() == sandbox and str(event.get('containerdId') or '').strip() == sandbox
+            if not corr or corr_id != sandbox:
+                if legacy_exact and str(event.get('function') or '') == 'execve':
+                    attrs['startup.probe.correlation'] = 'legacy-containerd-task-id'
+                    attrs['startup.probe.correlation_sandbox_id'] = sandbox
+                    event['attributes'] = attrs
+                else:
+                    missing.append({
+                        'function': event.get('function'),
+                        'binary': event.get('binary'),
+                        'role': event.get('role'),
+                        'correlation': corr,
+                        'correlationSandboxId': corr_id,
+                    })
+        if missing:
+            raise SystemExit(
+                f'report {idx} sandbox {sandbox} has runtime boundary events without exact correlation: {missing[:8]}'
+            )
 if expected_report_count > 1 and len(set(sandboxes)) != len(sandboxes):
     raise SystemExit(f'concurrent reports contain duplicate sandbox ids: {sandboxes}')
 if expect_runtime and expect_runtime not in runtime_types:
@@ -520,6 +557,7 @@ print(json.dumps({
     'validatedCniContainerId': expect_cni_container_id,
     'validatedRunPodRequestIdentity': expect_runpod_request_identity,
     'validatedCniSetupDebugPending': expect_cnisetup_debug_pending,
+    'validatedRuntimeBoundaryCorrelation': expect_runtime_boundary_correlation,
 }, separators=(',', ':')))
 PY
 }

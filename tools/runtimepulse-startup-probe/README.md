@@ -157,7 +157,10 @@ present in real captures. Use `EXPECT_RUNPOD_REQUEST_IDENTITY=true` to assert
 that RunPodSandbox request metadata was decoded and matched back to the real
 sandbox id through CNI identity. Use `EXPECT_CNISETUP_DEBUG_PENDING=true` in
 concurrent CNI uprobe captures to assert CNISetup remains a pending debug
-boundary instead of being used for core CNI cost attribution. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
+boundary instead of being used for core CNI cost attribution. Use
+`EXPECT_RUNTIME_BOUNDARY_CORRELATION=true` to assert OCI/Kata exec/uprobe
+runtime boundaries carry an exact sandbox correlation marker instead of relying
+on broad time-window attribution. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
 points the probe at the same `config.toml` used by the target containerd so it
 can infer `state`/`root` task bundle directories even when the shim argv only
 contains `-namespace`/`-id` plus the runtime root. This is especially useful for

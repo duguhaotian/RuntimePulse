@@ -881,6 +881,18 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
         attributes["containerd.raw_id"] = containerd_id
         attributes["startup.probe.correlation"] = "oci-bundle-config"
         attributes["startup.probe.correlation_sandbox_id"] = stable_bundle_id
+    if role in {"oci", "kata"} and containerd_id:
+        if "startup.probe.correlation" not in attributes:
+            if bundle_meta:
+                correlation = "oci-bundle-config"
+            elif bundle:
+                correlation = "oci-bundle-path"
+            elif shim_info.get("id"):
+                correlation = "containerd-shim-argv"
+            else:
+                correlation = "containerd-task-id"
+            attributes["startup.probe.correlation"] = correlation
+            attributes["startup.probe.correlation_sandbox_id"] = sandbox_id or containerd_id
     if bundle_meta.get("cri.sandbox_container_id"):
         attributes["containerd.sandbox_container_id"] = bundle_meta["cri.sandbox_container_id"]
     if cni_container_id:
@@ -2237,6 +2249,14 @@ def self_test() -> None:
     ]
     assert all(e.get("cniNetnsId") for e in cni_events)
     assert any((e.get("attributes") or {}).get("startup.phase") == "containerd-task" for e in events if e.get("role") == "oci")
+    runtime_boundary_events = [
+        e
+        for e in events
+        if e.get("eventType") == "enter" and e.get("role") in {"oci", "kata"}
+    ]
+    assert runtime_boundary_events
+    assert all((e.get("attributes") or {}).get("startup.probe.correlation") for e in runtime_boundary_events)
+    assert all((e.get("attributes") or {}).get("startup.probe.correlation_sandbox_id") == "abc123" for e in runtime_boundary_events)
     multi_lines = [
         "RP_EXEC_ENTER\t200\t1\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-a\t\n",
         "RP_PROC_EXIT\t200\tbridge\n",
@@ -2340,6 +2360,8 @@ def self_test() -> None:
         assert shim_event["sandboxId"] == "k8s-default-bundle-demo-pod"
         assert shim_event["containerdId"] == "raw-sandbox-id"
         assert shim_event["attributes"]["k8s.pod"] == "bundle-demo"
+        assert shim_event["attributes"]["startup.probe.correlation"] == "oci-bundle-config"
+        assert shim_event["attributes"]["startup.probe.correlation_sandbox_id"] == "k8s-default-bundle-demo-pod"
         uprobe_event = next(event for event in bundle_events if event.get("function") == "OCIRuncCreate")
         assert uprobe_event["sandboxId"] == "k8s-default-bundle-demo-pod"
         assert uprobe_event["containerdId"] == "raw-sandbox-id"
