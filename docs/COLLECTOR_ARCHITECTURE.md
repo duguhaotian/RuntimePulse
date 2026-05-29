@@ -112,15 +112,18 @@ internal `RunPodSandbox` function entry.
 
 The high-fidelity startup path now includes a minimal containerd CRI
 `RunPodSandbox`, CNI setup, and OCI/Kata runtime shim Go-uProbe profiles in the
-bundled startup probe, and should next add request-object decoding,
-combined with exec/exit capture for CNI and runtime helper binaries. The goal is
-to attribute CNI plugin cost, `iptables`/`nft`/`ip`/`tc` helper calls, and
+bundled startup probe, combined with exec/exit capture for CNI and runtime
+helper binaries. RunPodSandbox request decoding is available on amd64 and emits
+pod identity plus runtime handler fields; CNI plugin `execve` events also carry
+`CNI_CONTAINERID`/`CNI_ARGS` identity, and OCI/Kata runtime boundaries carry
+exact shim-argv, bundle, or PID correlation markers. The goal is to attribute
+CNI plugin cost, `iptables`/`nft`/`ip`/`tc` helper calls, and
 `runc`/`kata-runtime`/hypervisor invocations to the active RunPodSandbox
 context. Plain process exec tracing is not sufficient by itself because
-containerd can run concurrent sandbox creations; RunPodSandbox context and
-stable IDs such as `CNI_CONTAINERID`, containerd sandbox id, OCI bundle path,
-and CRI sandbox id must drive correlation. CRI socket proxying is not part of
-the preferred design.
+containerd can run concurrent sandbox creations; RunPodSandbox request context,
+CNI env identity, stable Kubernetes sandbox ids, containerd sandbox ids, OCI
+bundle paths, and CRI sandbox ids must drive correlation. CRI socket proxying is
+not part of the preferred design.
 
 The first concrete exporter bridge is available as
 `tools/runtimepulse-startup-probe/runtimepulse-startup-probe`. It uses real
@@ -128,10 +131,12 @@ The first concrete exporter bridge is available as
 CNI plugin binaries, OCI/Kata runtime binaries, containerd shims, and optional
 helper binaries. It now supports an optional `--enable-go-uprobes` mode that discovers stripped
 containerd/runtime-shim Go pclntab symbols and emits CRI `RunPodSandbox`,
-optional `cni.setup`, and optional OCI/Kata shim uprobe observations joined to
-the sandbox event window. Future native depth should decode RunPodSandbox
-request/response context while preserving the same startup-callchain JSON
-contract.
+optional debug `cni.setup`, and optional OCI/Kata shim uprobe observations.
+RunPodSandbox request metadata and CNI_ARGS identity are emitted both as stable
+attributes and top-level report fields so `startup-callchain` can derive the
+same `k8s-{namespace}-{pod}-pod` sandbox id as CRI/containerd events. Future
+native depth should broaden runtime-boundary profiles and repeated validation
+while preserving the same startup-callchain JSON contract.
 
 `startup-callchain` is the report-ingestion bridge for that later high-fidelity
 path. External uprobe/eBPF exporters can write JSON/JSONL or be invoked by

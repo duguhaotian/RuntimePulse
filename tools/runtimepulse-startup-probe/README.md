@@ -155,9 +155,13 @@ containerd builds. After normalization, each observed process binary also gets
 `validate-cri-containerd-startup.sh` to assert that this attribution path is
 present in real captures. Use `EXPECT_RUNPOD_REQUEST_IDENTITY=true` to assert
 that RunPodSandbox request metadata was decoded and matched back to the real
-sandbox id through CNI identity. Use `EXPECT_CNISETUP_DEBUG_PENDING=true` in
-concurrent CNI uprobe captures to assert CNISetup remains a pending debug
-boundary instead of being used for core CNI cost attribution. Use
+sandbox id through CNI identity. Decoded RunPod and CNI_ARGS identity is emitted
+as both attributes and top-level `namespace`/`podName`/`podUid`/`runtimeHandler`
+fields so downstream normalizers can derive stable `k8s-{namespace}-{pod}-pod`
+ids even when a report is consumed outside the bundled Rust collector. Use
+`EXPECT_CNISETUP_DEBUG_PENDING=true` in concurrent CNI uprobe captures to assert
+CNISetup remains a pending debug boundary instead of being used for core CNI
+cost attribution. Use
 `EXPECT_RUNTIME_BOUNDARY_CORRELATION=true` to assert OCI/Kata exec/uprobe
 runtime boundaries carry an exact sandbox correlation marker instead of relying
 on broad time-window attribution. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
