@@ -870,14 +870,21 @@ fn event_k8s_namespace(event: &UprobeEventReport) -> Option<&str> {
     event
         .k8s_namespace
         .as_deref()
-        .or_else(|| event_attribute_string(event, &["k8s.namespace", "podNamespace"]))
+        .or_else(|| {
+            event_attribute_string(
+                event,
+                &["k8s.namespace", "podNamespace", "cni.args.K8S_POD_NAMESPACE"],
+            )
+        })
 }
 
 fn event_pod_name(event: &UprobeEventReport) -> Option<&str> {
     event
         .pod_name
         .as_deref()
-        .or_else(|| event_attribute_string(event, &["k8s.pod", "podName"]))
+        .or_else(|| {
+            event_attribute_string(event, &["k8s.pod", "podName", "cni.args.K8S_POD_NAME"])
+        })
 }
 
 fn event_container_name(event: &UprobeEventReport) -> Option<&str> {
@@ -891,7 +898,9 @@ fn event_pod_uid(event: &UprobeEventReport) -> Option<&str> {
     event
         .pod_uid
         .as_deref()
-        .or_else(|| event_attribute_string(event, &["k8s.pod_uid", "podUid"]))
+        .or_else(|| {
+            event_attribute_string(event, &["k8s.pod_uid", "podUid", "cni.args.K8S_POD_UID"])
+        })
 }
 
 fn event_runtime_type(event: &UprobeEventReport) -> Option<&str> {
@@ -3272,6 +3281,56 @@ mod tests {
             output.events[0].attributes["containerd.id"],
             json!("raw-containerd-id")
         );
+    }
+
+    #[test]
+    fn derives_report_identity_from_cni_args_attributes() {
+        let config = test_config();
+        let content = r#"{
+          "source":"runtimepulse-startup-probe",
+          "events":[{
+            "eventType":"enter",
+            "requestId":"cni-only",
+            "function":"execve",
+            "timestamp":"2026-05-26T01:00:00.000Z",
+            "binary":"/opt/cni/bin/bridge",
+            "role":"cni",
+            "attributes":{
+              "cni.container_id":"raw-cni-sandbox",
+              "cni.args.K8S_POD_INFRA_CONTAINER_ID":"raw-cni-sandbox",
+              "cni.args.K8S_POD_NAMESPACE":"default",
+              "cni.args.K8S_POD_NAME":"runtimepulse-cni-only",
+              "cni.args.K8S_POD_UID":"cni-only-uid"
+            }
+          },{
+            "eventType":"exit",
+            "requestId":"cni-only",
+            "function":"execve",
+            "timestamp":"2026-05-26T01:00:00.100Z",
+            "binary":"/opt/cni/bin/bridge",
+            "role":"cni",
+            "attributes":{
+              "cni.container_id":"raw-cni-sandbox",
+              "cni.args.K8S_POD_NAMESPACE":"default",
+              "cni.args.K8S_POD_NAME":"runtimepulse-cni-only"
+            }
+          }]
+        }"#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert_eq!(
+            output.metadata.sandboxes[0]["id"],
+            json!("k8s-default-runtimepulse-cni-only-pod")
+        );
+        assert_eq!(
+            output.metadata.sandboxes[0]["workloadId"],
+            json!("cni-only-uid")
+        );
+        assert!(output.traces.iter().any(|span| {
+            span.span_name == "cni.plugin.bridge"
+                && span.trace_id == "cri-containerd-startup-k8s-default-runtimepulse-cni-only-pod"
+        }));
     }
 
     #[test]

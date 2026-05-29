@@ -655,8 +655,8 @@ def stable_query_sandbox_id(report):
     explicit_stable = first_report_value(report, ['startup.stable_sandbox_id'])
     if explicit_stable:
         return explicit_stable
-    namespace = first_report_value(report, ['namespace', 'k8s_namespace', 'podNamespace', 'k8s.namespace'])
-    pod = first_report_value(report, ['podName', 'pod_name', 'k8s.pod'])
+    namespace = first_report_value(report, ['namespace', 'k8s_namespace', 'podNamespace', 'k8s.namespace', 'cni.args.K8S_POD_NAMESPACE'])
+    pod = first_report_value(report, ['podName', 'pod_name', 'k8s.pod', 'cni.args.K8S_POD_NAME'])
     container = first_report_value(report, ['containerName', 'container_name', 'k8s.container']) or 'pod'
     if namespace and pod:
         return f'k8s-{sanitize_id(namespace)}-{sanitize_id(pod)}-{sanitize_id(container)}'
