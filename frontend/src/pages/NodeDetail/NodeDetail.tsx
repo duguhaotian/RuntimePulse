@@ -227,109 +227,6 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
         <NodePressureOverlay node={node} ioSeries={pressureSeries.io} psiSeries={pressureSeries.psi} />
       </section>
 
-      <section className="node-section-card">
-        <div className="section-titlebar">
-          <div>
-            <strong>Collector health</strong>
-            <span>host-agent 队列、丢弃、采集错误和发送状态。</span>
-          </div>
-        </div>
-        <HostAgentHealthSummary health={hostAgentHealth} />
-        <div className="node-temporal-grid">
-          <MetricChart
-            height={190}
-            series={[hostAgentSeries.queueDepth].filter((series): series is MetricSeries => Boolean(series))}
-            subtitle="Pending reports waiting for the outlet sender"
-            title="Queue depth"
-          />
-          <MetricChart
-            height={190}
-            series={[hostAgentSeries.dropped, hostAgentSeries.collectErrors, hostAgentSeries.failedBatches, hostAgentSeries.spooledBatches].filter((series): series is MetricSeries => Boolean(series))}
-            subtitle="Dropped reports, collection errors, failed sends, and spooled batches"
-            title="Failures and drops"
-          />
-          <MetricChart
-            height={190}
-            series={[hostAgentSeries.sentBatches, hostAgentSeries.sentReports, hostAgentSeries.replayedBatches].filter((series): series is MetricSeries => Boolean(series))}
-            subtitle="Batches, reports, and replayed spool batches accepted by the outlet"
-            title="Sender throughput"
-          />
-          <MetricChart
-            height={190}
-            series={[hostAgentSeries.spoolFiles, hostAgentSeries.up].filter((series): series is MetricSeries => Boolean(series))}
-            subtitle="Local spool backlog and host-agent liveness"
-            title="Spool and agent state"
-          />
-        </div>
-        {hostAgentSourceRows.length > 0 && (
-          <div className="recent-sample-table node-health-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Source</th>
-                  <th>Status</th>
-                  <th>Last Duration</th>
-                  <th>Errors</th>
-                </tr>
-              </thead>
-              <tbody>
-                {hostAgentSourceRows.map((row) => (
-                  <tr key={row.source}>
-                    <td><strong>{row.source}</strong></td>
-                    <td><span className={`source-health-pill ${row.success ? 'ready' : 'warning'}`}>{row.success ? 'ok' : 'failed'}</span></td>
-                    <td>{formatDuration(row.durationMs)}</td>
-                    <td>{row.errorsTotal.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {hostAgentEventStreamRows.length > 0 && (
-          <div className="recent-sample-table node-health-table">
-            <table>
-              <thead>
-                <tr>
-                  <th>Event stream</th>
-                  <th>Enabled</th>
-                  <th>Running</th>
-                  <th>Events</th>
-                  <th>Errors</th>
-                  <th>Last Event</th>
-                </tr>
-              </thead>
-              <tbody>
-                {hostAgentEventStreamRows.map((row) => (
-                  <tr key={row.stream}>
-                    <td><strong>{row.stream}</strong></td>
-                    <td><span className={`source-health-pill ${row.enabled ? 'ready' : ''}`}>{row.enabled ? 'yes' : 'no'}</span></td>
-                    <td><span className={`source-health-pill ${row.running ? 'ready' : row.enabled ? 'warning' : ''}`}>{row.running ? 'running' : 'stopped'}</span></td>
-                    <td>{Math.round(row.eventsTotal).toLocaleString()}</td>
-                    <td className={row.errorsTotal > 0 ? 'hot-value' : ''}>{Math.round(row.errorsTotal).toLocaleString()}</td>
-                    <td>{row.eventsTotal > 0 ? formatDuration(row.lastEventAgeSeconds * 1000) : 'No events'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <section className="node-section-card">
-        <div className="section-titlebar">
-          <div>
-            <strong>Container change overview</strong>
-            <span>感知容器数量变化，并按时间段合并查看生命周期耗时。</span>
-          </div>
-        </div>
-        <ContainerChangeOverview
-          onSelectRange={setSelectedLifecycleRange}
-          sandboxes={sandboxHistory}
-          selectedRange={selectedLifecycleRange}
-          traces={traces}
-        />
-      </section>
-
       <section className="node-lists-grid">
         <div className="table-card">
           <div className="table-titlebar">
@@ -406,6 +303,109 @@ export function NodeDetail({ api, nodeId, onBack, onSelectSandbox }: NodeDetailP
         </div>
       </section>
 
+      <section className="node-section-card">
+        <div className="section-titlebar">
+          <div>
+            <strong>Container change overview</strong>
+            <span>感知容器数量变化，并按时间段合并查看生命周期耗时。</span>
+          </div>
+        </div>
+        <ContainerChangeOverview
+          onSelectRange={setSelectedLifecycleRange}
+          sandboxes={sandboxHistory}
+          selectedRange={selectedLifecycleRange}
+          traces={traces}
+        />
+      </section>
+
+      <section className="node-section-card">
+        <div className="section-titlebar">
+          <div>
+            <strong>Collector health</strong>
+            <span>host-agent 队列、丢弃、采集错误和发送状态。</span>
+          </div>
+        </div>
+        <HostAgentHealthSummary health={hostAgentHealth} />
+        <div className="node-temporal-grid">
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.queueDepth].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Pending reports waiting for the outlet sender"
+            title="Queue depth"
+          />
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.dropped, hostAgentSeries.collectErrors, hostAgentSeries.failedBatches, hostAgentSeries.spooledBatches].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Dropped reports, collection errors, failed sends, and spooled batches"
+            title="Failures and drops"
+          />
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.sentBatches, hostAgentSeries.sentReports, hostAgentSeries.replayedBatches].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Batches, reports, and replayed spool batches accepted by the outlet"
+            title="Sender throughput"
+          />
+          <MetricChart
+            height={190}
+            series={[hostAgentSeries.spoolFiles, hostAgentSeries.up].filter((series): series is MetricSeries => Boolean(series))}
+            subtitle="Local spool backlog and host-agent liveness"
+            title="Spool and agent state"
+          />
+        </div>
+        {hostAgentSourceRows.length > 0 && (
+          <div className="recent-sample-table node-health-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Status</th>
+                  <th>Last Duration</th>
+                  <th>Errors total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hostAgentSourceRows.map((row) => (
+                  <tr key={row.source}>
+                    <td><strong>{row.source}</strong></td>
+                    <td><span className={`source-health-pill ${row.success ? 'ready' : 'warning'}`}>{row.success ? 'ok' : 'failed'}</span></td>
+                    <td>{formatDuration(row.durationMs)}</td>
+                    <td>{row.errorsTotal.toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {hostAgentEventStreamRows.length > 0 && (
+          <div className="recent-sample-table node-health-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Event stream</th>
+                  <th>Enabled</th>
+                  <th>Running</th>
+                  <th>Events</th>
+                  <th>Errors total</th>
+                  <th>Last Event</th>
+                </tr>
+              </thead>
+              <tbody>
+                {hostAgentEventStreamRows.map((row) => (
+                  <tr key={row.stream}>
+                    <td><strong>{row.stream}</strong></td>
+                    <td><span className={`source-health-pill ${row.enabled ? 'ready' : ''}`}>{row.enabled ? 'yes' : 'no'}</span></td>
+                    <td><span className={`source-health-pill ${row.running ? 'ready' : row.enabled ? 'warning' : ''}`}>{row.running ? 'running' : 'stopped'}</span></td>
+                    <td>{Math.round(row.eventsTotal).toLocaleString()}</td>
+                    <td className={row.errorsDelta > 0 ? 'hot-value' : ''}>{Math.round(row.errorsTotal).toLocaleString()}</td>
+                    <td>{row.eventsTotal > 0 ? formatDuration(row.lastEventAgeSeconds * 1000) : 'No events'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
       {selectedImage && (
         <DetailModal title="Image detail" onClose={() => setModal(undefined)}>
           <ImageDetail
@@ -446,13 +446,18 @@ type HostAgentHealth = {
   statusLabel: string;
   queueDepth: number;
   droppedReports: number;
+  droppedReportDelta: number;
   failedBatches: number;
+  failedBatchDelta: number;
   collectErrors: number;
+  collectErrorDelta: number;
   spooledBatches: number;
+  spooledBatchDelta: number;
   spoolFiles: number;
   sentReports: number;
   failingEventStreams: number;
   eventStreamErrors: number;
+  eventStreamErrorDelta: number;
   failingSources: number;
 };
 
@@ -469,11 +474,12 @@ function HostAgentHealthSummary({ health }: { health: HostAgentHealth }) {
         </em>
       </div>
       <HealthFact label="Queue depth" value={Math.round(health.queueDepth).toLocaleString()} hot={health.queueDepth > 0} />
-      <HealthFact label="Dropped reports" value={Math.round(health.droppedReports).toLocaleString()} hot={health.droppedReports > 0} />
-      <HealthFact label="Failed batches" value={Math.round(health.failedBatches).toLocaleString()} hot={health.failedBatches > 0} />
-      <HealthFact label="Collect errors" value={Math.round(health.collectErrors).toLocaleString()} hot={health.collectErrors > 0 || health.failingSources > 0} />
-      <HealthFact label="Event streams" value={health.failingEventStreams > 0 ? `${health.failingEventStreams} down` : 'OK'} hot={health.failingEventStreams > 0 || health.eventStreamErrors > 0} />
-      <HealthFact label="Spool files" value={Math.round(health.spoolFiles).toLocaleString()} hot={health.spoolFiles > 0 || health.spooledBatches > 0} />
+      <HealthFact label="Dropped total" value={Math.round(health.droppedReports).toLocaleString()} hot={health.droppedReportDelta > 0} />
+      <HealthFact label="Failed hist. total" value={Math.round(health.failedBatches).toLocaleString()} hot={health.failedBatchDelta > 0} />
+      <HealthFact label="Collect error total" value={Math.round(health.collectErrors).toLocaleString()} hot={health.collectErrorDelta > 0 || health.failingSources > 0} />
+      <HealthFact label="Event streams" value={health.failingEventStreams > 0 ? `${health.failingEventStreams} down` : 'OK'} hot={health.failingEventStreams > 0 || health.eventStreamErrorDelta > 0} />
+      <HealthFact label="Spool backlog" value={`${Math.round(health.spoolFiles).toLocaleString()} files`} hot={health.spoolFiles > 0} />
+      <HealthFact label="Spooled hist. total" value={Math.round(health.spooledBatches).toLocaleString()} hot={health.spooledBatchDelta > 0} />
     </div>
   );
 }
@@ -1167,13 +1173,17 @@ function hostAgentEventStreamRowsFromMetrics(series: MetricSeries[]) {
 
   return streams.map((stream) => {
     const streamSeries = (name: string) => series.find((item) => item.name === name && stringAttribute(item, 'collector.event_stream') === stream);
+    const errorSeries = streamSeries('host_agent.event_stream.errors_total');
+    const restartSeries = streamSeries('host_agent.event_stream.restarts_total');
     return {
       stream,
       enabled: latestMetricValue(streamSeries('host_agent.event_stream.enabled')) >= 1,
       running: latestMetricValue(streamSeries('host_agent.event_stream.running')) >= 1,
       eventsTotal: latestMetricValue(streamSeries('host_agent.event_stream.events_total')),
-      errorsTotal: latestMetricValue(streamSeries('host_agent.event_stream.errors_total')),
-      restartsTotal: latestMetricValue(streamSeries('host_agent.event_stream.restarts_total')),
+      errorsDelta: counterWindowDelta(errorSeries),
+      errorsTotal: latestMetricValue(errorSeries),
+      restartsDelta: counterWindowDelta(restartSeries),
+      restartsTotal: latestMetricValue(restartSeries),
       lastEventAgeSeconds: latestMetricValue(streamSeries('host_agent.event_stream.last_event_age_seconds')),
     };
   }).sort((left, right) => left.stream.localeCompare(right.stream));
@@ -1191,28 +1201,33 @@ function buildHostAgentHealth(
     up?: MetricSeries;
   },
   sourceRows: Array<{ success: boolean }>,
-  eventStreamRows: Array<{ enabled: boolean; errorsTotal: number; running: boolean }>,
+  eventStreamRows: Array<{ enabled: boolean; errorsDelta: number; errorsTotal: number; restartsDelta: number; running: boolean }>,
 ): HostAgentHealth {
   const queueDepth = latestMetricValue(series.queueDepth);
   const droppedReports = latestMetricValue(series.dropped);
+  const droppedReportDelta = counterWindowDelta(series.dropped);
   const failedBatches = latestMetricValue(series.failedBatches);
+  const failedBatchDelta = counterWindowDelta(series.failedBatches);
   const collectErrors = latestMetricValue(series.collectErrors);
+  const collectErrorDelta = counterWindowDelta(series.collectErrors);
   const spooledBatches = latestMetricValue(series.spooledBatches);
+  const spooledBatchDelta = counterWindowDelta(series.spooledBatches);
   const spoolFiles = latestMetricValue(series.spoolFiles);
   const sentReports = latestMetricValue(series.sentReports);
   const up = latestMetricValue(series.up);
   const failingSources = sourceRows.filter((row) => !row.success).length;
   const failingEventStreams = eventStreamRows.filter((row) => row.enabled && !row.running).length;
   const eventStreamErrors = eventStreamRows.reduce((sum, row) => sum + row.errorsTotal, 0);
-  const status: HostAgentHealth['status'] = up < 1 || droppedReports > 0
+  const eventStreamErrorDelta = eventStreamRows.reduce((sum, row) => sum + row.errorsDelta + row.restartsDelta, 0);
+  const status: HostAgentHealth['status'] = up < 1 || droppedReportDelta > 0
     ? 'danger'
-    : failedBatches > 0
-      || collectErrors > 0
-      || spooledBatches > 0
+    : failedBatchDelta > 0
+      || collectErrorDelta > 0
+      || spooledBatchDelta > 0
       || spoolFiles > 0
       || failingSources > 0
       || failingEventStreams > 0
-      || eventStreamErrors > 0
+      || eventStreamErrorDelta > 0
       || queueDepth > 8
       ? 'warning'
       : 'ready';
@@ -1220,14 +1235,19 @@ function buildHostAgentHealth(
 
   return {
     collectErrors,
+    collectErrorDelta,
     droppedReports,
+    droppedReportDelta,
     eventStreamErrors,
+    eventStreamErrorDelta,
     failedBatches,
+    failedBatchDelta,
     failingEventStreams,
     failingSources,
     queueDepth,
     sentReports,
     spooledBatches,
+    spooledBatchDelta,
     spoolFiles,
     status,
     statusLabel,
@@ -1236,6 +1256,16 @@ function buildHostAgentHealth(
 
 function latestMetricValue(series?: MetricSeries) {
   return series?.points.at(-1)?.value ?? 0;
+}
+
+function counterWindowDelta(series?: MetricSeries) {
+  if (!series || series.points.length < 2) return 0;
+
+  return series.points.slice(1).reduce((delta, point, index) => {
+    const previous = series.points[index].value;
+    const current = point.value;
+    return delta + (current >= previous ? current - previous : current);
+  }, 0);
 }
 
 function stringAttribute(series: MetricSeries, name: string) {
