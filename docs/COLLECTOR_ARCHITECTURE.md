@@ -134,9 +134,13 @@ containerd/runtime-shim Go pclntab symbols and emits CRI `RunPodSandbox`,
 optional debug `cni.setup`, and optional OCI/Kata shim uprobe observations.
 RunPodSandbox request metadata and CNI_ARGS identity are emitted both as stable
 attributes and top-level report fields so `startup-callchain` can derive the
-same `k8s-{namespace}-{pod}-pod` sandbox id as CRI/containerd events. Future
-native depth should broaden runtime-boundary profiles and repeated validation
-while preserving the same startup-callchain JSON contract.
+same `k8s-{namespace}-{pod}-pod` sandbox id as CRI/containerd events. OCI bundle
+metadata also distinguishes pod-sandbox identity from workload-container
+identity with `startup.stable_sandbox_id` and `startup.stable_container_id`, so
+later container runtime events can stay attached to the pod sandbox while still
+preserving the raw workload task id. Future native depth should broaden
+runtime-boundary profiles and repeated validation while preserving the same
+startup-callchain JSON contract.
 
 `startup-callchain` is the report-ingestion bridge for that later high-fidelity
 path. External uprobe/eBPF exporters can write JSON/JSONL or be invoked by

@@ -167,7 +167,12 @@ CNISetup remains a pending debug boundary instead of being used for core CNI
 cost attribution. Use
 `EXPECT_RUNTIME_BOUNDARY_CORRELATION=true` to assert OCI/Kata exec/uprobe
 runtime boundaries carry an exact sandbox correlation marker instead of relying
-on broad time-window attribution. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
+on broad time-window attribution. For workload-container runtime events, OCI
+bundle metadata keeps `startup.stable_sandbox_id` at the pod sandbox level and
+adds `startup.stable_container_id` for the workload container, while preserving
+`containerd.sandbox_container_id` and the raw workload `containerdId`. This lets
+later container events remain linked to their pod sandbox without losing the
+workload task id. `--containerd-config` (or `RUNTIMEPULSE_CONTAINERD_CONFIG`)
 points the probe at the same `config.toml` used by the target containerd so it
 can infer `state`/`root` task bundle directories even when the shim argv only
 contains `-namespace`/`-id` plus the runtime root. This is especially useful for
