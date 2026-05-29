@@ -367,7 +367,10 @@ such as `image_ref`, `requested_blocks`, `hit_blocks`, `duration_ms`, and
 `image_ref`, `image`, `digest`, `snapshotter`, `layer`, `phase`, or `stage`;
 metrics with names containing `image_cache`, `snapshotter`, `nydus`, `stargz`,
 or `overlaybd` are normalized into the same cache metrics, layer counters,
-prefetch records, and timeline spans. RuntimePulse-shaped JSON rows describe one image
+prefetch records, and timeline spans. If an exporter only reports per-layer
+cache counters, RuntimePulse derives the image-level lazy cache ratio and
+read-byte metrics from the layer totals and marks those metrics with
+`snapshotter.metricSource=layers`. RuntimePulse-shaped JSON rows describe one image
 observation:
 
 ```json

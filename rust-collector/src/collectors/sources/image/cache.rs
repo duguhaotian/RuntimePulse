@@ -228,6 +228,16 @@ impl CollectorPlugin for ImageCachePlugin {
                     &image_id,
                     snapshotter,
                     cache,
+                    "report",
+                ));
+            } else if let Some(cache) = aggregate_layer_cache(&report.layers) {
+                output.metrics.extend(cache_metrics(
+                    timestamp,
+                    &config.node_id,
+                    &image_id,
+                    snapshotter,
+                    &cache,
+                    "layers",
                 ));
             }
             output.metrics.extend(layer_cache_metrics(
@@ -321,6 +331,54 @@ fn layer_cache_summary(layers: &[LayerCacheReport]) -> CacheSummary {
             .iter()
             .filter_map(|layer| layer.remote_read_bytes)
             .sum(),
+    }
+}
+
+fn aggregate_layer_cache(layers: &[LayerCacheReport]) -> Option<CacheReport> {
+    let requested_blocks = optional_sum(layers.iter().filter_map(|layer| layer.requested_blocks));
+    let hit_blocks = optional_sum(layers.iter().filter_map(|layer| layer.hit_blocks));
+    let local_read_bytes = optional_sum(layers.iter().filter_map(|layer| layer.local_read_bytes));
+    let remote_read_bytes = optional_sum(layers.iter().filter_map(|layer| layer.remote_read_bytes));
+    let block_size_bytes = first_consistent_block_size(layers);
+
+    if requested_blocks.is_none()
+        && hit_blocks.is_none()
+        && local_read_bytes.is_none()
+        && remote_read_bytes.is_none()
+        && block_size_bytes.is_none()
+    {
+        return None;
+    }
+
+    Some(CacheReport {
+        requested_blocks,
+        hit_blocks,
+        local_read_bytes,
+        remote_read_bytes,
+        block_size_bytes,
+    })
+}
+
+fn optional_sum(values: impl Iterator<Item = u64>) -> Option<u64> {
+    let mut seen = false;
+    let mut sum = 0_u64;
+    for value in values {
+        seen = true;
+        sum = sum.saturating_add(value);
+    }
+    seen.then_some(sum)
+}
+
+fn first_consistent_block_size(layers: &[LayerCacheReport]) -> Option<u64> {
+    let mut sizes = layers
+        .iter()
+        .filter_map(|layer| layer.block_size_bytes)
+        .filter(|size| *size > 0);
+    let first = sizes.next()?;
+    if sizes.all(|size| size == first) {
+        Some(first)
+    } else {
+        None
     }
 }
 
@@ -1563,6 +1621,7 @@ fn cache_metrics(
     image_id: &str,
     snapshotter: &str,
     cache: &CacheReport,
+    metric_source: &str,
 ) -> Vec<MetricSample> {
     let requested = cache.requested_blocks.unwrap_or(0);
     let hit = cache.hit_blocks.unwrap_or(0);
@@ -1598,6 +1657,7 @@ fn cache_metrics(
         metric.attributes = Some(Map::from_iter([
             ("collector.source".to_string(), json!("image-cache")),
             ("snapshotter".to_string(), json!(snapshotter)),
+            ("snapshotter.metricSource".to_string(), json!(metric_source)),
         ]));
         metric
     })
@@ -1844,6 +1904,33 @@ JSON"#;
             reports[0].download_timeline.as_ref().unwrap()[0].duration_ms,
             10.0
         );
+    }
+
+    #[test]
+    fn derives_image_cache_metrics_from_layer_only_reports() {
+        let command = r#"cat <<'JSON'
+{"timestamp":"2026-05-25T00:00:00.000Z","imageRef":"registry.example/layers-only:v1","snapshotter":"stargz","layers":[{"id":"layer-a","requestedBlocks":40,"hitBlocks":30,"localReadBytes":3000,"remoteReadBytes":1000,"blockSizeBytes":131072},{"id":"layer-b","requestedBlocks":20,"hitBlocks":15,"localReadBytes":2000,"remoteReadBytes":500,"blockSizeBytes":131072}]}
+JSON"#;
+        let mut plugin =
+            ImageCachePlugin::new(None, Some(command.to_string()), Duration::from_secs(5));
+        let output = plugin.collect(Utc::now(), &test_config()).unwrap();
+
+        let hit_ratio = output
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "image.lazy.cache_hit_ratio")
+            .expect("aggregate cache hit ratio metric");
+        assert_eq!(hit_ratio.value, 0.75);
+        assert_eq!(
+            hit_ratio
+                .attributes
+                .as_ref()
+                .and_then(|attrs| attrs.get("snapshotter.metricSource")),
+            Some(&json!("layers"))
+        );
+        assert!(output.metrics.iter().any(|metric| {
+            metric.name == "image.lazy.remote_read_bytes" && metric.value == 1500.0
+        }));
     }
 
     #[test]
