@@ -756,30 +756,28 @@ fn apply_event_report_defaults(report: &mut StartupCallchainReport, fallback_tim
         }
     }
     if report.k8s_namespace.trim().is_empty() {
-        if let Some(value) =
-            first_event_string(&report.raw_events, |event| event.k8s_namespace.as_deref())
-        {
+        if let Some(value) = first_event_string(&report.raw_events, event_k8s_namespace) {
             report.k8s_namespace = value;
         }
     }
     if report.pod_name.trim().is_empty() {
-        if let Some(value) =
-            first_event_string(&report.raw_events, |event| event.pod_name.as_deref())
-        {
+        if let Some(value) = first_event_string(&report.raw_events, event_pod_name) {
             report.pod_name = value;
         }
     }
     if report.container_name.trim().is_empty() {
-        if let Some(value) =
-            first_event_string(&report.raw_events, |event| event.container_name.as_deref())
-        {
+        if let Some(value) = first_event_string(&report.raw_events, event_container_name) {
             report.container_name = value;
         }
     }
+    if report.container_name.trim().is_empty()
+        && !report.k8s_namespace.trim().is_empty()
+        && !report.pod_name.trim().is_empty()
+    {
+        report.container_name = "pod".to_string();
+    }
     if report.pod_uid.trim().is_empty() {
-        if let Some(value) =
-            first_event_string(&report.raw_events, |event| event.pod_uid.as_deref())
-        {
+        if let Some(value) = first_event_string(&report.raw_events, event_pod_uid) {
             report.pod_uid = value;
         }
     }
@@ -818,6 +816,42 @@ where
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn event_k8s_namespace(event: &UprobeEventReport) -> Option<&str> {
+    event
+        .k8s_namespace
+        .as_deref()
+        .or_else(|| event_attribute_string(event, &["k8s.namespace", "podNamespace"]))
+}
+
+fn event_pod_name(event: &UprobeEventReport) -> Option<&str> {
+    event
+        .pod_name
+        .as_deref()
+        .or_else(|| event_attribute_string(event, &["k8s.pod", "podName"]))
+}
+
+fn event_container_name(event: &UprobeEventReport) -> Option<&str> {
+    event
+        .container_name
+        .as_deref()
+        .or_else(|| event_attribute_string(event, &["k8s.container", "containerName"]))
+}
+
+fn event_pod_uid(event: &UprobeEventReport) -> Option<&str> {
+    event
+        .pod_uid
+        .as_deref()
+        .or_else(|| event_attribute_string(event, &["k8s.pod_uid", "podUid"]))
+}
+
+fn event_attribute_string<'a>(event: &'a UprobeEventReport, keys: &[&str]) -> Option<&'a str> {
+    let attributes = event.attributes.as_ref()?;
+    keys.iter()
+        .filter_map(|key| attributes.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
 }
 
 fn earliest_event_timestamp(events: &[UprobeEventReport]) -> Option<String> {
@@ -3068,6 +3102,57 @@ mod tests {
                 && span.trace_id == "cri-containerd-startup-sandbox-jsonl"
                 && span.duration_ms == 500.0
         }));
+    }
+
+    #[test]
+    fn derives_report_identity_from_uprobe_attributes() {
+        let config = test_config();
+        let content = r#"{
+          "source":"runtimepulse-startup-probe",
+          "events":[{
+            "eventType":"enter",
+            "requestId":"runpod-attrs",
+            "function":"RunPodSandbox",
+            "timestamp":"2026-05-26T01:00:00.000Z",
+            "runtimeType":"runc",
+            "attributes":{
+              "k8s.namespace":"default",
+              "k8s.pod":"runtimepulse-attrs",
+              "k8s.pod_uid":"attrs-uid",
+              "cri.runtime_handler":"runc",
+              "startup.probe.req_identity":"runpod-request"
+            }
+          },{
+            "eventType":"exit",
+            "requestId":"runpod-attrs",
+            "function":"RunPodSandbox",
+            "timestamp":"2026-05-26T01:00:00.500Z",
+            "attributes":{
+              "k8s.namespace":"default",
+              "k8s.pod":"runtimepulse-attrs",
+              "k8s.pod_uid":"attrs-uid"
+            }
+          }]
+        }"#;
+
+        let output = startup_callchain_output_from_content(content, Utc::now(), &config).unwrap();
+
+        assert_eq!(
+            output.metadata.sandboxes[0]["id"],
+            json!("k8s-default-runtimepulse-attrs-pod")
+        );
+        assert_eq!(
+            output.metadata.sandboxes[0]["workloadId"],
+            json!("attrs-uid")
+        );
+        assert!(output.traces.iter().all(|span| {
+            span.trace_id == "cri-containerd-startup-k8s-default-runtimepulse-attrs-pod"
+                && span.sandbox_id.as_deref() == Some("k8s-default-runtimepulse-attrs-pod")
+        }));
+        assert_eq!(
+            output.events[0].attributes["k8s.namespace"],
+            json!("default")
+        );
     }
 
     #[test]
