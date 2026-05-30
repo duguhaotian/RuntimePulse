@@ -2918,6 +2918,30 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   gap: 12px;
 }
 
+.waterfall-group {
+  display: grid;
+  gap: 8px;
+}
+
+.waterfall-group + .waterfall-group {
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+  margin-top: 6px;
+  padding-top: 12px;
+}
+
+.waterfall-group-header {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  justify-content: space-between;
+}
+
+.waterfall-group-header strong {
+  color: #f8fafc;
+  font-size: 12px;
+}
+
 .waterfall-scale {
   color: var(--muted-2);
   font-size: 11px;
