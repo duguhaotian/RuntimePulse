@@ -18,6 +18,7 @@ import fcntl
 import json
 import os
 import re
+import select
 import shutil
 import struct
 import signal
@@ -208,6 +209,104 @@ def resolve_binary(path_or_name: str) -> str:
     if os.path.isabs(path_or_name):
         return path_or_name
     return shutil.which(path_or_name) or path_or_name
+
+
+def proc_start_time(pid: int) -> str:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().split()
+        return fields[21] if len(fields) > 21 else ""
+    except (OSError, IndexError):
+        return ""
+
+
+def proc_exe(pid: int) -> str:
+    try:
+        return os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        return ""
+
+
+def proc_tgid(pid: int) -> int:
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("Tgid:"):
+                return int(line.split()[1])
+    except (OSError, IndexError, ValueError):
+        return pid
+    return pid
+
+
+def discover_containerd_target_by_pid(pid: int, binary: str) -> ContainerdTarget | None:
+    exe = proc_exe(pid)
+    if not exe:
+        return None
+    binary_path = resolve_binary(binary)
+    binary_real = os.path.realpath(binary_path) if binary_path else ""
+    binary_base = basename(binary_path) or "containerd"
+    if binary_real and exe != binary_real and basename(exe) != binary_base:
+        return None
+    if not binary_real and basename(exe) != binary_base:
+        return None
+    start_time = proc_start_time(pid)
+    return ContainerdTarget(
+        pid=pid,
+        exe=exe,
+        start_time=start_time,
+        instance_id=f"containerd:{pid}:{start_time or 'unknown'}",
+    )
+
+
+def discover_containerd_targets(binary: str) -> list[ContainerdTarget]:
+    binary_path = resolve_binary(binary)
+    binary_real = os.path.realpath(binary_path) if binary_path else ""
+    binary_base = basename(binary_path) or "containerd"
+    targets: list[ContainerdTarget] = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        pid = int(proc.name)
+        target = discover_containerd_target_by_pid(pid, binary_path or binary_base)
+        if target:
+            targets.append(target)
+    return sorted(targets, key=lambda target: target.pid)
+
+
+def descendant_pids(root_pid: int) -> set[int]:
+    children_by_parent: dict[int, list[int]] = {}
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            status = (proc / "status").read_text()
+        except OSError:
+            continue
+        ppid = 0
+        for line in status.splitlines():
+            if line.startswith("PPid:"):
+                try:
+                    ppid = int(line.split()[1])
+                except (IndexError, ValueError):
+                    ppid = 0
+                break
+        if ppid:
+            children_by_parent.setdefault(ppid, []).append(int(proc.name))
+    result: set[int] = set()
+    stack = list(children_by_parent.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        if pid in result:
+            continue
+        result.add(pid)
+        stack.extend(children_by_parent.get(pid, []))
+    return result
+
+
+def thread_pids(root_pid: int) -> set[int]:
+    tasks = Path(f"/proc/{root_pid}/task")
+    try:
+        return {int(item.name) for item in tasks.iterdir() if item.name.isdigit()}
+    except OSError:
+        return set()
 
 
 def parse_elf_load_segments(data: bytes) -> list[tuple[int, int, int, int]]:
@@ -465,9 +564,9 @@ def bpftrace_string(value: str) -> str:
     return json.dumps(value)
 
 
-def build_bpftrace_program(candidates: set[str], duration_ms: int, argv_slots: int, env_slots: int, go_uprobes: list[GoUprobeSpec] | None = None) -> str:
+def build_bpftrace_program(candidates: set[str], duration_ms: int, argv_slots: int, env_slots: int, go_uprobes: list[GoUprobeSpec] | None = None, trace_all_execs: bool = False) -> str:
     predicate = ""
-    if candidates:
+    if candidates and not trace_all_execs:
         comparisons = [f"str(args->filename) == {bpftrace_string(item)}" for item in sorted(candidates)]
         predicate = "/" + " || ".join(comparisons) + "/"
 
@@ -491,6 +590,11 @@ tracepoint:syscalls:sys_enter_execve
 {predicate}
 {{
   printf({bpftrace_string(format_string)}, {printf_values});
+}}
+
+tracepoint:sched:sched_process_fork
+{{
+  printf("RP_PROC_FORK\\t%d\\t%d\\t%s\\n", args->parent_pid, args->child_pid, args->child_comm);
 }}
 
 tracepoint:sched:sched_process_exit
@@ -535,6 +639,37 @@ class ExecObservation:
     def request_id(self) -> str:
         key = self.cri_sandbox_id or self.containerd_id or self.sandbox_id or "unknown"
         return f"exec-{self.pid}-{sanitize_id(basename(self.binary))}-{sanitize_id(key)}"
+
+
+@dataclass
+class ContainerdTarget:
+    pid: int
+    exe: str
+    start_time: str
+    instance_id: str
+
+
+@dataclass
+class ProcessRoute:
+    pid: int
+    ppid: int
+    containerd_pid: int
+    containerd_instance_id: str
+    group: str = ""
+    group_root_pid: int = 0
+    group_root_binary: str = ""
+    cni_root_plugin: str = ""
+    cni_root_binary: str = ""
+    runtime_root_binary: str = ""
+    sandbox_id: str = ""
+    cri_sandbox_id: str = ""
+    containerd_id: str = ""
+    containerd_namespace: str = ""
+    runtime_type: str = ""
+    cni_command: str = ""
+    cni_netns: str = ""
+    cni_netns_id: str = ""
+    attributes: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -838,6 +973,14 @@ def exec_startup_phase(role: str) -> str:
     return "process"
 
 
+def routed_startup_phase(group: str, role: str) -> str:
+    if group == "cni":
+        return "sandbox-network" if role == "cni" else "sandbox-network-helper"
+    if group == "runtime":
+        return "containerd-task"
+    return exec_startup_phase(role)
+
+
 def go_uprobe_startup_phase(role: str) -> str:
     if role == "cri":
         return "sandbox-cri"
@@ -992,6 +1135,19 @@ def infer_role(binary: str, argv: list[str], env: dict[str, str]) -> str:
     return "exec"
 
 
+def is_runtime_shim_binary(base: str) -> bool:
+    return base.startswith("containerd-shim-")
+
+
+def process_group_for_observation(obs: ExecObservation) -> str:
+    base = basename(obs.binary).lower()
+    if obs.role == "cni" or obs.cni_command or obs.cni_plugin:
+        return "cni"
+    if obs.role in {"oci", "kata"} or is_runtime_shim_binary(base):
+        return "runtime"
+    return ""
+
+
 def is_likely_cni_binary(base: str) -> bool:
     return base in {
         "bridge", "loopback", "portmap", "firewall", "host-local", "bandwidth", "tuning",
@@ -1091,7 +1247,23 @@ def namespace_from_bundle(bundle: str) -> str:
     return ""
 
 
-def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str, status: str = "ok") -> dict[str, object]:
+def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str, status: str = "ok", route: ProcessRoute | None = None) -> dict[str, object]:
+    attributes = dict(obs.attributes)
+    if route:
+        attributes["containerd.pid"] = route.containerd_pid
+        attributes["containerd.instance_id"] = route.containerd_instance_id
+        if route.group:
+            attributes["process.group"] = route.group
+        if route.group_root_pid:
+            attributes["process.group_root_pid"] = route.group_root_pid
+        if route.group_root_binary:
+            attributes["process.group_root_binary"] = route.group_root_binary
+        if route.cni_root_plugin:
+            attributes["cni.root.plugin"] = route.cni_root_plugin
+        if route.cni_root_binary:
+            attributes["cni.root.binary"] = route.cni_root_binary
+        if route.runtime_root_binary:
+            attributes["runtime.root.binary"] = route.runtime_root_binary
     event: dict[str, object] = {
         "eventType": event_type,
         "requestId": obs.request_id,
@@ -1108,7 +1280,7 @@ def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str
         "pid": obs.pid,
         "ppid": obs.ppid,
         "argv": obs.argv,
-        "attributes": dict(obs.attributes),
+        "attributes": attributes,
     }
     if obs.env:
         event["env"] = obs.env
@@ -1134,10 +1306,28 @@ def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str
     return event
 
 
-def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, default_runtime_type: str, forced_sandbox_id: str, namespaces: set[str] | None = None) -> tuple[list[dict[str, object]], dict[str, float], str, str, str]:
+def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, default_runtime_type: str, forced_sandbox_id: str, namespaces: set[str] | None = None, containerd_targets: list[ContainerdTarget] | None = None, tree_routing: bool = False, containerd_binary: str = "") -> tuple[list[dict[str, object]], dict[str, float], str, str, str]:
     pending: dict[int, ExecObservation] = {}
     pending_go: dict[str, GoUprobeObservation] = {}
     go_meta_by_thread: dict[tuple[int, int], dict[str, str]] = {}
+    routes: dict[int, ProcessRoute] = {}
+    containerd_by_pid: dict[int, ContainerdTarget] = {}
+    for target in containerd_targets or []:
+        containerd_by_pid[target.pid] = target
+        for thread_pid in thread_pids(target.pid) | {target.pid}:
+            routes[thread_pid] = ProcessRoute(
+                pid=thread_pid,
+                ppid=0,
+                containerd_pid=target.pid,
+                containerd_instance_id=target.instance_id,
+            )
+        for descendant_pid in descendant_pids(target.pid) if tree_routing else set():
+            routes.setdefault(descendant_pid, ProcessRoute(
+                pid=descendant_pid,
+                ppid=0,
+                containerd_pid=target.pid,
+                containerd_instance_id=target.instance_id,
+            ))
     events: list[dict[str, object]] = []
     runtime_type = default_runtime_type or "unknown"
     sandbox_id = forced_sandbox_id
@@ -1169,24 +1359,106 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
             else:
                 pending_go.pop(obs.request_id, None)
             events.append(event_from_go_uprobe(obs, event_type, runtime_type, "", ""))
+        elif raw.startswith("RP_PROC_FORK\t"):
+            parts = raw.rstrip("\n").split("\t")
+            if len(parts) < 3:
+                continue
+            try:
+                parent_pid = int(parts[1])
+                child_pid = int(parts[2])
+            except ValueError:
+                continue
+            if not tree_routing:
+                continue
+            parent_pid = proc_tgid(parent_pid)
+            target = discover_containerd_target_by_pid(child_pid, containerd_binary) if containerd_binary else None
+            if target:
+                containerd_by_pid[target.pid] = target
+                routes[target.pid] = ProcessRoute(
+                    pid=target.pid,
+                    ppid=parent_pid,
+                    containerd_pid=target.pid,
+                    containerd_instance_id=target.instance_id,
+                )
+                continue
+            parent_route = routes.get(parent_pid)
+            if parent_route:
+                routes[child_pid] = ProcessRoute(
+                    pid=child_pid,
+                    ppid=parent_pid,
+                    containerd_pid=parent_route.containerd_pid,
+                    containerd_instance_id=parent_route.containerd_instance_id,
+                    group=parent_route.group,
+                    group_root_pid=parent_route.group_root_pid,
+                    group_root_binary=parent_route.group_root_binary,
+                    cni_root_plugin=parent_route.cni_root_plugin,
+                    cni_root_binary=parent_route.cni_root_binary,
+                    runtime_root_binary=parent_route.runtime_root_binary,
+                    sandbox_id=parent_route.sandbox_id,
+                    cri_sandbox_id=parent_route.cri_sandbox_id,
+                    containerd_id=parent_route.containerd_id,
+                    containerd_namespace=parent_route.containerd_namespace,
+                    runtime_type=parent_route.runtime_type,
+                    cni_command=parent_route.cni_command,
+                    cni_netns=parent_route.cni_netns,
+                    cni_netns_id=parent_route.cni_netns_id,
+                    attributes=dict(parent_route.attributes),
+                )
         elif raw.startswith("RP_EXEC_ENTER\t"):
             obs = parse_exec_line(raw, argv_slots, env_slots, now, default_runtime_type, forced_sandbox_id)
             if not obs:
                 continue
-            if obs.role != "helper" and not observation_matches_namespace(obs, namespaces):
-                continue
-            if obs.role == "helper" and not observation_matches_namespace(obs, namespaces):
-                parent = pending.get(obs.ppid)
-                if parent and (not namespaces or observation_matches_namespace(parent, namespaces)):
-                    inherit_parent_context(obs, parent)
-                else:
+            if tree_routing:
+                direct_parent_route = routes.get(obs.ppid)
+                parent_tgid_route = routes.get(proc_tgid(obs.ppid))
+                parent_route = direct_parent_route or parent_tgid_route
+                if parent_route and (
+                    not direct_parent_route
+                    or not parent_route.group
+                    or (
+                        obs.role in {"helper", "cni"}
+                        and not parent_route.cni_root_plugin
+                    )
+                ):
+                    live_parent_route = route_from_live_parent_process(obs.ppid, parent_tgid_route)
+                    if live_parent_route:
+                        routes[obs.ppid] = live_parent_route
+                        parent_route = live_parent_route
+                target = containerd_by_pid.get(obs.pid)
+                if target:
+                    routes[obs.pid] = ProcessRoute(
+                        pid=target.pid,
+                        ppid=obs.ppid,
+                        containerd_pid=target.pid,
+                        containerd_instance_id=target.instance_id,
+                    )
                     continue
+                if not parent_route:
+                    continue
+                route = route_for_observation(obs, parent_route, parent_route)
+                if not route.group:
+                    routes[obs.pid] = route
+                    continue
+                inherit_route_context(obs, route)
+                obs.attributes["startup.phase"] = routed_startup_phase(route.group, obs.role)
+                obs.attributes["startup.phase.source"] = "process-tree-route"
+                routes[obs.pid] = route
+            else:
+                route = None
+                if obs.role != "helper" and not observation_matches_namespace(obs, namespaces):
+                    continue
+                if obs.role == "helper" and not observation_matches_namespace(obs, namespaces):
+                    parent = pending.get(obs.ppid)
+                    if parent and (not namespaces or observation_matches_namespace(parent, namespaces)):
+                        inherit_parent_context(obs, parent)
+                    else:
+                        continue
             pending[obs.pid] = obs
             runtime_type = choose_runtime_type(runtime_type, obs.runtime_type)
             sandbox_id = sandbox_id or obs.sandbox_id
             cri_sandbox_id = cri_sandbox_id or obs.cri_sandbox_id
             containerd_id = containerd_id or obs.containerd_id
-            events.append(event_from_observation(obs, "enter", obs.observed_at))
+            events.append(event_from_observation(obs, "enter", obs.observed_at, route=route if tree_routing else None))
         elif raw.startswith("RP_PROC_EXIT\t"):
             parts = raw.rstrip("\n").split("\t")
             if len(parts) < 2:
@@ -1197,13 +1469,15 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
                 continue
             obs = pending.pop(pid, None)
             if obs:
-                events.append(event_from_observation(obs, "exit", now))
+                events.append(event_from_observation(obs, "exit", now, route=routes.get(pid) if tree_routing else None))
+            if tree_routing:
+                routes.pop(pid, None)
 
     # If a short capture window ends before process exit, emit complete events with a
     # minimal duration so the startup-callchain normalizer still surfaces the binary.
     for obs in pending.values():
         exit_time = utc_now()
-        event = event_from_observation(obs, "exit", exit_time)
+        event = event_from_observation(obs, "exit", exit_time, route=routes.get(obs.pid) if tree_routing else None)
         event["durationMs"] = 1
         event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
         events.append(event)
@@ -1733,6 +2007,127 @@ def inherit_parent_context(obs: ExecObservation, parent: ExecObservation) -> Non
                 obs.attributes.setdefault(key, parent.attributes[key])
 
 
+def inherit_route_context(obs: ExecObservation, route: ProcessRoute) -> None:
+    obs.sandbox_id = obs.sandbox_id or route.sandbox_id
+    obs.cri_sandbox_id = obs.cri_sandbox_id or route.cri_sandbox_id
+    obs.containerd_id = obs.containerd_id or route.containerd_id
+    obs.containerd_namespace = obs.containerd_namespace or route.containerd_namespace
+    obs.runtime_type = choose_runtime_type(route.runtime_type, obs.runtime_type)
+    if route.cni_command and not obs.cni_command:
+        obs.cni_command = route.cni_command
+    if route.cni_netns and not obs.cni_netns:
+        obs.cni_netns = route.cni_netns
+    if route.cni_netns_id and not obs.cni_netns_id:
+        obs.cni_netns_id = route.cni_netns_id
+    for key, value in route.attributes.items():
+        if key.startswith("cni.") or key.startswith("k8s.") or key.startswith("containerd."):
+            obs.attributes.setdefault(key, value)
+
+
+def route_for_observation(
+    obs: ExecObservation,
+    parent_route: ProcessRoute | None,
+    target_route: ProcessRoute,
+) -> ProcessRoute:
+    explicit_group = process_group_for_observation(obs)
+    inherited_group = parent_route.group if parent_route else ""
+    group = inherited_group or explicit_group
+
+    if parent_route and group:
+        route = ProcessRoute(
+            pid=obs.pid,
+            ppid=obs.ppid,
+            containerd_pid=parent_route.containerd_pid,
+            containerd_instance_id=parent_route.containerd_instance_id,
+            group=group,
+            group_root_pid=parent_route.group_root_pid or obs.pid,
+            group_root_binary=parent_route.group_root_binary or obs.binary,
+            cni_root_plugin=parent_route.cni_root_plugin,
+            cni_root_binary=parent_route.cni_root_binary,
+            runtime_root_binary=parent_route.runtime_root_binary,
+            sandbox_id=parent_route.sandbox_id,
+            cri_sandbox_id=parent_route.cri_sandbox_id,
+            containerd_id=parent_route.containerd_id,
+            containerd_namespace=parent_route.containerd_namespace,
+            runtime_type=parent_route.runtime_type,
+            cni_command=parent_route.cni_command,
+            cni_netns=parent_route.cni_netns,
+            cni_netns_id=parent_route.cni_netns_id,
+            attributes=dict(parent_route.attributes),
+        )
+    else:
+        route = ProcessRoute(
+            pid=obs.pid,
+            ppid=obs.ppid,
+            containerd_pid=target_route.containerd_pid,
+            containerd_instance_id=target_route.containerd_instance_id,
+            group=group,
+            group_root_pid=obs.pid if group else 0,
+            group_root_binary=obs.binary if group else "",
+        )
+
+    if group == "cni":
+        root_plugin = route.cni_root_plugin or obs.cni_plugin or (basename(obs.binary) if obs.role == "cni" else "unknown")
+        route.cni_root_plugin = root_plugin
+        route.cni_root_binary = route.cni_root_binary or obs.binary
+        route.sandbox_id = route.sandbox_id or obs.sandbox_id
+        route.cri_sandbox_id = route.cri_sandbox_id or obs.cri_sandbox_id
+        route.containerd_id = route.containerd_id or obs.containerd_id
+        route.containerd_namespace = route.containerd_namespace or obs.containerd_namespace
+        route.runtime_type = choose_runtime_type(route.runtime_type, obs.runtime_type)
+        route.cni_command = route.cni_command or obs.cni_command
+        route.cni_netns = route.cni_netns or obs.cni_netns
+        route.cni_netns_id = route.cni_netns_id or obs.cni_netns_id
+        route.attributes.update({key: value for key, value in obs.attributes.items() if key.startswith("cni.") or key.startswith("k8s.")})
+    elif group == "runtime":
+        route.runtime_root_binary = route.runtime_root_binary or obs.binary
+        route.sandbox_id = route.sandbox_id or obs.sandbox_id
+        route.cri_sandbox_id = route.cri_sandbox_id or obs.cri_sandbox_id
+        route.containerd_id = route.containerd_id or obs.containerd_id
+        route.containerd_namespace = route.containerd_namespace or obs.containerd_namespace
+        route.runtime_type = choose_runtime_type(route.runtime_type, obs.runtime_type)
+        route.attributes.update({key: value for key, value in obs.attributes.items() if key.startswith("containerd.") or key.startswith("oci.") or key.startswith("k8s.")})
+
+    return route
+
+
+def route_from_live_parent_process(parent_pid: int, parent_route: ProcessRoute) -> ProcessRoute | None:
+    parent_binary = proc_exe(parent_pid)
+    parent_base = basename(parent_binary).lower()
+    if not parent_base:
+        try:
+            parent_base = Path(f"/proc/{parent_pid}/comm").read_text().strip().lower()
+        except OSError:
+            parent_base = ""
+    if not parent_base:
+        return None
+
+    if is_likely_cni_binary(parent_base):
+        return ProcessRoute(
+            pid=parent_pid,
+            ppid=0,
+            containerd_pid=parent_route.containerd_pid,
+            containerd_instance_id=parent_route.containerd_instance_id,
+            group="cni",
+            group_root_pid=parent_pid,
+            group_root_binary=parent_binary or parent_base,
+            cni_root_plugin=parent_base,
+            cni_root_binary=parent_binary or parent_base,
+        )
+    if is_runtime_shim_binary(parent_base) or parent_base in {"runc", "crun", "kata-runtime", "runsc"}:
+        return ProcessRoute(
+            pid=parent_pid,
+            ppid=0,
+            containerd_pid=parent_route.containerd_pid,
+            containerd_instance_id=parent_route.containerd_instance_id,
+            group="runtime",
+            group_root_pid=parent_pid,
+            group_root_binary=parent_binary or parent_base,
+            runtime_root_binary=parent_binary or parent_base,
+        )
+    return None
+
+
 def observation_matches_namespace(obs: ExecObservation, namespaces: set[str] | None) -> bool:
     if not namespaces:
         return True
@@ -1759,12 +2154,24 @@ def summarize_events(events: list[dict[str, object]]) -> dict[str, float]:
     oci = [event for event in enter_events if event.get("role") == "oci"]
     helper = [event for event in enter_events if event.get("role") == "helper" or is_helper_binary(basename(str(event.get("binary", ""))))]
     cri = [event for event in enter_events if event.get("role") == "cri"]
+    cni_group = [event for event in enter_events if event_attribute(event, "process.group") == "cni"]
+    runtime_group = [event for event in enter_events if event_attribute(event, "process.group") == "runtime"]
+    ignored = [event for event in enter_events if event.get("function") == "execve" and not event_attribute(event, "process.group")]
+    containerd_instances = {
+        str(event_attribute(event, "containerd.instance_id") or "")
+        for event in enter_events
+        if event_attribute(event, "containerd.instance_id")
+    }
     return {
         "observedExecCount": float(len(enter_events)),
         "observedCriUprobeCount": float(len(cri)),
         "observedCniExecCount": float(len(cni)),
         "observedOciExecCount": float(len(oci)),
         "observedHelperExecCount": float(len(helper)),
+        "observedCniGroupExecCount": float(len(cni_group)),
+        "observedRuntimeGroupExecCount": float(len(runtime_group)),
+        "ignoredExecCount": float(len(ignored)),
+        "observedContainerdInstanceCount": float(len(containerd_instances)),
     }
 
 
@@ -1957,7 +2364,7 @@ def read_bcc_go_uprobe_lines(bpf, symbol_by_index: dict[int, GoUprobeSpec]) -> l
 def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: list[GoUprobeSpec] | None = None) -> list[str]:
     go_uprobes = go_uprobes or []
     bcc_bpf, bcc_symbols = attach_bcc_go_uprobes(go_uprobes) if go_uprobes else (None, {})
-    program = build_bpftrace_program(candidates, args.duration_ms, args.argv_slots, args.env_slots, [])
+    program = build_bpftrace_program(candidates, args.duration_ms, args.argv_slots, args.env_slots, [], args.containerd_tree)
     bpftrace = shutil.which(args.bpftrace) or args.bpftrace
     if not bpftrace or not os.path.exists(bpftrace):
         raise SystemExit(f"bpftrace not found: {args.bpftrace}")
@@ -1975,18 +2382,19 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: lis
         assert proc.stdout is not None
         deadline = time.time() + max(args.duration_ms / 1000.0 + 5.0, 6.0)
         while time.time() < deadline:
-            line = proc.stdout.readline()
-            if line:
-                if line.startswith("RP_STARTUP_PROBE_READY") and args.ready_file:
-                    Path(args.ready_file).write_text(str(proc.pid))
-                if line.startswith("RP_"):
-                    lines.append(line)
-                lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
-                continue
+            readable, _, _ = select.select([proc.stdout], [], [], 0.1)
+            if readable:
+                line = proc.stdout.readline()
+                if line:
+                    if line.startswith("RP_STARTUP_PROBE_READY") and args.ready_file:
+                        Path(args.ready_file).write_text(str(proc.pid))
+                    if line.startswith("RP_"):
+                        lines.append(line)
+                    lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
+                    continue
             lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
             if proc.poll() is not None:
                 break
-            time.sleep(0.01)
         if proc.poll() is None:
             proc.send_signal(signal.SIGINT)
             try:
@@ -2270,6 +2678,8 @@ def export_command(args: argparse.Namespace) -> None:
     candidates.update(candidate_names(cni_binaries))
     candidates.update(candidate_names(runtime_binaries))
     candidates.update(candidate_names(helper_binaries))
+    if args.containerd_tree:
+        candidates.clear()
 
     go_uprobes: list[GoUprobeSpec] = []
     if args.enable_go_uprobes:
@@ -2297,6 +2707,7 @@ def export_command(args: argparse.Namespace) -> None:
         lines = run_bpftrace(args, candidates, go_uprobes)
 
     namespaces = set(split_csv(args.containerd_namespace)) if args.containerd_namespace else None
+    containerd_targets = discover_containerd_targets(args.containerd_binary) if args.containerd_tree else []
     events, summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(
         lines,
         args.argv_slots,
@@ -2304,6 +2715,9 @@ def export_command(args: argparse.Namespace) -> None:
         args.runtime_type,
         args.sandbox_id,
         namespaces,
+        containerd_targets,
+        args.containerd_tree,
+        args.containerd_binary,
     )
     emit_report(
         events,
@@ -2509,6 +2923,34 @@ def self_test() -> None:
         assert workload_attrs["startup.stable_sandbox_id"] == "k8s-default-bundle-demo-pod"
         assert workload_attrs["startup.stable_container_id"] == "k8s-default-bundle-demo-app"
         assert workload_attrs["containerd.sandbox_container_id"] == "raw-sandbox-id"
+
+    tree_lines = [
+        "RP_PROC_FORK\t900\t901\tbridge\n",
+        "RP_EXEC_ENTER\t901\t900\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-tree\tCNI_NETNS=/proc/self/ns/net\t\n",
+        "RP_PROC_FORK\t901\t902\tiptables\n",
+        "RP_EXEC_ENTER\t902\t901\t0\t0\tbridge\t/usr/sbin/iptables\t/usr/sbin/iptables\t-t\tnat\t-S\t\t\t\t\t\n",
+        "RP_PROC_EXIT\t902\tiptables\n",
+        "RP_PROC_EXIT\t901\tbridge\n",
+    ]
+    tree_target = ContainerdTarget(pid=900, exe="/usr/bin/containerd", start_time="42", instance_id="containerd:900:42")
+    tree_events, tree_summary, _tree_runtime, tree_sandbox, _tree_cri = collect_from_stream(
+        tree_lines,
+        6,
+        4,
+        "runc",
+        "",
+        None,
+        [tree_target],
+        True,
+    )
+    assert tree_sandbox == "sandbox-tree"
+    iptables_event = next(event for event in tree_events if event.get("eventType") == "enter" and basename(str(event.get("binary"))) == "iptables")
+    iptables_attrs = iptables_event["attributes"]
+    assert iptables_event["sandboxId"] == "sandbox-tree"
+    assert iptables_attrs["process.group"] == "cni"
+    assert iptables_attrs["cni.root.plugin"] == "bridge"
+    assert iptables_attrs["containerd.instance_id"] == "containerd:900:42"
+    assert tree_summary["observedCniGroupExecCount"] == 2.0
     print("self-test ok")
 
 
@@ -2526,6 +2968,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--enable-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES"), help="attach high-precision Go uprobes to containerd RunPodSandbox symbols")
     export.add_argument("--containerd-binary", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY", shutil.which("containerd") or next((path for path in DEFAULT_CONTAINERD_BINARIES if os.path.exists(path)), "containerd")))
     export.add_argument("--containerd-config", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_CONTAINERD_CONFIG", "")]), help="containerd config.toml used to infer task bundle roots from state/root; may be repeated")
+    export.add_argument("--containerd-tree", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_TREE", True), help="trace all execs/forks and route only current containerd descendant CNI/runtime subtrees")
     export.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd RunPodSandbox Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
     export.add_argument("--enable-cni-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_CNI_GO_UPROBES"), help="also attach containerd/go-cni setup Go uprobes")
     export.add_argument("--cni-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_GO_UPROBE_SYMBOLS", "")]), help="containerd CNI setup Go symbol/pattern to attach; may be repeated; prefix regex: for regex")

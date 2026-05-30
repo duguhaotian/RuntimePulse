@@ -552,6 +552,11 @@ fn run_host_kubelet_events() -> Result<()> {
 fn run_host_startup_callchain() -> Result<()> {
     let mut config = CollectorConfig::from_env()?;
     config.collection_scope = "host".to_string();
+    if let Ok(value) = std::env::var("RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS") {
+        if let Ok(interval_ms) = value.parse::<u64>() {
+            config.interval = std::time::Duration::from_millis(interval_ms.max(1000));
+        }
+    }
 
     let client = Client::new();
     let mut plugin = StartupCallchainPlugin::from_env();

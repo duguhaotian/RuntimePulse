@@ -21,6 +21,13 @@ Current coverage:
   (`--enable-runtime-go-uprobes`), discovered from Go pclntab symbols even when
   the ELF is stripped. Go return probes are available behind the explicit
   experimental `--enable-go-uretprobes` flag only.
+- Containerd process-tree routing (`--containerd-tree`, enabled by default):
+  exec/fork events are accepted only when they descend from the current
+  containerd process, CNI plugin subtrees include helper children such as
+  `iptables`, and runtime shim/runtime subtrees are grouped separately.  The
+  exporter re-discovers containerd by executable/start time when a new
+  containerd process appears, so containerd restarts do not leave the probe
+  pinned to a stale PID.
 - Correlation by `CNI_CONTAINERID`, CNI netns inode id, Kubernetes CNI args,
   containerd shim `-id`, or OCI/containerd bundle path; RunPodSandbox uprobe
   observations are joined to the sandbox report by the observed startup event
@@ -36,9 +43,14 @@ sudo install -m 0755 tools/runtimepulse-startup-probe/runtimepulse-startup-probe
 RUNTIMEPULSE_HOST_AGENT_SOURCES=containerd-events,cri-events,cri-startup-trace,startup-callchain \
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
 RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='sudo runtimepulse-startup-probe export --once --duration-ms 3000 --containerd-namespace k8s.io --include-helpers --enable-go-uprobes' \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='sudo runtimepulse-startup-probe export --once --duration-ms 8000 --containerd-tree --containerd-namespace k8s.io --include-helpers --enable-go-uprobes' \
 runtimepulse-collector host-agent
 ```
+
+For long capture windows, run the startup call-chain source as the dedicated
+`host-startup-callchain` systemd unit in `deploy/systemd/` and keep
+`startup-callchain` out of `RUNTIMEPULSE_HOST_AGENT_SOURCES`; this prevents a
+blocking BPF snapshot from delaying the normal host inventory/event sources.
 
 For local parser validation without attaching BPF:
 

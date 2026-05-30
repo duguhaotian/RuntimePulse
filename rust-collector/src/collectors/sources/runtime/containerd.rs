@@ -1778,7 +1778,6 @@ fn image_event_severity(action: &str) -> &'static str {
     }
 }
 
-
 fn containerd_image_event_has_image_identity(event: &ContainerdImageEvent) -> bool {
     is_meaningful_containerd_image_ref(&event.image_ref)
         && !event.image_ref.starts_with("containerd-content:")
@@ -2217,14 +2216,23 @@ mod tests {
 
         assert!(output.metadata.images.is_empty());
         assert_eq!(output.events.len(), 1);
-        assert_eq!(output.events[0].event_name, "containerd.image.snapshot_remove");
+        assert_eq!(
+            output.events[0].event_name,
+            "containerd.image.snapshot_remove"
+        );
     }
 
     #[test]
     fn meaningful_containerd_image_ref_excludes_unknown_and_snapshots() {
-        assert!(!is_meaningful_containerd_image_ref("containerd/unknown:latest"));
-        assert!(!is_meaningful_containerd_image_ref("containerd-snapshot:k8s.io:sandboxabcdef"));
-        assert!(is_meaningful_containerd_image_ref("registry.k8s.io/pause:3.10"));
+        assert!(!is_meaningful_containerd_image_ref(
+            "containerd/unknown:latest"
+        ));
+        assert!(!is_meaningful_containerd_image_ref(
+            "containerd-snapshot:k8s.io:sandboxabcdef"
+        ));
+        assert!(is_meaningful_containerd_image_ref(
+            "registry.k8s.io/pause:3.10"
+        ));
     }
 
     #[test]

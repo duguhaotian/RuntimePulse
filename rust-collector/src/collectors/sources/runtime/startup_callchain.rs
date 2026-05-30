@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -870,24 +871,23 @@ fn event_containerd_id(event: &UprobeEventReport) -> Option<&str> {
 }
 
 fn event_k8s_namespace(event: &UprobeEventReport) -> Option<&str> {
-    event
-        .k8s_namespace
-        .as_deref()
-        .or_else(|| {
-            event_attribute_string(
-                event,
-                &["k8s.namespace", "podNamespace", "cni.args.K8S_POD_NAMESPACE"],
-            )
-        })
+    event.k8s_namespace.as_deref().or_else(|| {
+        event_attribute_string(
+            event,
+            &[
+                "k8s.namespace",
+                "podNamespace",
+                "cni.args.K8S_POD_NAMESPACE",
+            ],
+        )
+    })
 }
 
 fn event_pod_name(event: &UprobeEventReport) -> Option<&str> {
     event
         .pod_name
         .as_deref()
-        .or_else(|| {
-            event_attribute_string(event, &["k8s.pod", "podName", "cni.args.K8S_POD_NAME"])
-        })
+        .or_else(|| event_attribute_string(event, &["k8s.pod", "podName", "cni.args.K8S_POD_NAME"]))
 }
 
 fn event_container_name(event: &UprobeEventReport) -> Option<&str> {
@@ -898,12 +898,9 @@ fn event_container_name(event: &UprobeEventReport) -> Option<&str> {
 }
 
 fn event_pod_uid(event: &UprobeEventReport) -> Option<&str> {
-    event
-        .pod_uid
-        .as_deref()
-        .or_else(|| {
-            event_attribute_string(event, &["k8s.pod_uid", "podUid", "cni.args.K8S_POD_UID"])
-        })
+    event.pod_uid.as_deref().or_else(|| {
+        event_attribute_string(event, &["k8s.pod_uid", "podUid", "cni.args.K8S_POD_UID"])
+    })
 }
 
 fn event_runtime_type(event: &UprobeEventReport) -> Option<&str> {
@@ -1789,6 +1786,14 @@ struct CniPluginMetrics {
 }
 
 #[derive(Default)]
+struct CniGroupMetrics {
+    count: u64,
+    duration_ms: f64,
+    helper_duration_ms: f64,
+    process_sum_duration_ms: f64,
+}
+
+#[derive(Default)]
 struct ProcessBinaryMetrics {
     count: u64,
     duration_ms: f64,
@@ -1798,8 +1803,12 @@ struct ProcessBinaryMetrics {
 #[derive(Default)]
 struct SpanDerivedMetrics {
     cni_duration_ms: f64,
+    cni_group_duration_ms: f64,
+    cni_group_helper_duration_ms: f64,
+    cni_group_process_sum_duration_ms: f64,
     cni_plugin_count: BTreeSet<String>,
     cni_plugins: BTreeMap<String, CniPluginMetrics>,
+    cni_groups: BTreeMap<String, CniGroupMetrics>,
     process_binaries: BTreeMap<String, ProcessBinaryMetrics>,
     oci_duration_ms: f64,
     oci_call_count: u64,
@@ -1842,6 +1851,18 @@ fn metrics_from_spans(
         let is_cni = is_cni_span(span, &span_name, &binary_name);
         let is_oci = is_oci_span(span, &span_name, &binary_name);
         let is_kata = is_kata_span(&span_name, &binary_name);
+        let process_group = span
+            .attributes
+            .as_ref()
+            .and_then(|attrs| value_string_from_keys(attrs, &["process.group"]))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let cni_root_plugin = span
+            .attributes
+            .as_ref()
+            .and_then(|attrs| value_string_from_keys(attrs, &["cni.root.plugin"]))
+            .filter(|value| !value.trim().is_empty());
+        let is_cni_group = process_group == "cni" || cni_root_plugin.is_some();
 
         if is_cni {
             derived.cni_duration_ms += duration;
@@ -1851,6 +1872,32 @@ fn metrics_from_spans(
                 let plugin_stats = derived.cni_plugins.entry(plugin).or_default();
                 plugin_stats.count += 1;
                 plugin_stats.duration_ms += duration;
+            }
+        }
+
+        if is_cni_group {
+            derived.cni_group_duration_ms += duration;
+            derived.cni_group_process_sum_duration_ms += duration;
+            if is_helper_binary(&binary_name) || role == "helper" {
+                derived.cni_group_helper_duration_ms += duration;
+            }
+            let group_name = cni_root_plugin
+                .clone()
+                .or_else(|| {
+                    let plugin = cni_plugin_name(span, &span_name, &binary_name);
+                    if plugin.is_empty() {
+                        None
+                    } else {
+                        Some(plugin)
+                    }
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let stats = derived.cni_groups.entry(group_name).or_default();
+            stats.count += 1;
+            stats.duration_ms += duration;
+            stats.process_sum_duration_ms += duration;
+            if is_helper_binary(&binary_name) || role == "helper" {
+                stats.helper_duration_ms += duration;
             }
         }
 
@@ -1923,6 +1970,39 @@ fn metrics_from_spans(
     push_metric_if_positive(
         &mut metrics,
         timestamp,
+        "sandbox.startup.cni_group_duration_ms",
+        derived.cni_group_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.cni_group_helper_duration_ms",
+        derived.cni_group_helper_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
+        "sandbox.startup.cni_group_process_sum_duration_ms",
+        derived.cni_group_process_sum_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        attributes,
+        config,
+    );
+    push_metric_if_positive(
+        &mut metrics,
+        timestamp,
         "sandbox.startup.cni_plugin_count",
         derived.cni_plugin_count.len() as f64,
         "count",
@@ -1938,6 +2018,18 @@ fn metrics_from_spans(
             plugin_name,
             stats.count as f64,
             stats.duration_ms,
+            sandbox_id,
+            runtime_type,
+            attributes,
+            config,
+        );
+    }
+    for (group_name, stats) in &derived.cni_groups {
+        push_cni_group_metric_if_positive(
+            &mut metrics,
+            timestamp,
+            group_name,
+            stats,
             sandbox_id,
             runtime_type,
             attributes,
@@ -2296,6 +2388,76 @@ fn push_cni_plugin_metric_if_positive(
     );
 }
 
+fn push_cni_group_metric_if_positive(
+    metrics: &mut Vec<MetricSample>,
+    timestamp: &str,
+    group_name: &str,
+    stats: &CniGroupMetrics,
+    sandbox_id: &str,
+    runtime_type: &str,
+    attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) {
+    if stats.count == 0 && stats.duration_ms <= 0.0 {
+        return;
+    }
+
+    let mut group_attributes = attributes.clone();
+    group_attributes.insert("cni.root.plugin".to_string(), json!(group_name));
+    group_attributes.insert(
+        "startup.metric.kind".to_string(),
+        json!("cni_group_breakdown"),
+    );
+    let metric_prefix = format!(
+        "sandbox.startup.cni.group.{}",
+        sanitize_metric_key(group_name)
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_count"),
+        stats.count as f64,
+        "count",
+        sandbox_id,
+        runtime_type,
+        &group_attributes,
+        config,
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_duration_ms"),
+        stats.duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        &group_attributes,
+        config,
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_helper_duration_ms"),
+        stats.helper_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        &group_attributes,
+        config,
+    );
+    push_metric_if_positive(
+        metrics,
+        timestamp,
+        &format!("{metric_prefix}_process_sum_duration_ms"),
+        stats.process_sum_duration_ms,
+        "ms",
+        sandbox_id,
+        runtime_type,
+        &group_attributes,
+        config,
+    );
+}
+
 fn push_metric_if_positive(
     metrics: &mut Vec<MetricSample>,
     timestamp: &str,
@@ -2506,27 +2668,47 @@ fn run_report_command(command: &str, timeout: Duration) -> Result<String> {
     #[cfg(unix)]
     child_command.process_group(0);
     let mut child = child_command.spawn()?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+
+    let stdout_reader = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        if let Some(mut stream) = stdout.take() {
+            stream.read_to_end(&mut buffer)?;
+        }
+        Ok(buffer)
+    });
+    let stderr_reader = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        if let Some(mut stream) = stderr.take() {
+            stream.read_to_end(&mut buffer)?;
+        }
+        Ok(buffer)
+    });
 
     let started = Instant::now();
     loop {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
-            if !output.status.success() {
+        if let Some(status) = child.try_wait()? {
+            let stdout = join_reader(stdout_reader, "stdout")?;
+            let stderr = join_reader(stderr_reader, "stderr")?;
+            if !status.success() {
                 return Err(CollectorError::Plugin {
                     plugin: "startup-callchain".to_string(),
                     message: format!(
                         "startup call-chain command exited with status {:?}: {}",
-                        output.status.code(),
-                        String::from_utf8_lossy(&output.stderr).trim()
+                        status.code(),
+                        String::from_utf8_lossy(&stderr).trim()
                     ),
                 });
             }
-            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+            return Ok(String::from_utf8_lossy(&stdout).to_string());
         }
 
         if started.elapsed() >= timeout {
             kill_child_tree(&mut child);
             let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             return Err(CollectorError::Plugin {
                 plugin: "startup-callchain".to_string(),
                 message: format!(
@@ -2538,6 +2720,19 @@ fn run_report_command(command: &str, timeout: Duration) -> Result<String> {
 
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| CollectorError::Plugin {
+            plugin: "startup-callchain".to_string(),
+            message: format!("startup call-chain {stream_name} reader panicked"),
+        })?
+        .map_err(CollectorError::from)
 }
 
 fn kill_child_tree(child: &mut std::process::Child) {

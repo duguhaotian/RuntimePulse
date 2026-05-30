@@ -1,0 +1,17 @@
+[Unit]
+Description=RuntimePulse startup callchain collector
+After=network-online.target runtimepulse-host-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/runtimepulse/host-agent.env
+ExecStart=/usr/local/bin/runtimepulse-collector host-startup-callchain
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
