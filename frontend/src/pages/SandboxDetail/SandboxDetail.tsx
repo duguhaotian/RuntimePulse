@@ -1256,26 +1256,34 @@ function ProfileTable({ profiles }: { profiles: ProfileArtifact[] }) {
         <div className="table-titlebar">
           <div>
             <strong>Profile artifacts</strong>
-            <span>Click a profile to inspect the flame graph in a larger view</span>
+            <span>{profiles.length > 0 ? 'Click a profile to inspect the flame graph in a larger view' : 'No profile artifacts have been ingested for this sandbox yet'}</span>
           </div>
         </div>
-        <table>
-          <thead>
-            <tr><th>Profile</th><th>Type</th><th>Process Role</th><th>Duration</th><th>Samples</th><th>View</th></tr>
-          </thead>
-          <tbody>
-            {profiles.map((profile) => (
-              <tr key={profile.id} onClick={() => setActiveProfile(profile)}>
-                <td><strong>{profile.id}</strong><small>{formatDateTime(profile.timestamp)}</small></td>
-                <td>{profile.profileType}</td>
-                <td>{profile.processRole}</td>
-                <td>{formatDuration(profile.durationMs)}</td>
-                <td>{profile.sampleCount.toLocaleString()}</td>
-                <td><button className="inline-action" onClick={(event) => { event.stopPropagation(); setActiveProfile(profile); }}>Open</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {profiles.length === 0 ? (
+          <div className="empty-state profile-empty-state">
+            <strong>No profile data available.</strong>
+            <p>Profile panels are populated only after perf/eBPF/profile-report collectors ingest a profile artifact index for this sandbox.</p>
+            <p>Expected host-agent inputs include <code>RUNTIMEPULSE_PROFILE_REPORT_PATH</code>, <code>RUNTIMEPULSE_PERF_REPORT_PATH</code>, <code>RUNTIMEPULSE_EBPF_REPORT_PATH</code>, or a profiler export command.</p>
+          </div>
+        ) : (
+          <table>
+            <thead>
+              <tr><th>Profile</th><th>Type</th><th>Process Role</th><th>Duration</th><th>Samples</th><th>View</th></tr>
+            </thead>
+            <tbody>
+              {profiles.map((profile) => (
+                <tr key={profile.id} onClick={() => setActiveProfile(profile)}>
+                  <td><strong>{profile.id}</strong><small>{formatDateTime(profile.timestamp)}</small></td>
+                  <td>{profile.profileType}</td>
+                  <td>{profile.processRole}</td>
+                  <td>{formatDuration(profile.durationMs)}</td>
+                  <td>{profile.sampleCount.toLocaleString()}</td>
+                  <td><button className="inline-action" onClick={(event) => { event.stopPropagation(); setActiveProfile(profile); }}>Open</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       {activeProfile && (

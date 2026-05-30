@@ -4108,6 +4108,27 @@ td small { display: block; color: var(--muted-2); margin-top: 3px; }
   min-width: 0;
 }
 
+
+.profile-empty-state {
+  align-items: flex-start;
+  gap: 8px;
+  padding: 28px;
+  text-align: left;
+}
+
+.profile-empty-state strong {
+  color: #f8fafc;
+}
+
+.profile-empty-state p {
+  margin: 0;
+}
+
+.profile-empty-state code {
+  color: #bfdbfe;
+  font-size: 11px;
+}
+
 .profile-modal-backdrop {
   position: fixed;
   inset: 0;
