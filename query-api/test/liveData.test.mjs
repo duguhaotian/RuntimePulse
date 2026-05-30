@@ -609,8 +609,122 @@ test('derives sandbox startup duration from cri startup trace spans and callchai
     profiles: [],
   });
 
-  assert.equal(liveSandboxes(store)[0].startupDurationMs, 1500);
-  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'startup-callchain');
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 1200);
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
+});
+
+test('keeps runpod e2e startup over short startup-callchain trace spans', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'runpod-e2e',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{ id: 'k8s-default-demo-pod', nodeId: 'node-a', imageRef: 'pause:latest', runtimeType: 'runc' }],
+    },
+    metrics: [],
+    events: [],
+    traces: [{
+      traceId: 'cri-containerd-startup-k8s-default-demo-pod',
+      spanId: 'cri-containerd-startup-k8s-default-demo-pod-e2e',
+      spanName: 'sandbox.startup.e2e',
+      startTime: '2026-05-22T02:00:00.000Z',
+      endTime: '2026-05-22T02:00:00.036Z',
+      durationMs: 36,
+      status: 'ok',
+      attributes: { plugin: 'cri-startup-trace', 'runtime.type': 'runc' },
+      sandboxId: 'k8s-default-demo-pod',
+      runtimeType: 'runc',
+    }],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'startup-callchain',
+    metadata: { clusters: [], nodes: [], images: [], sandboxes: [] },
+    metrics: [{
+      timestamp: '2026-05-22T02:00:01.000Z',
+      name: 'sandbox.startup.callchain_duration_ms',
+      value: 2,
+      unit: 'ms',
+      group: 'startup',
+      sandboxId: 'k8s-default-demo-pod',
+      nodeId: 'node-a',
+      runtimeType: 'runc',
+      attributes: { plugin: 'startup-callchain' },
+    }],
+    events: [],
+    traces: [{
+      traceId: 'cri-containerd-startup-k8s-default-demo-pod',
+      spanId: 'cri-containerd-startup-k8s-default-demo-pod-callchain',
+      spanName: 'sandbox.startup.callchain',
+      startTime: '2026-05-22T02:00:01.000Z',
+      endTime: '2026-05-22T02:00:01.002Z',
+      durationMs: 2,
+      status: 'ok',
+      attributes: { plugin: 'startup-callchain' },
+      sandboxId: 'k8s-default-demo-pod',
+      runtimeType: 'runc',
+    }],
+    profiles: [],
+  });
+
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 36);
+  assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:00.036Z');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
+});
+
+test('keeps containerd startup trace over startup-callchain trace spans', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'containerd-startup-trace',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{ id: 'k8s-default-containerd-demo-pod', nodeId: 'node-a', imageRef: 'pause:latest', runtimeType: 'runc' }],
+    },
+    metrics: [],
+    events: [],
+    traces: [{
+      traceId: 'containerd-startup-demo',
+      spanId: 'containerd-startup-demo-container-startup',
+      spanName: 'container.startup',
+      startTime: '2026-05-22T02:00:00.000Z',
+      endTime: '2026-05-22T02:00:00.040Z',
+      durationMs: 40,
+      status: 'ok',
+      attributes: { plugin: 'containerd-startup-trace', 'runtime.type': 'runc' },
+      sandboxId: 'k8s-default-containerd-demo-pod',
+      runtimeType: 'runc',
+    }],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'startup-callchain',
+    metadata: { clusters: [], nodes: [], images: [], sandboxes: [] },
+    metrics: [],
+    events: [],
+    traces: [{
+      traceId: 'callchain-demo',
+      spanId: 'callchain-demo-root',
+      spanName: 'sandbox.startup.callchain',
+      startTime: '2026-05-22T02:00:01.000Z',
+      endTime: '2026-05-22T02:00:01.002Z',
+      durationMs: 2,
+      status: 'ok',
+      attributes: { plugin: 'startup-callchain' },
+      sandboxId: 'k8s-default-containerd-demo-pod',
+      runtimeType: 'runc',
+    }],
+    profiles: [],
+  });
+
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 40);
+  assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:00.040Z');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'containerd-startup-trace');
 });
 
 test('applies stored cri startup trace when sandbox metadata arrives later', () => {
