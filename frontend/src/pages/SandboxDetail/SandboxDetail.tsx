@@ -7,7 +7,7 @@ import { EventTimeline } from '../../components/timeline/EventTimeline';
 import { TraceWaterfall } from '../../components/trace/TraceWaterfall';
 import { RuntimeBadge } from '../SandboxExplorer/SandboxExplorer';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
-import { formatDateTime } from '../../utils/time';
+import { formatDateTime, toMs } from '../../utils/time';
 
 type SandboxDetailProps = {
   api: RuntimePulseApi;
@@ -131,6 +131,8 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
 
   if (!sandbox) return <div className="empty-state">Loading sandbox...</div>;
   const startupBounds = sandboxStartupBounds(sandbox);
+  const lifecycleEvents = lifecycleTimelineEvents(events, spans);
+  const lifecycleBounds = lifecycleTimelineBounds(startupBounds, lifecycleEvents, spans);
 
   return (
     <section className="page-stack run-detail-page">
@@ -212,7 +214,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
           <div className="overview-timeline-stack">
             <div className="panel-card">
               <h3>Lifecycle Timeline</h3>
-              <EventTimeline bounds={startupBounds} events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
+              <EventTimeline bounds={lifecycleBounds} events={lifecycleEvents} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
             </div>
             <div className="panel-card">
               <h3>Startup Trace</h3>
@@ -241,7 +243,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
         </div>
       )}
 
-      {tab === 'timeline' && <div className="panel-card"><EventTimeline bounds={startupBounds} events={events} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} /></div>}
+      {tab === 'timeline' && <div className="panel-card"><EventTimeline bounds={lifecycleBounds} events={lifecycleEvents} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} /></div>}
       {tab === 'trace' && (
         <div className="trace-full-width">
           <div className="panel-card"><TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} /></div>
@@ -252,6 +254,80 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       {selectedSpan && <TraceSpanDetailModal span={selectedSpan} onClose={() => setSelectedSpan(undefined)} />}
     </section>
   );
+}
+
+
+function lifecycleTimelineEvents(events: EventRecord[], spans: TraceSpan[]): EventRecord[] {
+  const syntheticEvents = spans
+    .filter(isLifecycleTimelineSpan)
+    .flatMap((span) => spanToTimelineEvents(span));
+
+  return [...events, ...syntheticEvents];
+}
+
+function isLifecycleTimelineSpan(span: TraceSpan) {
+  const name = span.spanName.toLowerCase();
+  return name.includes('startup')
+    || name.includes('container')
+    || name.includes('cni')
+    || name.includes('oci')
+    || name.includes('runc')
+    || name.includes('kata')
+    || name.includes('exec');
+}
+
+function spanToTimelineEvents(span: TraceSpan): EventRecord[] {
+  const base: Omit<EventRecord, 'id' | 'timestamp' | 'eventName' | 'message'> = {
+    severity: span.status === 'error' ? 'error' : 'info',
+    eventType: 'trace',
+    sandboxId: span.sandboxId,
+    imageId: span.imageId,
+    runtimeType: undefined,
+    source: String(span.attributes?.plugin ?? 'trace'),
+    attributes: {
+      ...span.attributes,
+      'trace.id': span.traceId,
+      'trace.span_id': span.spanId,
+      'trace.span_name': span.spanName,
+      'trace.duration_ms': span.durationMs,
+    },
+  };
+  const startEvent: EventRecord = {
+    ...base,
+    id: `trace-${span.traceId}-${span.spanId}-start`,
+    timestamp: span.startTime,
+    eventName: `trace.${span.spanName}.start`,
+    message: `${span.spanName} started`,
+  };
+  const endEvent: EventRecord = {
+    ...base,
+    id: `trace-${span.traceId}-${span.spanId}-end`,
+    timestamp: span.endTime,
+    eventName: `trace.${span.spanName}.end`,
+    message: `${span.spanName} finished in ${formatDuration(span.durationMs)}`,
+  };
+
+  return span.endTime && span.endTime !== span.startTime ? [startEvent, endEvent] : [startEvent];
+}
+
+function lifecycleTimelineBounds(
+  startupBounds: { startTime: string; endTime: string },
+  events: EventRecord[],
+  spans: TraceSpan[],
+) {
+  const values = [
+    toMs(startupBounds.startTime),
+    toMs(startupBounds.endTime),
+    ...events.map((event) => toMs(event.timestamp)),
+    ...spans.flatMap((span) => [toMs(span.startTime), toMs(span.endTime)]),
+  ].filter((value) => Number.isFinite(value));
+  if (values.length === 0) return startupBounds;
+  const start = Math.min(...values);
+  const end = Math.max(...values, start + 1);
+  return {
+    startTime: new Date(start).toISOString(),
+    endTime: new Date(Math.max(start + 1, end)).toISOString(),
+  };
 }
 
 function AnalysisPanel({

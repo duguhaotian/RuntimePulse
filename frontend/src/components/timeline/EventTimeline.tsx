@@ -139,11 +139,14 @@ function buildStages(events: EventRecord[], bounds?: EventTimelineProps['bounds'
 }
 
 function phaseLabel(eventName: string) {
-  if (eventName.includes('image.pull')) return 'Image pull';
-  if (eventName.includes('image.unpack')) return 'Image unpack';
-  if (eventName.includes('runtime.create')) return 'Runtime create';
-  if (eventName.includes('microvm') || eventName.includes('guest.agent') || eventName.includes('ready')) return 'Guest ready';
-  if (eventName.includes('container')) return 'Container start';
-  if (eventName.includes('node')) return 'Node signal';
+  const name = eventName.toLowerCase();
+  if (name.includes('image.pull')) return 'Image pull';
+  if (name.includes('image.unpack')) return 'Image unpack';
+  if (name.includes('cni') || name.includes('network')) return 'CNI network';
+  if (name.includes('oci') || name.includes('runc') || name.includes('runtime.create') || name.includes('runtime.start')) return 'Runtime create';
+  if (name.includes('startup.callchain')) return 'Startup callchain';
+  if (name.includes('microvm') || name.includes('guest.agent') || name.includes('ready')) return 'Guest ready';
+  if (name.includes('container') || name.includes('task_create')) return 'Container start';
+  if (name.includes('node')) return 'Node signal';
   return 'Sandbox create';
 }
