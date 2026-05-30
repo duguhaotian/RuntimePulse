@@ -47,10 +47,28 @@ RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='sudo runtimepulse-startup-probe expor
 runtimepulse-collector host-agent
 ```
 
-For long capture windows, run the startup call-chain source as the dedicated
-`host-startup-callchain` systemd unit in `deploy/systemd/` and keep
-`startup-callchain` out of `RUNTIMEPULSE_HOST_AGENT_SOURCES`; this prevents a
-blocking BPF snapshot from delaying the normal host inventory/event sources.
+For long capture windows, prefer the dedicated `host-startup-callchain` systemd
+unit in `deploy/systemd/` and keep `startup-callchain` out of
+`RUNTIMEPULSE_HOST_AGENT_SOURCES`; this prevents a blocking BPF snapshot from
+delaying the normal host inventory/event sources:
+
+```bash
+sudo install -m 0755 tools/runtimepulse-startup-probe/runtimepulse-startup-probe /usr/local/bin/runtimepulse-startup-probe
+sudo install -m 0644 deploy/systemd/runtimepulse-startup-callchain.service /etc/systemd/system/runtimepulse-startup-callchain.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now runtimepulse-startup-callchain
+```
+
+Recommended shared env settings for that unit:
+
+```text
+RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS=9000
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_TIMEOUT_MS=45000
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD=/usr/local/bin/runtimepulse-startup-probe export --once --duration-ms 8000 --containerd-tree --containerd-namespace k8s.io --include-helpers --containerd-binary /usr/bin/containerd --containerd-config /etc/containerd/config.toml
+```
+
+Because the systemd unit runs as root, do not prefix the command with `sudo` in
+`RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`.
 
 For local parser validation without attaching BPF:
 

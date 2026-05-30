@@ -104,38 +104,61 @@ cargo run --manifest-path rust-collector/Cargo.toml -- host-kubelet-events
 ```
 
 For high-fidelity CRI+containerd startup attribution, pair the lightweight CRI
-startup trace with `startup-callchain`. The call-chain source accepts either
-already-normalized spans or raw uprobe/eBPF enter/exit events from a real
-exporter. Raw events are paired by request/correlation id and converted into
-RunPodSandbox, CNI plugin binary, OCI runtime, Kata, and helper spans before
-metrics are derived:
+startup trace with the startup call-chain source. The call-chain source accepts
+either already-normalized spans or raw uprobe/eBPF enter/exit events from a
+real exporter. Raw events are paired by request/correlation id and converted
+into RunPodSandbox, CNI plugin binary, OCI runtime, Kata, and helper spans
+before metrics are derived.
+
+For production-like host deployments, prefer the dedicated
+`runtimepulse-startup-callchain` systemd unit rather than adding
+`startup-callchain` to the multi-source host-agent.  Long BPF capture windows
+can otherwise delay normal inventory/event sources in the host-agent collection
+loop:
 
 ```bash
-RUNTIMEPULSE_HOST_AGENT_SOURCES=containerd-inventory,containerd-events,cri-events,cri-startup-trace,startup-callchain \
-RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
-RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='sudo runtimepulse-startup-probe export --once --duration-ms 3000 --containerd-namespace k8s.io --include-helpers' \
-runtimepulse-collector host-agent
+sudo install -m 0755 tools/runtimepulse-startup-probe/runtimepulse-startup-probe /usr/local/bin/runtimepulse-startup-probe
+sudo install -m 0644 deploy/systemd/runtimepulse-startup-callchain.service /etc/systemd/system/runtimepulse-startup-callchain.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now runtimepulse-startup-callchain
+```
+
+Use the shared `/etc/runtimepulse/host-agent.env` file to configure both the
+normal host-agent and the dedicated startup call-chain service:
+
+```text
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,cri-startup-trace,containerd-sandbox-cgroupfs,image-cache,profile-report,perf,ebpf
+RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io
+RUNTIMEPULSE_CRI_EVENTS_CMD=crictl events --output json
+RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS=9000
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_TIMEOUT_MS=45000
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD=/usr/local/bin/runtimepulse-startup-probe export --once --duration-ms 8000 --containerd-tree --containerd-namespace k8s.io --include-helpers --containerd-binary /usr/bin/containerd --containerd-config /etc/containerd/config.toml
 ```
 
 The repository includes a minimal exporter at
 `tools/runtimepulse-startup-probe/runtimepulse-startup-probe`. It uses real
 `bpftrace` exec/exit tracepoints to emit raw startup-callchain events for CNI
 plugin binaries, OCI/Kata runtime binaries, containerd shims, and optional helper
-binaries. When a capture window observes multiple sandbox ids, the exporter emits
-one lightweight report per sandbox under `reports` so concurrent starts keep
+binaries. With `--containerd-tree`, it traces current containerd descendants,
+routes only CNI plugin subtrees and runtime shim/runtime subtrees into startup
+reports, and ignores unrelated child processes.  CNI helper binaries such as
+`iptables` inherit the root CNI plugin through process parentage, so concurrent
+sandbox starts do not split helper cost away from the plugin that invoked it.
+The exporter also re-discovers containerd by executable and `/proc` start time
+when a new containerd process appears, allowing collection to continue after a
+containerd restart.
+
+When a capture window observes multiple sandbox ids, the exporter emits one
+lightweight report per sandbox under `reports` so concurrent starts keep
 separate CNI/helper/runtime metrics. Each generated report carries its own
 `startTime`/`endTime`/`durationMs` event window for the call-chain root span.
-The normalizer derives aggregate startup metrics plus per-process-binary
-breakdowns named `sandbox.startup.process.binary.<binary>_{count,duration_ms}`.
-Those series carry `process.binary.name` and `process.roles` attributes so CNI
-plugin binaries and helper binaries such as `iptables` can be analyzed and shown
-separately. `validate-cri-containerd-startup.sh` can set `CONCURRENT_RUNPODS` to
-start multiple CRI sandboxes in one capture and assert that each emitted report
+The normalizer derives aggregate startup metrics, per-CNI-plugin metrics,
+process-binary breakdowns, and CNI subtree metrics such as
+`sandbox.startup.cni.group.<plugin>_{count,duration_ms,helper_duration_ms,process_sum_duration_ms}`.
+`validate-cri-containerd-startup.sh` can set `CONCURRENT_RUNPODS` to start
+multiple CRI sandboxes in one capture and assert that each emitted report
 contains only its own sandbox/container ids; this has been validated for both
-runc and Kata on the standalone CRI+containerd test setup. This is the first
-concrete exporter bridge; native containerd `RunPodSandbox` Go uprobes can be
-added behind the same JSON contract later.
+runc and Kata on the standalone CRI+containerd test setup.
 
 Local one-shot validation can read the bundled raw-event example without a real
 uprobe exporter:

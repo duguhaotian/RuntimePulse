@@ -350,10 +350,11 @@ This keeps the system small and still supports host-only collectors.
 
 ### systemd Host Agent
 
-The repository includes a starter unit and environment file:
+The repository includes starter units and a shared environment file:
 
 ```text
 deploy/systemd/runtimepulse-host-agent.service
+deploy/systemd/runtimepulse-startup-callchain.service
 deploy/systemd/runtimepulse-host-agent.env
 ```
 
@@ -369,3 +370,59 @@ sudo systemctl enable --now runtimepulse-host-agent
 ```
 
 The starter unit sets `User=root` and `Group=root`.
+
+### systemd Startup Call-Chain Collector
+
+For high-fidelity CRI+containerd startup attribution, run the long-window
+eBPF startup call-chain source as a separate service instead of adding
+`startup-callchain` to `RUNTIMEPULSE_HOST_AGENT_SOURCES`.  The normal
+`runtimepulse-host-agent` should keep lightweight inventory, cgroup, image, and
+event sources; the dedicated `runtimepulse-startup-callchain` unit repeatedly
+invokes the BPF exporter and posts only non-empty startup reports to the same
+local outlet.
+
+Install the probe and the dedicated unit:
+
+```bash
+sudo install -m 0755 tools/runtimepulse-startup-probe/runtimepulse-startup-probe /usr/local/bin/runtimepulse-startup-probe
+sudo install -m 0644 deploy/systemd/runtimepulse-startup-callchain.service /etc/systemd/system/runtimepulse-startup-callchain.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now runtimepulse-startup-callchain
+```
+
+The service uses the same `/etc/runtimepulse/host-agent.env` file.  A typical
+CRI/containerd configuration is:
+
+```text
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,cri-startup-trace,containerd-sandbox-cgroupfs,image-cache,profile-report,perf,ebpf
+RUNTIMEPULSE_CONTAINERD_SOCKET=/run/containerd/containerd.sock
+RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io
+RUNTIMEPULSE_CRI_EVENTS_CMD=crictl events --output json
+RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS=9000
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_TIMEOUT_MS=45000
+RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD=/usr/local/bin/runtimepulse-startup-probe export --once --duration-ms 8000 --containerd-tree --containerd-namespace k8s.io --include-helpers --containerd-binary /usr/bin/containerd --containerd-config /etc/containerd/config.toml
+```
+
+Important deployment notes:
+
+- `runtimepulse-startup-callchain` runs as root because `bpftrace`/eBPF needs
+  host kernel privileges and access to host `/proc`.
+- Keep `--duration-ms` shorter than `RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS`
+  so capture windows do not overlap.
+- Set `RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_TIMEOUT_MS` comfortably above the
+  capture duration; 45 seconds is a safe local default for an 8 second capture.
+- Do not prefix the command with `sudo` inside the systemd service; the unit is
+  already root.
+- `--containerd-tree` tracks the current containerd process tree, groups CNI
+  plugin helper children such as `iptables` under the CNI root plugin, groups
+  runtime shim/runtime children separately, ignores unrelated containerd child
+  processes, and refreshes the target when containerd restarts.
+- Pass `--containerd-config` whenever the target containerd uses non-default
+  `root`/`state` directories so OCI bundle metadata can be found.
+
+After changing `/etc/runtimepulse/host-agent.env`, reload both services:
+
+```bash
+sudo systemctl restart runtimepulse-host-agent runtimepulse-startup-callchain
+journalctl -u runtimepulse-startup-callchain -f
+```
