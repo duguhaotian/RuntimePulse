@@ -26,6 +26,7 @@ export function createLiveStore() {
     diagnosticArtifactsByScope: new Map(),
     sourceByDiagnosticArtifact: new Map(),
     snapshotScopeBySandbox: new Map(),
+    sandboxAliasToId: new Map(),
     derivedEventState: new Map(),
     lastUpdatedAt: undefined,
   };
@@ -195,17 +196,20 @@ function rememberMetadata(store, metadata, source) {
   for (const sandbox of array(metadata?.sandboxes)) {
     const normalized = normalizeSandbox(sandbox, store);
     if (normalized) {
-      if (isRemovedSandbox(normalized)) {
-        rememberSandboxHistory(store, normalized, source);
-        removeLiveSandbox(store, normalized.id);
+      registerSandboxAliases(store, normalized);
+      const canonicalId = store.sandboxAliasToId.get(`sandbox-id:${normalized.id}`) ?? normalized.id;
+      const canonicalSandbox = canonicalId === normalized.id ? normalized : { ...normalized, id: canonicalId };
+      if (isRemovedSandbox(canonicalSandbox)) {
+        rememberSandboxHistory(store, canonicalSandbox, source);
+        removeLiveSandbox(store, canonicalSandbox.id);
       } else {
-        const merged = mergeSandbox(store.sandboxes.get(normalized.id), normalized);
-        store.sandboxes.set(normalized.id, merged);
+        const merged = mergeSandbox(store.sandboxes.get(canonicalSandbox.id), canonicalSandbox);
+        store.sandboxes.set(canonicalSandbox.id, merged);
         rememberSandboxHistory(store, merged, source);
       }
-      if (source) store.sourceBySandbox.set(normalized.id, source);
-      if (stringValue(normalized.attributes?.['snapshot.scope'])) {
-        store.snapshotScopeBySandbox.set(normalized.id, normalized.attributes['snapshot.scope']);
+      if (source) store.sourceBySandbox.set(canonicalSandbox.id, source);
+      if (stringValue(canonicalSandbox.attributes?.['snapshot.scope'])) {
+        store.snapshotScopeBySandbox.set(canonicalSandbox.id, canonicalSandbox.attributes['snapshot.scope']);
       }
     }
   }
@@ -516,6 +520,161 @@ function mergeSandbox(existing, incoming) {
   };
 }
 
+function registerSandboxAliases(store, sandbox) {
+  const canonicalId = preferredCanonicalSandboxId(sandbox) ?? canonicalSandboxIdForRow(sandbox, store) ?? sandbox.id;
+  if (canonicalId !== sandbox.id) mergeSandboxScope(store, sandbox.id, canonicalId);
+
+  registerRowAliases(store, sandbox, canonicalId);
+}
+
+function normalizeSandboxScopedRow(store, row) {
+  const canonicalId = preferredCanonicalSandboxId(row) ?? canonicalSandboxIdForRow(row, store);
+  if (!canonicalId || canonicalId === row.sandboxId) return row;
+  if (row.sandboxId) mergeSandboxScope(store, row.sandboxId, canonicalId);
+  registerRowAliases(store, row, canonicalId);
+  return { ...row, sandboxId: canonicalId };
+}
+
+function canonicalSandboxIdForRow(row, store) {
+  const aliases = sandboxAliases(row);
+  for (const alias of aliases) {
+    const canonical = store.sandboxAliasToId.get(alias);
+    if (canonical) return canonical;
+  }
+  return undefined;
+}
+
+function preferredCanonicalSandboxId(row) {
+  const explicitId = stringValue(row?.id) ?? stringValue(row?.sandboxId);
+  if (explicitId?.startsWith('k8s-')) return explicitId;
+
+  const attributes = isObject(row?.attributes) ? row.attributes : {};
+  const namespace = stringValue(attributes['k8s.namespace']) ?? stringValue(row?.namespace);
+  const pod = stringValue(attributes['k8s.pod']) ?? stringValue(row?.workloadName) ?? stringValue(row?.workloadId);
+  const container = stringValue(attributes['k8s.container']);
+  const podUid = stringValue(attributes['k8s.pod_uid']) ?? stringValue(attributes['podUid']);
+  const attempt = stringValue(attributes['k8s.pod_attempt'])
+    ?? stringValue(attributes['podAttempt'])
+    ?? stringValue(attributes['cri.pod_attempt']);
+  const hasSafePodKey = Boolean(podUid || attempt);
+  const sandboxContainer = !container || container.toLowerCase() === 'pod';
+
+  if (namespace && pod && sandboxContainer && hasSafePodKey) {
+    return `k8s-${sanitizeKubernetesIdPart(namespace)}-${sanitizeKubernetesIdPart(pod)}-pod`;
+  }
+  return undefined;
+}
+
+function registerRowAliases(store, row, canonicalId) {
+  for (const alias of sandboxAliases(row)) {
+    const previous = store.sandboxAliasToId.get(alias);
+    store.sandboxAliasToId.set(alias, canonicalId);
+    if (previous && previous !== canonicalId) mergeSandboxScope(store, previous, canonicalId);
+  }
+}
+
+function sandboxAliases(row) {
+  const attributes = isObject(row?.attributes) ? row.attributes : {};
+  const aliases = [];
+  const add = (kind, value) => {
+    const text = stringValue(value);
+    if (text) aliases.push(`${kind}:${text}`);
+  };
+
+  add('sandbox-id', row?.id);
+  add('sandbox-id', row?.sandboxId);
+  for (const key of [
+    'cri.sandbox_id',
+    'cri.sandboxId',
+    'cri.sandbox_container_id',
+    'podSandboxId',
+    'containerd.id',
+    'containerd.container_id',
+    'containerd.raw_id',
+    'containerd.sandbox_container_id',
+    'cni.container_id',
+    'cni.args.K8S_POD_INFRA_CONTAINER_ID',
+    'startup.probe.correlation_sandbox_id',
+  ]) {
+    add('runtime-id', attributes[key]);
+  }
+
+  const podUid = stringValue(attributes['k8s.pod_uid']) ?? stringValue(attributes['podUid']);
+  add('pod-uid', podUid);
+
+  const namespace = stringValue(attributes['k8s.namespace']) ?? stringValue(row?.namespace);
+  const pod = stringValue(attributes['k8s.pod']) ?? stringValue(row?.workloadName) ?? stringValue(row?.workloadId);
+  const attempt = stringValue(attributes['k8s.pod_attempt'])
+    ?? stringValue(attributes['podAttempt'])
+    ?? stringValue(attributes['cri.pod_attempt']);
+  if (namespace && pod && attempt) aliases.push(`pod-key:${namespace}/${pod}/${attempt}`);
+
+  return uniqueStrings(aliases);
+}
+
+function mergeSandboxScope(store, fromId, toId) {
+  if (!fromId || !toId || fromId === toId) return;
+
+  mergeSandboxRows(store.sandboxes, fromId, toId);
+  mergeSandboxRows(store.sandboxHistory, fromId, toId);
+  mergeRowList(store.eventsBySandbox, fromId, toId, rowLimit('events'), (row) => ({ ...row, sandboxId: toId }));
+  mergeRowList(store.tracesBySandbox, fromId, toId, rowLimit('traces'), (row) => ({ ...row, sandboxId: toId }));
+  mergeRowList(store.profilesBySandbox, fromId, toId, rowLimit('profiles'), (row) => ({ ...row, sandboxId: toId }));
+  mergeMetricSeries(store.metricsBySandbox, fromId, toId);
+
+  const source = store.sourceBySandbox.get(fromId);
+  if (source && !store.sourceBySandbox.has(toId)) store.sourceBySandbox.set(toId, source);
+  store.sourceBySandbox.delete(fromId);
+
+  for (const [alias, canonical] of Array.from(store.sandboxAliasToId.entries())) {
+    if (canonical === fromId) store.sandboxAliasToId.set(alias, toId);
+  }
+}
+
+function mergeSandboxRows(collection, fromId, toId) {
+  const from = collection.get(fromId);
+  if (!from) return;
+  const existing = collection.get(toId);
+  collection.set(toId, mergeSandbox(existing, { ...from, id: toId }));
+  collection.delete(fromId);
+}
+
+function mergeRowList(collection, fromId, toId, limit, transform) {
+  const rows = collection.get(fromId);
+  if (!rows?.length) return;
+  const targetRows = collection.get(toId) ?? [];
+  collection.set(
+    toId,
+    dedupeRows([...targetRows, ...rows.map(transform)])
+      .sort((left, right) => Date.parse(rowTime(left)) - Date.parse(rowTime(right)))
+      .slice(-limit),
+  );
+  collection.delete(fromId);
+}
+
+function mergeMetricSeries(collection, fromId, toId) {
+  const from = collection.get(fromId);
+  if (!from) return;
+  const target = collection.get(toId) ?? new Map();
+  for (const [id, series] of from.entries()) {
+    const nextSeries = { ...series, id: id.replace(fromId, toId), sandboxId: toId };
+    const existing = target.get(nextSeries.id);
+    if (!existing) {
+      target.set(nextSeries.id, nextSeries);
+      continue;
+    }
+    target.set(nextSeries.id, {
+      ...existing,
+      ...nextSeries,
+      points: dedupeRows([...(existing.points ?? []), ...(nextSeries.points ?? [])])
+        .sort((left, right) => Date.parse(rowTime(left)) - Date.parse(rowTime(right)))
+        .slice(-maxMetricPointsPerSeries),
+    });
+  }
+  collection.set(toId, target);
+  collection.delete(fromId);
+}
+
 function preserveAttribute(target, source, key) {
   if (source?.[key] !== undefined) target[key] = source[key];
 }
@@ -628,12 +787,13 @@ function removeLiveImage(store, imageId) {
 }
 
 function rememberTraceSpan(store, span) {
-  rememberRow(store.tracesBySandbox, span.sandboxId, span, rowLimit('traces'));
+  const normalized = normalizeSandboxScopedRow(store, span);
+  rememberRow(store.tracesBySandbox, normalized.sandboxId, normalized, rowLimit('traces'));
   const imageId = stringValue(span.imageId)
     ?? stringValue(span.attributes?.['image.id'])
     ?? stringValue(span.attributes?.imageId);
-  rememberRow(store.tracesByImage, imageId, { ...span, imageId }, rowLimit('traces'));
-  refreshSandboxFromTraceSpan(store, span);
+  rememberRow(store.tracesByImage, imageId, { ...normalized, imageId }, rowLimit('traces'));
+  refreshSandboxFromTraceSpan(store, normalized);
 }
 
 
@@ -671,22 +831,24 @@ function rememberDiagnosticArtifacts(store, events, source) {
 }
 
 function rememberProfile(store, profile, source) {
-  rememberRow(store.profilesBySandbox, profile.sandboxId, profile, rowLimit('profiles'));
-  if (source && profile?.id) store.sourceByProfile.set(profileKey(profile), source);
+  const normalized = normalizeSandboxScopedRow(store, profile);
+  rememberRow(store.profilesBySandbox, normalized.sandboxId, normalized, rowLimit('profiles'));
+  if (source && normalized?.id) store.sourceByProfile.set(profileKey(normalized), source);
 }
 
 function rememberEvent(store, event, source) {
+  const normalized = normalizeSandboxScopedRow(store, event);
   if (source) store.sourceByEvent.set(rowKey(event), source);
-  rememberRow(store.eventsBySandbox, event.sandboxId, event, rowLimit('events'));
+  rememberRow(store.eventsBySandbox, normalized.sandboxId, normalized, rowLimit('events'));
 
-  const nodeId = nodeIdForEvent(store, event);
-  rememberRow(store.eventsByNode, nodeId, { ...event, nodeId }, rowLimit('events'));
+  const nodeId = nodeIdForEvent(store, normalized);
+  rememberRow(store.eventsByNode, nodeId, { ...normalized, nodeId }, rowLimit('events'));
 
-  const imageId = stringValue(event.imageId)
-    ?? stringValue(event.attributes?.['image.id'])
-    ?? stringValue(event.attributes?.imageId);
-  if (imageId && imageRemovalEvent(event)) removeLiveImage(store, imageId);
-  rememberRow(store.eventsByImage, imageId, { ...event, imageId }, rowLimit('events'));
+  const imageId = stringValue(normalized.imageId)
+    ?? stringValue(normalized.attributes?.['image.id'])
+    ?? stringValue(normalized.attributes?.imageId);
+  if (imageId && imageRemovalEvent(normalized)) removeLiveImage(store, imageId);
+  rememberRow(store.eventsByImage, imageId, { ...normalized, imageId }, rowLimit('events'));
 }
 
 function nodeIdForEvent(store, event) {
@@ -735,9 +897,10 @@ function imageRemovalEvent(event) {
 }
 
 function rememberMetric(store, metric, source) {
-  const sandboxId = metric.sandboxId;
-  const nodeId = metric.nodeId;
-  const imageId = metric.imageId;
+  const normalized = normalizeSandboxScopedRow(store, metric);
+  const sandboxId = normalized.sandboxId;
+  const nodeId = normalized.nodeId;
+  const imageId = normalized.imageId;
   if (!sandboxId && !nodeId && !imageId) return;
 
   const scope = metricScope(metric);
@@ -749,30 +912,30 @@ function rememberMetric(store, metric, source) {
       ? store.metricsByImage
       : store.metricsByNode;
   const seriesMap = ensureSeriesMap(collection, scopeId);
-  const id = metricSeriesId(scope, scopeId, metric);
+  const id = metricSeriesId(scope, scopeId, normalized);
   if (source) store.sourceByMetricSeries.set(metricSeriesSourceKey(scope, scopeId, id), source);
   const existing = seriesMap.get(id);
   const point = {
-    timestamp: metric.timestamp,
-    value: metric.value,
+    timestamp: normalized.timestamp,
+    value: normalized.value,
   };
 
   if (!existing) {
     seriesMap.set(id, {
       id,
-      name: metric.name,
-      label: metricLabel(metric.name),
-      unit: metric.unit ?? '',
-      group: metric.group ?? 'runtime',
+      name: normalized.name,
+      label: metricLabel(normalized.name),
+      unit: normalized.unit ?? '',
+      group: normalized.group ?? 'runtime',
       sandboxId,
       imageId,
       nodeId,
-      runtimeType: metric.runtimeType,
-      attributes: isObject(metric.attributes) ? metric.attributes : {},
+      runtimeType: normalized.runtimeType,
+      attributes: isObject(normalized.attributes) ? normalized.attributes : {},
       points: [point],
     });
-    rememberDerivedEventFromMetric(store, metric, source);
-    refreshSandboxFromMetric(store, metric);
+    rememberDerivedEventFromMetric(store, normalized, source);
+    refreshSandboxFromMetric(store, normalized);
     return;
   }
 
@@ -782,16 +945,16 @@ function rememberMetric(store, metric, source) {
 
   seriesMap.set(id, {
     ...existing,
-    unit: metric.unit ?? existing.unit,
-    group: metric.group ?? existing.group,
+    unit: normalized.unit ?? existing.unit,
+    group: normalized.group ?? existing.group,
     nodeId: nodeId ?? existing.nodeId,
     imageId: imageId ?? existing.imageId,
-    runtimeType: metric.runtimeType ?? existing.runtimeType,
-    attributes: isObject(metric.attributes) ? { ...(existing.attributes ?? {}), ...metric.attributes } : existing.attributes,
+    runtimeType: normalized.runtimeType ?? existing.runtimeType,
+    attributes: isObject(normalized.attributes) ? { ...(existing.attributes ?? {}), ...normalized.attributes } : existing.attributes,
     points,
   });
-  rememberDerivedEventFromMetric(store, metric, source);
-  refreshSandboxFromMetric(store, metric);
+  rememberDerivedEventFromMetric(store, normalized, source);
+  refreshSandboxFromMetric(store, normalized);
 }
 
 function rememberDerivedEventFromMetric(store, metric, source) {
@@ -1182,6 +1345,10 @@ function stringValue(value) {
 function stringSet(value) {
   if (!Array.isArray(value)) return undefined;
   return new Set(value.filter((item) => typeof item === 'string').map((item) => item.trim()).filter(Boolean));
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(values.filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim())));
 }
 
 function rowCount(collection) {

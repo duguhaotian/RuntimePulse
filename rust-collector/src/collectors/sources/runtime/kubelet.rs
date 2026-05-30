@@ -125,9 +125,11 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
         runtime_sandbox_id.as_str(),
     ]));
     let short_id = short_id(&runtime_id);
+    let is_sandbox_event = action.starts_with("SANDBOX_");
     let namespace = first_non_empty(&[
         label(&event, "io.kubernetes.pod.namespace"),
         label(&event, "KubernetesPodNamespace"),
+        metadata(&event, "namespace"),
         "kubernetes",
     ]);
     let pod_name = first_non_empty(&[
@@ -136,9 +138,20 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
         metadata(&event, "name"),
         short_id.as_str(),
     ]);
+    let pod_uid = first_non_empty(&[
+        label(&event, "io.kubernetes.pod.uid"),
+        label(&event, "KubernetesPodUID"),
+        metadata(&event, "uid"),
+    ]);
+    let pod_attempt = first_non_empty(&[
+        label(&event, "io.kubernetes.pod.attempt"),
+        label(&event, "KubernetesPodAttempt"),
+        metadata(&event, "attempt"),
+    ]);
     let container_name = first_non_empty(&[
         label(&event, "io.kubernetes.container.name"),
         label(&event, "KubernetesContainerName"),
+        if is_sandbox_event { "POD" } else { "" },
         pod_name.as_str(),
     ]);
     let sandbox_id = kubernetes_sandbox_id(&namespace, &pod_name, &container_name)
@@ -160,7 +173,7 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
     let current = matches!(status, "running");
     let removed = matches!(action, "CONTAINER_DELETED" | "SANDBOX_DELETED" | "REMOVE");
     let severity = event_severity(action);
-    let cri_entity = if action.starts_with("SANDBOX_") {
+    let cri_entity = if is_sandbox_event {
         "sandbox"
     } else {
         "container"
@@ -184,6 +197,8 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
     attributes.insert("runtime.type".to_string(), json!(runtime_type));
     attributes.insert("k8s.namespace".to_string(), json!(namespace));
     attributes.insert("k8s.pod".to_string(), json!(pod_name));
+    attributes.insert("k8s.pod_uid".to_string(), json!(pod_uid));
+    attributes.insert("k8s.pod_attempt".to_string(), json!(pod_attempt));
     attributes.insert("k8s.container".to_string(), json!(container_name));
     attributes.insert("k8s.annotations".to_string(), json!(event.annotations));
 
@@ -217,6 +232,8 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
             "cri.short_id": short_id,
             "k8s.namespace": namespace,
             "k8s.pod": pod_name,
+            "k8s.pod_uid": pod_uid,
+            "k8s.pod_attempt": pod_attempt,
             "k8s.container": container_name,
             "lifecycle.action": action,
             "lifecycle.current": current,
@@ -497,9 +514,13 @@ fn copy_string_map_if_present(
     let string_values = values
         .iter()
         .filter_map(|(entry_key, entry_value)| {
-            entry_value
-                .as_str()
-                .map(|entry_text| (entry_key.clone(), Value::String(entry_text.to_string())))
+            if let Some(entry_text) = entry_value.as_str() {
+                Some((entry_key.clone(), Value::String(entry_text.to_string())))
+            } else if entry_value.is_number() || entry_value.is_boolean() {
+                Some((entry_key.clone(), Value::String(entry_value.to_string())))
+            } else {
+                None
+            }
         })
         .collect::<serde_json::Map<String, Value>>();
     target.insert(key.to_string(), Value::Object(string_values));
@@ -592,6 +613,7 @@ pub fn cri_event_stable_sandbox_id(event: &CriEvent) -> Option<String> {
     let namespace = first_non_empty(&[
         label(event, "io.kubernetes.pod.namespace"),
         label(event, "KubernetesPodNamespace"),
+        metadata(event, "namespace"),
     ]);
     let pod_name = first_non_empty(&[
         label(event, "io.kubernetes.pod.name"),
@@ -601,6 +623,11 @@ pub fn cri_event_stable_sandbox_id(event: &CriEvent) -> Option<String> {
     let container_name = first_non_empty(&[
         label(event, "io.kubernetes.container.name"),
         label(event, "KubernetesContainerName"),
+        if cri_event_action(event).starts_with("SANDBOX_") {
+            "POD"
+        } else {
+            ""
+        },
         pod_name.as_str(),
     ]);
 
