@@ -139,6 +139,11 @@ containerd metadata should be collected. `containerd-events` can be added when
 container/task lifecycle updates should come from containerd's event service.
 Both sources connect directly to containerd's gRPC API over
 `RUNTIMEPULSE_CONTAINERD_SOCKET`; they do not shell out to `ctr`.
+For Kubernetes sandbox lifecycle, also enable `cri-events`: containerd events
+describe low-level task/content/snapshot changes, while the CRI stream carries
+pod-sandbox lifecycle state (`SANDBOX_CREATED`, `SANDBOX_READY`, stop/delete).
+The default command is `crictl events --output json`; RuntimePulse accepts both
+JSONL and crictl's pretty-printed multi-line JSON event stream.
 
 ```text
 RUNTIMEPULSE_CONTAINERD_SOCKET=/run/containerd/containerd.sock
@@ -394,7 +399,7 @@ The service uses the same `/etc/runtimepulse/host-agent.env` file.  A typical
 CRI/containerd configuration is:
 
 ```text
-RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,cri-startup-trace,containerd-sandbox-cgroupfs,image-cache,profile-report,perf,ebpf
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,cri-events,cri-startup-trace,containerd-sandbox-cgroupfs,image-cache,profile-report,perf,ebpf
 RUNTIMEPULSE_CONTAINERD_SOCKET=/run/containerd/containerd.sock
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io
 RUNTIMEPULSE_CRI_EVENTS_CMD=crictl events --output json

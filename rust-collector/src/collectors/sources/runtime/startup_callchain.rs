@@ -660,36 +660,46 @@ fn output_from_lightweight_report(
         "warning"
     };
 
+    let mut events = vec![EventRecord {
+        id: format!(
+            "startup-callchain-{}-{}",
+            sanitize_id(report.id.as_deref().unwrap_or(&trace_id)),
+            sanitize_id(&observed_at)
+        ),
+        timestamp: observed_at,
+        severity: event_severity.to_string(),
+        event_type: "startup".to_string(),
+        event_name: "startup.callchain.observed".to_string(),
+        message: format!(
+            "Startup call-chain report observed {} spans and {} execution events for {}.",
+            traces.len(),
+            normalized_events.event_records.len(),
+            sandbox_id
+        ),
+        source: format!(
+            "runtimepulse-rust-collector/{}/startup-callchain",
+            config.node_id
+        ),
+        attributes: event_attributes,
+        sandbox_id: Some(sandbox_id.clone()),
+        image_id: None,
+        node_id: Some(config.node_id.clone()),
+        runtime_type: Some(runtime_type.clone()),
+        reason: None,
+    }];
+    events.extend(startup_event_records(
+        &normalized_events.event_records,
+        &sandbox_id,
+        &runtime_type,
+        &base_attributes,
+        config,
+    ));
+
     PluginOutput {
         source: None,
         metadata,
         metrics,
-        events: vec![EventRecord {
-            id: format!(
-                "startup-callchain-{}-{}",
-                sanitize_id(report.id.as_deref().unwrap_or(&trace_id)),
-                sanitize_id(&observed_at)
-            ),
-            timestamp: observed_at,
-            severity: event_severity.to_string(),
-            event_type: "startup".to_string(),
-            event_name: "startup.callchain.observed".to_string(),
-            message: format!(
-                "Startup call-chain report observed {} spans for {}.",
-                traces.len(),
-                sandbox_id
-            ),
-            source: format!(
-                "runtimepulse-rust-collector/{}/startup-callchain",
-                config.node_id
-            ),
-            attributes: event_attributes,
-            sandbox_id: Some(sandbox_id),
-            image_id: None,
-            node_id: Some(config.node_id.clone()),
-            runtime_type: Some(runtime_type),
-            reason: None,
-        }],
+        events,
         traces,
         profiles: Vec::new(),
     }
@@ -956,6 +966,7 @@ struct PendingUprobeEvent {
 #[derive(Clone, Default)]
 struct UprobeNormalization {
     spans: Vec<StartupStageReport>,
+    event_records: Vec<StartupEventPoint>,
     event_count: u64,
     matched_event_count: u64,
     span_count: u64,
@@ -973,6 +984,16 @@ impl UprobeNormalization {
             self.matched_event_count as f64 / self.event_count as f64
         }
     }
+}
+
+#[derive(Clone)]
+struct StartupEventPoint {
+    event: UprobeEventReport,
+    timestamp: String,
+    event_name: String,
+    role: String,
+    binary_name: String,
+    message: String,
 }
 
 fn normalize_uprobe_events(report: &StartupCallchainReport) -> UprobeNormalization {
@@ -993,6 +1014,9 @@ fn normalize_uprobe_events(report: &StartupCallchainReport) -> UprobeNormalizati
     });
 
     for event in events {
+        if let Some(point) = startup_event_point(event) {
+            normalized.event_records.push(point);
+        }
         let kind = normalized_event_kind(&event.event_type);
         let key = event_correlation_key(event);
         match kind.as_str() {
@@ -1039,6 +1063,148 @@ fn normalize_uprobe_events(report: &StartupCallchainReport) -> UprobeNormalizati
     attach_parent_spans_by_process_tree(&mut normalized.spans);
     normalized.span_count = normalized.spans.len() as u64;
     normalized
+}
+
+fn startup_event_point(event: &UprobeEventReport) -> Option<StartupEventPoint> {
+    let timestamp = event_timestamp(event)?;
+    let function_name = event.function_name.as_deref().unwrap_or("");
+    let binary = event
+        .binary
+        .as_deref()
+        .or(event.command.as_deref())
+        .unwrap_or("");
+    let binary_name = binary_basename(binary).to_ascii_lowercase();
+    let role = event
+        .role
+        .clone()
+        .or_else(|| infer_stage_role(function_name, &binary_name))
+        .unwrap_or_else(|| "uprobe".to_string());
+    let phase = normalized_event_kind(&event.event_type);
+    let event_name = if phase == "enter" || phase == "exit" {
+        format!(
+            "startup.{}.{}",
+            event_kind_group(&role, function_name, &binary_name),
+            phase
+        )
+    } else {
+        format!(
+            "startup.{}.event",
+            event_kind_group(&role, function_name, &binary_name)
+        )
+    };
+    let label = if !binary_name.is_empty() {
+        binary_name.clone()
+    } else if !function_name.is_empty() {
+        function_name.to_string()
+    } else {
+        "uprobe".to_string()
+    };
+    let message = match phase.as_str() {
+        "enter" => format!("{label} entered."),
+        "exit" => format!("{label} exited."),
+        _ => format!("{label} observed."),
+    };
+
+    Some(StartupEventPoint {
+        event: event.clone(),
+        timestamp,
+        event_name,
+        role,
+        binary_name,
+        message,
+    })
+}
+
+fn event_kind_group(role: &str, function_name: &str, binary_name: &str) -> &'static str {
+    let function = function_name.to_ascii_lowercase();
+    if function.contains("runpodsandbox")
+        || function.contains("run_pod_sandbox")
+        || function.contains("run-pod-sandbox")
+        || role.eq_ignore_ascii_case("cri")
+    {
+        "runpod"
+    } else if role.eq_ignore_ascii_case("cni")
+        || function.contains("cni")
+        || is_likely_cni_plugin_binary(binary_name)
+    {
+        "cni.exec"
+    } else if role.eq_ignore_ascii_case("oci")
+        || role.eq_ignore_ascii_case("kata")
+        || function.contains("oci")
+        || function.contains("kata")
+        || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
+    {
+        "runtime.exec"
+    } else {
+        "process.exec"
+    }
+}
+
+fn startup_event_records(
+    points: &[StartupEventPoint],
+    sandbox_id: &str,
+    runtime_type: &str,
+    base_attributes: &Map<String, Value>,
+    config: &CollectorConfig,
+) -> Vec<EventRecord> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| {
+            let mut attributes = base_attributes.clone();
+            attributes.insert("startup.event.kind".to_string(), json!("exec_point"));
+            attributes.insert(
+                "startup.event.phase".to_string(),
+                json!(normalized_event_kind(&point.event.event_type)),
+            );
+            attributes.insert(
+                "startup.event.correlation_key".to_string(),
+                json!(event_correlation_key(&point.event)),
+            );
+            if !point.role.is_empty() {
+                attributes.insert("process.role".to_string(), json!(point.role));
+            }
+            if !point.binary_name.is_empty() {
+                attributes.insert("process.binary.name".to_string(), json!(point.binary_name));
+            }
+            merge_event_attributes(&mut attributes, Some(&point.event));
+            if let Some(function_name) = &point.event.function_name {
+                attributes.insert("uprobe.function".to_string(), json!(function_name));
+            }
+            if let Some(request_id) = &point.event.request_id {
+                attributes.insert("uprobe.request_id".to_string(), json!(request_id));
+            }
+
+            EventRecord {
+                id: format!(
+                    "startup-event-{}-{}-{}-{}",
+                    sanitize_id(sandbox_id),
+                    sanitize_id(&point.event_name),
+                    sanitize_id(&event_correlation_key(&point.event)),
+                    index
+                ),
+                timestamp: point.timestamp.clone(),
+                severity: if point.event.status.as_deref() == Some("error") {
+                    "error".to_string()
+                } else {
+                    "info".to_string()
+                },
+                event_type: "startup".to_string(),
+                event_name: point.event_name.clone(),
+                message: point.message.clone(),
+                source: format!(
+                    "runtimepulse-rust-collector/{}/startup-callchain",
+                    config.node_id
+                ),
+                attributes,
+                sandbox_id: Some(sandbox_id.to_string()),
+                image_id: None,
+                node_id: Some(config.node_id.clone()),
+                runtime_type: Some(runtime_type.to_string()),
+                reason: point.event.status.clone(),
+            }
+        })
+        .collect()
 }
 
 fn attach_parent_spans_by_process_tree(spans: &mut [StartupStageReport]) {
@@ -1910,6 +2076,8 @@ fn metrics_from_spans(
             derived.kata_duration_ms += duration;
         }
 
+        let point_only = is_point_only_exec_span(span, &span_name, &binary_name);
+
         if !binary_name.is_empty()
             || span.process_id.is_some()
             || role == "exec"
@@ -1917,15 +2085,19 @@ fn metrics_from_spans(
             || is_oci
         {
             derived.binary_exec_count += 1;
-            derived.binary_exec_duration_ms += duration;
             let process_binary = process_binary_metric_name(span, &span_name, &binary_name);
             if !process_binary.is_empty() {
                 let stats = derived.process_binaries.entry(process_binary).or_default();
                 stats.count += 1;
-                stats.duration_ms += duration;
+                if !point_only {
+                    stats.duration_ms += duration;
+                }
                 if !role.is_empty() {
                     stats.roles.insert(role.clone());
                 }
+            }
+            if !point_only {
+                derived.binary_exec_duration_ms += duration;
             }
         }
 
@@ -2069,18 +2241,7 @@ fn metrics_from_spans(
         attributes,
         config,
     );
-    push_metric_if_positive(
-        &mut metrics,
-        timestamp,
-        "sandbox.startup.binary_exec_duration_ms",
-        derived.binary_exec_duration_ms,
-        "ms",
-        sandbox_id,
-        runtime_type,
-        attributes,
-        config,
-    );
-    for (binary_name, stats) in &derived.process_binaries {
+        for (binary_name, stats) in &derived.process_binaries {
         push_process_binary_metric_if_positive(
             &mut metrics,
             timestamp,
@@ -2326,17 +2487,6 @@ fn push_process_binary_metric_if_positive(
         &binary_attributes,
         config,
     );
-    push_metric_if_positive(
-        metrics,
-        timestamp,
-        &format!("{metric_prefix}_duration_ms"),
-        stats.duration_ms,
-        "ms",
-        sandbox_id,
-        runtime_type,
-        &binary_attributes,
-        config,
-    );
 }
 
 fn push_cni_plugin_metric_if_positive(
@@ -2516,6 +2666,22 @@ fn is_oci_span(span: &StartupStageReport, span_name: &str, binary_name: &str) ->
         || span.oci_runtime.is_some()
         || span.oci_operation.is_some()
         || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
+}
+
+fn is_point_only_exec_span(span: &StartupStageReport, span_name: &str, binary_name: &str) -> bool {
+    span
+        .attributes
+        .as_ref()
+        .and_then(|attrs| value_string_from_keys(attrs, &["startup.event.kind"]))
+        .is_some_and(|kind| kind == "uprobe")
+        || span_name.starts_with("process.exec.")
+        || span_name.starts_with("cni.plugin.")
+        || (!binary_name.is_empty()
+            && span
+                .attributes
+                .as_ref()
+                .and_then(|attrs| value_string_from_keys(attrs, &["uprobe.function"]))
+                .is_some_and(|function| function.to_ascii_lowercase().contains("exec")))
 }
 
 fn is_kata_span(span_name: &str, binary_name: &str) -> bool {
@@ -3109,7 +3275,16 @@ mod tests {
         assert!(output.metrics.iter().any(|metric| {
             metric.name == "sandbox.startup.uprobe_pairing_ratio" && metric.value == 1.0
         }));
+        assert_eq!(output.events.len(), 7);
         assert_eq!(output.events[0].severity, "info");
+        assert!(output.events.iter().any(|event| {
+            event.event_name == "startup.cni.exec.enter"
+                && event
+                    .attributes
+                    .get("process.binary.name")
+                    .and_then(Value::as_str)
+                    == Some("bridge")
+        }));
         assert_eq!(
             output.metadata.sandboxes[0]["id"],
             json!("k8s-default-demo-pod")
@@ -3197,13 +3372,13 @@ mod tests {
             metric.name == "sandbox.startup.iptables_duration_ms" && metric.value == 30.0
         }));
         assert!(output.metrics.iter().any(|metric| {
-            metric.name == "sandbox.startup.process.binary.bridge_duration_ms"
-                && metric.value == 100.0
+            metric.name == "sandbox.startup.process.binary.bridge_count"
+                && metric.value == 1.0
                 && metric.attributes.as_ref().unwrap()["process.binary.name"] == json!("bridge")
         }));
         assert!(output.metrics.iter().any(|metric| {
-            metric.name == "sandbox.startup.process.binary.iptables_duration_ms"
-                && metric.value == 30.0
+            metric.name == "sandbox.startup.process.binary.iptables_count"
+                && metric.value == 1.0
                 && metric.attributes.as_ref().unwrap()["process.roles"] == json!(["helper"])
         }));
     }

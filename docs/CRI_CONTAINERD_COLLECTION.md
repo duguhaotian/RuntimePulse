@@ -25,7 +25,7 @@ containers.
 Recommended CRI/containerd host-agent sources:
 
 ```bash
-RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,containerd-sandbox-cgroupfs,image-cache,profile-report,perf,ebpf
+RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,cri-events,containerd-sandbox-cgroupfs,image-cache,profile-report,perf,ebpf
 RUNTIMEPULSE_CONTAINERD_SOCKET=/run/containerd/containerd.sock
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io
 RUNTIMEPULSE_CGROUP_ROOT=/sys/fs/cgroup
@@ -78,11 +78,20 @@ The host-agent starts two kinds of work:
      `perf`, and `ebpf`
 2. **Event-stream collectors**, long-running worker threads:
    - `containerd-events`
+   - `cri-events`
    - optional `docker-events` in Docker validation mode
 
 `containerd-events` feeds lifecycle metadata and keeps the active containerd task
 set updated. `containerd-sandbox-cgroupfs` samples only active targets resolved
 from containerd tasks; it does not scan the cgroup tree broadly.
+`cri-events` is first-class for Kubernetes sandbox lifecycle: containerd events
+show task/content/snapshot changes, but CRI events carry pod-sandbox state such
+as `SANDBOX_CREATED`, `SANDBOX_READY`, stop, and delete. Configure
+`RUNTIMEPULSE_CRI_EVENTS_CMD` when crictl needs an explicit endpoint:
+
+```bash
+RUNTIMEPULSE_CRI_EVENTS_CMD='crictl --runtime-endpoint unix:///run/containerd/containerd.sock events --output json'
+```
 
 ## What the CRI/containerd collectors depend on
 
@@ -93,6 +102,7 @@ and process metadata, not on direct metadata directory scans:
 | --- | --- | --- |
 | `containerd-inventory` | containerd gRPC socket | none for metadata directories |
 | `containerd-events` | containerd event service | none for metadata directories |
+| `cri-events` | CRI event stream via `crictl events --output json` by default | none |
 | `containerd-sandbox-cgroupfs` | containerd task PID | `/proc/<pid>/cgroup` and `RUNTIMEPULSE_CGROUP_ROOT` |
 | `cri-startup-trace` | CRI/containerd lifecycle events | none for metadata directories |
 | `startup-callchain` / uprobe exporter | RunPod/CNI/OCI/Kata events | OCI bundle `config.json`; may need containerd `config.toml` for state/root discovery |

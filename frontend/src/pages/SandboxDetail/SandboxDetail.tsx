@@ -3,7 +3,7 @@ import type { RuntimePulseApi } from '../../api/RuntimePulseApi';
 import type { AnalysisFinding, EventRecord, FlamegraphFrame, Image, MetricSeries, Node, ProfileArtifact, Sandbox, SandboxAnalysis, TraceSpan } from '../../domain/model';
 import { MetricChart } from '../../components/charts/MetricChart';
 import { EventList } from '../../components/timeline/EventList';
-import { EventTimeline } from '../../components/timeline/EventTimeline';
+import { StartupExecutionTimeline } from '../../components/timeline/StartupExecutionTimeline';
 import { TraceWaterfall } from '../../components/trace/TraceWaterfall';
 import { RuntimeBadge } from '../SandboxExplorer/SandboxExplorer';
 import { formatBytes, formatDuration, formatRatio } from '../../utils/units';
@@ -130,9 +130,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   }
 
   if (!sandbox) return <div className="empty-state">Loading sandbox...</div>;
-  const startupBounds = sandboxStartupBounds(sandbox);
   const lifecycleEvents = lifecycleTimelineEvents(events, spans);
-  const lifecycleBounds = lifecycleTimelineBounds(startupBounds, lifecycleEvents, spans);
 
   return (
     <section className="page-stack run-detail-page">
@@ -212,13 +210,16 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
             />
           )}
           <div className="overview-timeline-stack">
-            <div className="panel-card">
-              <h3>Lifecycle Timeline</h3>
-              <EventTimeline bounds={lifecycleBounds} events={lifecycleEvents} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} />
-            </div>
-            <div className="panel-card">
-              <h3>Startup Trace</h3>
-              <TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} />
+            <div className="panel-card overview-execution-card">
+              <h3>Startup Execution Timeline</h3>
+              <StartupExecutionTimeline
+                events={lifecycleEvents}
+                spans={spans}
+                selectedEventId={selectedEvent?.id}
+                selectedSpanId={selectedSpan?.spanId}
+                onSelectEvent={jumpToMetricsFromEvent}
+                onSelectSpan={setSelectedSpan}
+              />
             </div>
           </div>
         </div>
@@ -243,7 +244,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
         </div>
       )}
 
-      {tab === 'timeline' && <div className="panel-card"><EventTimeline bounds={lifecycleBounds} events={lifecycleEvents} selectedEventId={selectedEvent?.id} onSelectEvent={jumpToMetricsFromEvent} /></div>}
+      {tab === 'timeline' && <div className="panel-card"><StartupExecutionTimeline events={lifecycleEvents} spans={spans} selectedEventId={selectedEvent?.id} selectedSpanId={selectedSpan?.spanId} onSelectEvent={jumpToMetricsFromEvent} onSelectSpan={setSelectedSpan} /></div>}
       {tab === 'trace' && (
         <div className="trace-full-width">
           <div className="panel-card"><TraceWaterfall spans={spans} selectedSpanId={selectedSpan?.spanId} onSelectSpan={setSelectedSpan} /></div>
@@ -277,21 +278,16 @@ function isLifecycleTimelineSpan(span: TraceSpan) {
 }
 
 function spanToTimelineEvents(span: TraceSpan): EventRecord[] {
-  const base: Omit<EventRecord, 'id' | 'timestamp' | 'eventName' | 'message'> = {
-    severity: span.status === 'error' ? 'error' : 'info',
-    eventType: 'trace',
-    sandboxId: span.sandboxId,
-    imageId: span.imageId,
-    runtimeType: undefined,
-    source: String(span.attributes?.plugin ?? 'trace'),
-    attributes: {
-      ...span.attributes,
-      'trace.id': span.traceId,
-      'trace.span_id': span.spanId,
-      'trace.span_name': span.spanName,
-      'trace.duration_ms': span.durationMs,
-    },
-  };
+  if (isPointOnlyStartupSpan(span)) {
+    return [{
+      ...spanBaseTimelineEvent(span),
+      id: `trace-${span.traceId}-${span.spanId}-observed`,
+      timestamp: span.startTime,
+      eventName: `trace.${span.spanName}.observed`,
+      message: `${span.spanName} observed at ${span.startTime}`,
+    }];
+  }
+  const base = spanBaseTimelineEvent(span);
   const startEvent: EventRecord = {
     ...base,
     id: `trace-${span.traceId}-${span.spanId}-start`,
@@ -310,24 +306,33 @@ function spanToTimelineEvents(span: TraceSpan): EventRecord[] {
   return span.endTime && span.endTime !== span.startTime ? [startEvent, endEvent] : [startEvent];
 }
 
-function lifecycleTimelineBounds(
-  startupBounds: { startTime: string; endTime: string },
-  events: EventRecord[],
-  spans: TraceSpan[],
-) {
-  const values = [
-    toMs(startupBounds.startTime),
-    toMs(startupBounds.endTime),
-    ...events.map((event) => toMs(event.timestamp)),
-    ...spans.flatMap((span) => [toMs(span.startTime), toMs(span.endTime)]),
-  ].filter((value) => Number.isFinite(value));
-  if (values.length === 0) return startupBounds;
-  const start = Math.min(...values);
-  const end = Math.max(...values, start + 1);
-  return {
-    startTime: new Date(start).toISOString(),
-    endTime: new Date(Math.max(start + 1, end)).toISOString(),
+function spanBaseTimelineEvent(span: TraceSpan): Omit<EventRecord, 'id' | 'timestamp' | 'eventName' | 'message'> {
+  const base: Omit<EventRecord, 'id' | 'timestamp' | 'eventName' | 'message'> = {
+    severity: span.status === 'error' ? 'error' : 'info',
+    eventType: 'trace',
+    sandboxId: span.sandboxId,
+    imageId: span.imageId,
+    runtimeType: undefined,
+    source: String(span.attributes?.plugin ?? 'trace'),
+    attributes: {
+      ...span.attributes,
+      'trace.id': span.traceId,
+      'trace.span_id': span.spanId,
+      'trace.span_name': span.spanName,
+      'trace.duration_ms': span.durationMs,
+    },
   };
+  return base;
+}
+
+function isPointOnlyStartupSpan(span: TraceSpan) {
+  const name = span.spanName.toLowerCase();
+  const kind = String(span.attributes?.['startup.event.kind'] ?? '');
+  return kind === 'uprobe'
+    || name.startsWith('process.exec.')
+    || name.startsWith('cni.plugin.')
+    || name.startsWith('oci.')
+    || name.startsWith('kata.');
 }
 
 function AnalysisPanel({
@@ -532,12 +537,12 @@ function StartupBreakdownList({
             <div>
               <strong>{item.binary}</strong>
               <span>
-                {item.count} calls · {formatRatio(ratio(item.durationMs, Math.max(totalDurationMs, 1)))} of startup
+                {item.count} observed events
                 {item.roles?.length ? ` · ${item.roles.join(', ')}` : ''}
               </span>
             </div>
-            <div className="startup-breakdown-track"><i style={{ width: `${Math.max(item.durationMs > 0 ? 7 : 0, item.durationMs / Math.max(maxDurationMs, 1) * 100)}%` }} /></div>
-            <em>{formatDuration(item.durationMs)}</em>
+            <div className="startup-breakdown-track"><i style={{ width: `${Math.max(item.count > 0 ? 7 : 0, item.count / Math.max(maxDurationMs, 1) * 100)}%` }} /></div>
+            <em>observed</em>
           </article>
         ))}
       </div>
@@ -551,7 +556,7 @@ function startupCallchainPhases(sandbox: Sandbox, metrics: MetricSeries[], spans
     { key: 'oci', label: 'OCI runtime', durationMetric: 'sandbox.startup.oci_duration_ms', countMetric: 'sandbox.startup.oci_call_count', tone: 'runtime', patterns: [/\boci\b/i, /runc/i, /runtime\.(create|start)/i] },
     { key: 'kata', label: 'Kata VM', durationMetric: 'sandbox.startup.kata_duration_ms', countMetric: undefined, tone: 'secure', patterns: [/kata/i, /vm\.(boot|start|ready)/i, /hypervisor/i] },
     { key: 'helpers', label: 'Helper drill-down', durationMetric: 'sandbox.startup.helper_binary_duration_ms', countMetric: 'sandbox.startup.helper_binary_count', tone: 'helper', patterns: [/exec/i, /process/i] },
-    { key: 'exec', label: 'Exec total', durationMetric: 'sandbox.startup.binary_exec_duration_ms', countMetric: 'sandbox.startup.binary_exec_count', tone: 'helper', patterns: [/exec/i, /process/i] },
+    { key: 'exec', label: 'Exec events', durationMetric: 'sandbox.startup.binary_exec_count', countMetric: 'sandbox.startup.binary_exec_count', tone: 'helper', patterns: [/exec/i, /process/i] },
   ];
 
   const cniPlugins = cniPluginMetrics(metrics);
@@ -576,7 +581,7 @@ function startupCallchainPhases(sandbox: Sandbox, metrics: MetricSeries[], spans
     cniPlugins,
     processBinaries,
     cniMaxDurationMs: Math.max(...cniPlugins.map((plugin) => plugin.durationMs), 1),
-    processMaxDurationMs: Math.max(...processBinaries.map((binary) => binary.durationMs), 1),
+    processMaxDurationMs: Math.max(...processBinaries.map((binary) => binary.count), 1),
   };
 }
 

@@ -84,11 +84,12 @@ where
         message: "CRI event command did not expose stdout".to_string(),
     })?;
 
-    for line in BufReader::new(stdout).lines() {
-        if let Some(event) = event_from_line(&line?)? {
+    stream_json_objects(BufReader::new(stdout), |content| {
+        if let Some(event) = event_from_line(content)? {
             on_event(event)?;
         }
-    }
+        Ok(())
+    })?;
 
     let status = child.wait()?;
     if !status.success() {
@@ -159,6 +160,18 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
     let current = matches!(status, "running");
     let removed = matches!(action, "CONTAINER_DELETED" | "SANDBOX_DELETED" | "REMOVE");
     let severity = event_severity(action);
+    let cri_entity = if action.starts_with("SANDBOX_") {
+        "sandbox"
+    } else {
+        "container"
+    };
+    let event_name = format!(
+        "cri.{cri_entity}.{}",
+        action
+            .trim_start_matches("SANDBOX_")
+            .trim_start_matches("CONTAINER_")
+            .to_ascii_lowercase()
+    );
 
     let mut attributes = Map::new();
     attributes.insert("plugin".to_string(), json!("kubelet-events"));
@@ -259,8 +272,8 @@ pub fn output_from_cri_event(event: CriEvent, config: &CollectorConfig) -> Optio
             ),
             timestamp: timestamp.clone(),
             severity: severity.to_string(),
-            event_type: "container".to_string(),
-            event_name: format!("cri.container.{}", action.to_ascii_lowercase()),
+            event_type: cri_entity.to_string(),
+            event_name,
             message: format!("CRI container {workload_name} emitted {action}."),
             source: format!(
                 "runtimepulse-rust-collector/{}/kubelet-events",
@@ -301,6 +314,88 @@ fn event_from_line(line: &str) -> Result<Option<CriEvent>> {
     match serde_json::from_value::<CriEvent>(value.clone()) {
         Ok(event) => Ok(Some(event)),
         Err(_) => Ok(Some(serde_json::from_value(normalize_event_value(value))?)),
+    }
+}
+
+fn stream_json_objects<R, F>(reader: R, mut on_object: F) -> Result<()>
+where
+    R: BufRead,
+    F: FnMut(&str) -> Result<()>,
+{
+    let mut parser = JsonObjectStream::default();
+    for line in reader.lines() {
+        for object in parser.push_line(&line?) {
+            on_object(&object)?;
+        }
+    }
+    for object in parser.finish() {
+        on_object(&object)?;
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct JsonObjectStream {
+    buffer: String,
+    depth: i32,
+    in_string: bool,
+    escaped: bool,
+}
+
+impl JsonObjectStream {
+    fn push_line(&mut self, line: &str) -> Vec<String> {
+        let mut objects = Vec::new();
+        let trimmed = line.trim();
+        if self.buffer.is_empty() && trimmed.is_empty() {
+            return objects;
+        }
+
+        for character in line.chars() {
+            if self.buffer.is_empty() && character.is_whitespace() {
+                continue;
+            }
+            self.buffer.push(character);
+            self.observe(character);
+            if self.depth == 0 && !self.in_string && !self.buffer.trim().is_empty() {
+                objects.push(std::mem::take(&mut self.buffer));
+            }
+        }
+
+        if !self.buffer.is_empty() {
+            self.buffer.push('\n');
+        }
+        objects
+    }
+
+    fn finish(&mut self) -> Vec<String> {
+        if self.buffer.trim().is_empty() {
+            self.buffer.clear();
+            Vec::new()
+        } else {
+            vec![std::mem::take(&mut self.buffer)]
+        }
+    }
+
+    fn observe(&mut self, character: char) {
+        if self.escaped {
+            self.escaped = false;
+            return;
+        }
+        if self.in_string {
+            match character {
+                '\\' => self.escaped = true,
+                '"' => self.in_string = false,
+                _ => {}
+            }
+            return;
+        }
+
+        match character {
+            '"' => self.in_string = true,
+            '{' | '[' => self.depth += 1,
+            '}' | ']' => self.depth = (self.depth - 1).max(0),
+            _ => {}
+        }
     }
 }
 
@@ -771,6 +866,51 @@ mod tests {
         let event = event_from_line(content).unwrap().expect("event");
         assert_eq!(cri_event_action(&event), "SANDBOX_CREATED");
         assert_eq!(event.reason, "CONTAINER_CREATED");
+    }
+
+    #[test]
+    fn parses_pretty_printed_crictl_event_stream() {
+        let content = r#"{
+  "containerId": "sandboxcreated123",
+  "containerEventType": "CONTAINER_CREATED_EVENT",
+  "createdAt": "1779846067309998570",
+  "podSandboxStatus": {
+    "id": "sandboxcreated123",
+    "metadata": {"name": "runtimepulse-cri-demo", "namespace": "default", "uid": "uid", "attempt": 1},
+    "state": "SANDBOX_READY",
+    "labels": {
+      "io.kubernetes.container.name": "POD",
+      "io.kubernetes.pod.name": "runtimepulse-cri-demo",
+      "io.kubernetes.pod.namespace": "default"
+    }
+  }
+}
+{
+  "containerId": "sandboxcreated123",
+  "containerEventType": "CONTAINER_STARTED_EVENT",
+  "createdAt": "1779846067409998570",
+  "podSandboxStatus": {
+    "id": "sandboxcreated123",
+    "metadata": {"name": "runtimepulse-cri-demo", "namespace": "default", "uid": "uid", "attempt": 1},
+    "state": "SANDBOX_READY",
+    "labels": {
+      "io.kubernetes.container.name": "POD",
+      "io.kubernetes.pod.name": "runtimepulse-cri-demo",
+      "io.kubernetes.pod.namespace": "default"
+    }
+  }
+}"#;
+
+        let mut events = Vec::new();
+        stream_json_objects(BufReader::new(content.as_bytes()), |object| {
+            events.push(event_from_line(object)?.expect("event"));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(cri_event_action(&events[0]), "SANDBOX_CREATED");
+        assert_eq!(cri_event_action(&events[1]), "SANDBOX_READY");
     }
 
     #[test]
