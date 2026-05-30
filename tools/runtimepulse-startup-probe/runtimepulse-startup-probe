@@ -160,6 +160,18 @@ def existing_files(paths: Iterable[str]) -> list[str]:
     return result
 
 
+def existing_or_resolved_files(paths: Iterable[str]) -> list[str]:
+    resolved: list[str] = []
+    for path in paths:
+        if not path:
+            continue
+        resolved.append(path)
+        found = shutil.which(path)
+        if found and found != path:
+            resolved.append(found)
+    return existing_files(resolved)
+
+
 def discover_cni_binaries(dirs: Iterable[str]) -> list[str]:
     result: list[str] = []
     for directory in dirs:
@@ -849,10 +861,10 @@ def oci_bundle_metadata(bundle: str) -> dict[str, str]:
     if not isinstance(annotations, dict):
         return {}
     labels = {str(key): str(value) for key, value in annotations.items() if value is not None}
-    namespace = labels.get("io.kubernetes.pod.namespace", "")
-    pod = labels.get("io.kubernetes.pod.name", "")
+    namespace = labels.get("io.kubernetes.pod.namespace", "") or labels.get("io.kubernetes.cri.sandbox-namespace", "")
+    pod = labels.get("io.kubernetes.pod.name", "") or labels.get("io.kubernetes.cri.sandbox-name", "")
     container = labels.get("io.kubernetes.container.name", "")
-    pod_uid = labels.get("io.kubernetes.pod.uid", "")
+    pod_uid = labels.get("io.kubernetes.pod.uid", "") or labels.get("io.kubernetes.cri.sandbox-uid", "")
     runtime_handler = (
         labels.get("io.kubernetes.cri.runtime-handler", "")
         or labels.get("io.kubernetes.runtime.handler", "")
@@ -864,6 +876,8 @@ def oci_bundle_metadata(bundle: str) -> dict[str, str]:
         or labels.get("io.kubernetes.pod.sandbox.id", "")
         or labels.get("io.cri-containerd.sandbox-id", "")
     )
+    if not container and labels.get("io.kubernetes.cri.container-type", "").lower() == "sandbox":
+        container = "POD"
     phase = "sandbox" if container.lower() in {"", "pod"} else "container"
     stable_sandbox_id = stable_kubernetes_sandbox_id(namespace, pod, "pod") if namespace and pod else ""
     stable_container_id = ""
@@ -911,7 +925,7 @@ def fallback_containerd_bundle(namespace: str, container_id: str, argv: list[str
         candidates.append(os.path.join(root, namespace, container_id))
     for candidate in candidates:
         if candidate and (Path(candidate) / "config.json").exists():
-            return candidate
+            return str(Path(candidate).resolve())
     return ""
 
 
@@ -934,7 +948,9 @@ def configured_containerd_task_roots() -> list[str]:
             match = re.search(rf"(?m)^\s*{key}\s*=\s*['\"]([^'\"]+)['\"]", text)
             if not match:
                 continue
-            roots.append(os.path.join(match.group(1), "io.containerd.runtime.v2.task"))
+            base = match.group(1)
+            roots.append(os.path.join(base, "io.containerd.runtime.v2.task"))
+            roots.append(os.path.join(base, "io.containerd.runtime.v2.task", "v2"))
     return unique_realpaths(roots)
 
 
@@ -1557,12 +1573,12 @@ def event_attribute(event: dict[str, object], key: str) -> object:
 
 
 def event_runtime_identity(event: dict[str, object]) -> str:
-    for key in ("containerdId", "criSandboxId", "sandboxId"):
-        value = str(event.get(key, "") or "").strip()
-        if value:
-            return value
     for key in ("containerd.container_id", "containerd.raw_id", "cri.sandbox_container_id"):
         value = str(event_attribute(event, key) or "").strip()
+        if value:
+            return value
+    for key in ("containerdId", "criSandboxId", "sandboxId"):
+        value = str(event.get(key, "") or "").strip()
         if value:
             return value
     return ""
@@ -2673,7 +2689,7 @@ def export_command(args: argparse.Namespace) -> None:
     candidates = candidate_names(existing_files(args.include_binary))
     cni_dirs = args.cni_bin_dir or DEFAULT_CNI_BIN_DIRS
     cni_binaries = discover_cni_binaries(cni_dirs)
-    runtime_binaries = existing_files(args.runtime_binary or DEFAULT_RUNTIME_BINARIES)
+    runtime_binaries = existing_or_resolved_files(args.runtime_binary or DEFAULT_RUNTIME_BINARIES)
     helper_binaries = existing_files(DEFAULT_HELPER_BINARIES if args.include_helpers else [])
     candidates.update(candidate_names(cni_binaries))
     candidates.update(candidate_names(runtime_binaries))
