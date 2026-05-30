@@ -438,7 +438,7 @@ function StartupCallchainPanel({
   spans: TraceSpan[];
   onSelectSpan: (span: TraceSpan) => void;
 }) {
-  const phases = startupCallchainPhases(metrics, spans);
+  const phases = startupCallchainPhases(sandbox, metrics, spans);
   const totalDuration = startupCallchainTotal(sandbox, metrics, spans);
   const maxDuration = Math.max(...phases.items.map((phase) => phase.durationMs), 1);
   const hasCallchainData = phases.items.some((phase) => phase.durationMs > 0 || phase.count > 0) || phases.processBinaries.length > 0;
@@ -450,7 +450,7 @@ function StartupCallchainPanel({
       <div className="startup-callchain-header">
         <div>
           <h3>RunPod startup call chain</h3>
-          <p>Collector-derived CNI plugin, OCI, Kata, and helper attribution for this sandbox startup.</p>
+          <p>Collector-derived CNI plugin, runtime, and helper attribution for this sandbox startup.</p>
         </div>
         <div className="startup-callchain-total">
           <strong>{formatDuration(totalDuration)}</strong>
@@ -545,7 +545,7 @@ function StartupBreakdownList({
   );
 }
 
-function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
+function startupCallchainPhases(sandbox: Sandbox, metrics: MetricSeries[], spans: TraceSpan[]) {
   const definitions = [
     { key: 'cni', label: 'CNI plugin', durationMetric: 'sandbox.startup.cni_duration_ms', countMetric: 'sandbox.startup.cni_plugin_count', tone: 'network', patterns: [/^cni\./i] },
     { key: 'oci', label: 'OCI runtime', durationMetric: 'sandbox.startup.oci_duration_ms', countMetric: 'sandbox.startup.oci_call_count', tone: 'runtime', patterns: [/\boci\b/i, /runc/i, /runtime\.(create|start)/i] },
@@ -569,7 +569,7 @@ function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
       count: pluginBreakdown?.count ?? (definition.countMetric ? latestMetricByName(metrics, definition.countMetric) ?? 0 : 0),
       relatedSpans: pluginBreakdown?.binary ? relatedSpans.filter((span) => spanMatchesBinary(span, pluginBreakdown.binary)) : relatedSpans,
     };
-  });
+  }).filter((item) => shouldShowStartupPhase(item, sandbox));
 
   return {
     items,
@@ -578,6 +578,18 @@ function startupCallchainPhases(metrics: MetricSeries[], spans: TraceSpan[]) {
     cniMaxDurationMs: Math.max(...cniPlugins.map((plugin) => plugin.durationMs), 1),
     processMaxDurationMs: Math.max(...processBinaries.map((binary) => binary.durationMs), 1),
   };
+}
+
+
+function shouldShowStartupPhase(phase: {
+  key: string;
+  durationMs: number;
+  count: number;
+  relatedSpans: TraceSpan[];
+}, sandbox: Sandbox) {
+  if (phase.durationMs > 0 || phase.count > 0 || phase.relatedSpans.length > 0) return true;
+  if (phase.key === 'kata') return sandbox.runtimeType === 'kata';
+  return false;
 }
 
 function cniPluginMetrics(metrics: MetricSeries[]): StartupBreakdownItem[] {
