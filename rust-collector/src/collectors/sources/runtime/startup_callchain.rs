@@ -1668,6 +1668,7 @@ fn infer_span_name(
                     }
                 )
             }
+            "kata" => return kata_span_name(binary_name),
             "exec" | "helper" => {
                 return format!(
                     "process.exec.{}",
@@ -1685,6 +1686,19 @@ fn infer_span_name(
         format!("uprobe.{}", sanitize_metric_key(function_name))
     } else {
         "uprobe.event".to_string()
+    }
+}
+
+fn kata_span_name(binary_name: &str) -> String {
+    match binary_name {
+        "containerd-shim-kata-v2" => "kata.shim.start".to_string(),
+        "qemu-system-x86_64" | "qemu-system-aarch64" | "cloud-hypervisor" | "firecracker" => {
+            "kata.vm.start".to_string()
+        }
+        "virtiofsd" => "kata.virtiofsd.start".to_string(),
+        "kata-runtime" => "kata.runtime".to_string(),
+        "" => "kata.runtime".to_string(),
+        value => format!("kata.{}", sanitize_metric_key(value)),
     }
 }
 
@@ -2718,6 +2732,11 @@ fn is_cni_span(span: &StartupStageReport, span_name: &str, binary_name: &str) ->
 
 fn is_oci_span(span: &StartupStageReport, span_name: &str, binary_name: &str) -> bool {
     span_name.starts_with("oci.")
+        || span_name.starts_with("kata.")
+        || span
+            .role
+            .as_deref()
+            .is_some_and(|role| role.eq_ignore_ascii_case("kata"))
         || span.oci_runtime.is_some()
         || span.oci_operation.is_some()
         || matches!(binary_name, "runc" | "crun" | "kata-runtime" | "runsc")
@@ -3774,5 +3793,12 @@ mod tests {
             command_plugins: Vec::new(),
             http_plugins: Vec::new(),
         }
+    }
+
+    #[test]
+    fn names_kata_exec_spans_by_runtime_component() {
+        assert_eq!(kata_span_name("containerd-shim-kata-v2"), "kata.shim.start");
+        assert_eq!(kata_span_name("qemu-system-x86_64"), "kata.vm.start");
+        assert_eq!(kata_span_name("virtiofsd"), "kata.virtiofsd.start");
     }
 }

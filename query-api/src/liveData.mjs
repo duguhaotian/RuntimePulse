@@ -1235,17 +1235,24 @@ function startupDurationMetric(metric) {
 
 function applySandboxStartupDuration(sandbox, durationMs, span, source = 'metric') {
   const plugin = stringValue(span?.attributes?.plugin);
+  const basis = stringValue(span?.spanName) ?? stringValue(span?.name);
+  const runtimeType = stringValue(sandbox?.runtimeType)
+    ?? stringValue(span?.runtimeType)
+    ?? stringValue(span?.attributes?.['runtime.type']);
   const existingPriority = startupDurationPriority(
     startupDurationSource(sandbox),
     stringValue(sandbox?.attributes?.['startup.duration.plugin']),
+    stringValue(sandbox?.attributes?.['startup.duration.basis']),
+    stringValue(sandbox?.runtimeType) ?? stringValue(sandbox?.attributes?.['runtime.type']),
   );
-  const incomingPriority = startupDurationPriority(source, plugin);
+  const incomingPriority = startupDurationPriority(source, plugin, basis, runtimeType);
   if (existingPriority > incomingPriority) return;
 
   sandbox.startupDurationMs = durationMs;
   sandbox.attributes = {
     ...(sandbox.attributes ?? {}),
     'startup.duration.source': source,
+    ...(basis ? { 'startup.duration.basis': basis } : {}),
     ...(plugin ? { 'startup.duration.plugin': plugin } : {}),
   };
   if (span?.startTime) sandbox.createdAt = span.startTime;
@@ -1258,7 +1265,9 @@ function applySandboxStartupDuration(sandbox, durationMs, span, source = 'metric
   if (Number.isFinite(createdAt)) sandbox.startedAt = new Date(createdAt + durationMs).toISOString();
 }
 
-function startupDurationPriority(source, plugin) {
+function startupDurationPriority(source, plugin, basis = '', runtimeType = '') {
+  if (runtimeType === 'kata' && basis === 'sandbox.startup.e2e') return 6.2;
+  if (runtimeType === 'kata' && basis === 'sandbox.startup.callchain') return 4.8;
   if (source === 'trace' && plugin === 'startup-callchain') return 6;
   if (source === 'metric' && plugin === 'startup-callchain') return 5.9;
   if (source === 'trace' && plugin === 'cri-startup-trace') return 5;

@@ -623,16 +623,16 @@ test('derives sandbox startup duration from cri startup trace spans and callchai
       endTime: '2026-05-22T02:00:01.200Z',
       durationMs: 1200,
       status: 'ok',
-      attributes: { plugin: 'cri-startup-trace', 'runtime.type': 'kata' },
+      attributes: { plugin: 'cri-startup-trace', 'runtime.type': 'runc' },
       sandboxId: 'cri-sandbox-a',
-      runtimeType: 'kata',
+      runtimeType: 'runc',
     }],
     profiles: [],
   });
 
   assert.equal(liveSandboxes(store)[0].startupDurationMs, 1200);
-  assert.equal(liveSandboxes(store)[0].runtimeType, 'kata');
-  assert.equal(liveSandboxes(store)[0].attributes['runtime.type'], 'kata');
+  assert.equal(liveSandboxes(store)[0].runtimeType, 'runc');
+  assert.equal(liveSandboxes(store)[0].attributes['runtime.type'], 'runc');
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
 
   recordLiveBatch(store, {
@@ -648,7 +648,7 @@ test('derives sandbox startup duration from cri startup trace spans and callchai
     traces: [],
     profiles: [],
   });
-  assert.equal(liveSandboxes(store)[0].runtimeType, 'kata');
+  assert.equal(liveSandboxes(store)[0].runtimeType, 'runc');
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.source'], 'trace');
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
 
@@ -787,6 +787,59 @@ test('uses startup-callchain over containerd startup trace for unified runpod-to
   assert.equal(liveSandboxes(store)[0].startupDurationMs, 2);
   assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:01.002Z');
   assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'startup-callchain');
+});
+
+test('uses kata e2e startup over shorter callchain execution window', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'startup-callchain',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{ id: 'k8s-default-kata-demo-pod', nodeId: 'node-a', imageRef: 'pause:latest', runtimeType: 'kata' }],
+    },
+    metrics: [{
+      timestamp: '2026-05-22T02:00:00.076Z',
+      name: 'sandbox.startup.callchain_duration_ms',
+      value: 76,
+      unit: 'ms',
+      group: 'startup',
+      sandboxId: 'k8s-default-kata-demo-pod',
+      nodeId: 'node-a',
+      runtimeType: 'kata',
+      attributes: { plugin: 'startup-callchain' },
+    }],
+    events: [],
+    traces: [{
+      traceId: 'kata-demo',
+      spanId: 'kata-demo-callchain',
+      spanName: 'sandbox.startup.callchain',
+      startTime: '2026-05-22T02:00:00.000Z',
+      endTime: '2026-05-22T02:00:00.076Z',
+      durationMs: 76,
+      status: 'ok',
+      attributes: { plugin: 'startup-callchain', 'runtime.type': 'kata' },
+      sandboxId: 'k8s-default-kata-demo-pod',
+      runtimeType: 'kata',
+    }, {
+      traceId: 'kata-demo',
+      spanId: 'kata-demo-e2e',
+      spanName: 'sandbox.startup.e2e',
+      startTime: '2026-05-22T02:00:00.000Z',
+      endTime: '2026-05-22T02:00:00.693Z',
+      durationMs: 693,
+      status: 'ok',
+      attributes: { plugin: 'cri-startup-trace', 'runtime.type': 'kata' },
+      sandboxId: 'k8s-default-kata-demo-pod',
+      runtimeType: 'kata',
+    }],
+    profiles: [],
+  });
+
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 693);
+  assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:00.693Z');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.basis'], 'sandbox.startup.e2e');
 });
 
 test('applies stored cri startup trace when sandbox metadata arrives later', () => {
