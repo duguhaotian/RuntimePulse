@@ -268,6 +268,41 @@ def discover_containerd_target_by_pid(pid: int, binary: str) -> ContainerdTarget
     )
 
 
+def observation_is_containerd_binary(obs: ExecObservation, binary: str) -> bool:
+    binary_path = resolve_binary(binary)
+    binary_real = os.path.realpath(binary_path) if binary_path else ""
+    binary_base = basename(binary_path) or "containerd"
+    observed_binary = os.path.realpath(obs.binary) if obs.binary else ""
+    argv0 = obs.argv[0] if obs.argv else ""
+    argv0_real = os.path.realpath(resolve_binary(argv0)) if argv0 else ""
+    candidates = [
+        observed_binary,
+        argv0_real,
+        obs.binary,
+        argv0,
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if binary_real and os.path.realpath(candidate) == binary_real:
+            return True
+        if basename(candidate) == binary_base:
+            return True
+    return False
+
+
+def containerd_target_from_observation(obs: ExecObservation, binary: str) -> ContainerdTarget | None:
+    if not observation_is_containerd_binary(obs, binary):
+        return None
+    start_time = proc_start_time(obs.pid)
+    return ContainerdTarget(
+        pid=obs.pid,
+        exe=os.path.realpath(obs.binary) if obs.binary else resolve_binary(binary),
+        start_time=start_time,
+        instance_id=f"containerd:{obs.pid}:{start_time or 'exec'}",
+    )
+
+
 def discover_containerd_targets(binary: str) -> list[ContainerdTarget]:
     binary_path = resolve_binary(binary)
     binary_real = os.path.realpath(binary_path) if binary_path else ""
@@ -585,12 +620,13 @@ def build_bpftrace_program(candidates: set[str], duration_ms: int, argv_slots: i
     argv_exprs = ", ".join([f"str(args->argv[{idx}])" for idx in range(argv_slots)])
     env_exprs = ", ".join([f"str(args->envp[{idx}])" for idx in range(env_slots)])
     format_fields = ["%s"] * (argv_slots + env_slots)
-    format_string = "RP_EXEC_ENTER\t%d\t%d\t%d\t%d\t%s\t%s\t" + "\t".join(format_fields) + "\n"
-    values = ["pid", "ppid", "uid", "gid", "comm", "str(args->filename)", "str(args->argv[0])"]
+    format_string = "RP_EXEC_ENTER\t%llu\t%d\t%d\t%d\t%d\t%s\t%s\t" + "\t".join(format_fields) + "\n"
+    values = ["nsecs", "pid", "ppid", "uid", "gid", "comm", "str(args->filename)", "str(args->argv[0])"]
     values.extend([f"str(args->argv[{idx}])" for idx in range(1, argv_slots)])
     values.extend([f"str(args->envp[{idx}])" for idx in range(env_slots)])
     # The first argv slot is included explicitly above to make the column layout stable.
     printf_values = ", ".join(values)
+    go_uprobe_program = bpftrace_go_uprobe_program(go_uprobes or [])
 
     return f"""
 BEGIN
@@ -606,19 +642,48 @@ tracepoint:syscalls:sys_enter_execve
 
 tracepoint:sched:sched_process_fork
 {{
-  printf("RP_PROC_FORK\\t%d\\t%d\\t%s\\n", args->parent_pid, args->child_pid, args->child_comm);
+  printf("RP_PROC_FORK\\t%llu\\t%d\\t%d\\t%s\\n", nsecs, args->parent_pid, args->child_pid, args->child_comm);
 }}
 
 tracepoint:sched:sched_process_exit
 {{
-  printf("RP_PROC_EXIT\\t%d\\t%s\\n", args->pid, args->comm);
+  printf("RP_PROC_EXIT\\t%llu\\t%d\\t%s\\n", nsecs, args->pid, args->comm);
 }}
+
+{go_uprobe_program}
 
 interval:ms:{max(duration_ms, 100)}
 {{
   exit();
 }}
 """
+
+
+def bpftrace_go_uprobe_program(go_uprobes: list[GoUprobeSpec]) -> str:
+    clauses: list[str] = []
+    for spec in go_uprobes:
+        enter_format = (
+            "RP_GO_UPROBE_ENTER\t%llu\t%d\t%d\t%s\t"
+            f"{spec.function}\t{spec.symbol}\t{spec.binary}\n"
+        )
+        clauses.append(f"""
+uprobe:{spec.binary}:0x{spec.attach_offset:x}
+{{
+  printf({bpftrace_string(enter_format)}, nsecs, pid, tid, comm);
+}}
+""")
+        if spec.attach_return:
+            exit_format = (
+                "RP_GO_UPROBE_EXIT\t%llu\t%d\t%d\t%s\t"
+                f"{spec.function}\t{spec.symbol}\t{spec.binary}\n"
+            )
+            clauses.append(f"""
+uretprobe:{spec.binary}:0x{spec.attach_offset:x}
+{{
+  printf({bpftrace_string(exit_format)}, nsecs, pid, tid, comm);
+}}
+""")
+    return "\n".join(clauses)
 
 
 @dataclass
@@ -632,6 +697,7 @@ class ExecObservation:
     argv: list[str]
     env: dict[str, str]
     observed_at: str
+    timestamp_ns: int
     role: str
     sandbox_id: str
     cri_sandbox_id: str
@@ -684,6 +750,31 @@ class ProcessRoute:
     attributes: dict[str, object] = field(default_factory=dict)
 
 
+def register_containerd_target(
+    routes: dict[int, ProcessRoute],
+    containerd_by_pid: dict[int, ContainerdTarget],
+    target: ContainerdTarget,
+    ppid: int = 0,
+    include_descendants: bool = False,
+) -> None:
+    containerd_by_pid[target.pid] = target
+    for thread_pid in thread_pids(target.pid) | {target.pid}:
+        routes[thread_pid] = ProcessRoute(
+            pid=thread_pid,
+            ppid=ppid if thread_pid == target.pid else 0,
+            containerd_pid=target.pid,
+            containerd_instance_id=target.instance_id,
+        )
+    if include_descendants:
+        for descendant_pid in descendant_pids(target.pid):
+            routes.setdefault(descendant_pid, ProcessRoute(
+                pid=descendant_pid,
+                ppid=0,
+                containerd_pid=target.pid,
+                containerd_instance_id=target.instance_id,
+            ))
+
+
 @dataclass
 class GoUprobeObservation:
     pid: int
@@ -701,7 +792,7 @@ class GoUprobeObservation:
         return f"go-uprobe-{self.pid}-{self.tid}-{sanitize_id(self.function)}-{sanitize_id(self.symbol)}"
 
 
-def parse_go_uprobe_line(line: str, metadata: dict[str, str] | None = None) -> tuple[str, GoUprobeObservation] | None:
+def parse_go_uprobe_line(line: str, metadata: dict[str, str] | None = None, monotonic_epoch_ns: int = 0) -> tuple[str, GoUprobeObservation] | None:
     parts = line.rstrip("\n").split("\t")
     if len(parts) < 8 or parts[0] not in {"RP_GO_UPROBE_ENTER", "RP_GO_UPROBE_EXIT"}:
         return None
@@ -711,6 +802,8 @@ def parse_go_uprobe_line(line: str, metadata: dict[str, str] | None = None) -> t
         tid = int(parts[3])
     except ValueError:
         return None
+    if timestamp_ns < 100_000_000_000_000_000 and monotonic_epoch_ns:
+        timestamp_ns += monotonic_epoch_ns
     event_type = "enter" if parts[0].endswith("ENTER") else "exit"
     observed_at = timestamp_from_unix_nanos(timestamp_ns) if timestamp_ns > 0 else utc_now()
     return event_type, GoUprobeObservation(
@@ -724,6 +817,25 @@ def parse_go_uprobe_line(line: str, metadata: dict[str, str] | None = None) -> t
         timestamp_ns=timestamp_ns,
         metadata=dict(metadata or {}),
     )
+
+
+def synthetic_go_uprobe_exit(obs: GoUprobeObservation) -> dict[str, object]:
+    exit_obs = GoUprobeObservation(
+        pid=obs.pid,
+        tid=obs.tid,
+        comm=obs.comm,
+        function=obs.function,
+        symbol=obs.symbol,
+        binary=obs.binary,
+        observed_at=timestamp_plus_ms(obs.observed_at, 1.0) or utc_now(),
+        timestamp_ns=(obs.timestamp_ns + 1_000_000) if obs.timestamp_ns else 0,
+        metadata=dict(obs.metadata),
+    )
+    event = event_from_go_uprobe(exit_obs, "exit", "unknown", "", "")
+    event["durationMs"] = 1
+    event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
+    event.setdefault("attributes", {})["startup.probe.exitSynthetic"] = "go-uprobe-entry-plus-1ms"
+    return event
 
 
 def parse_go_uprobe_meta_line(line: str) -> tuple[tuple[int, int], str, str] | None:
@@ -1007,23 +1119,52 @@ def go_uprobe_startup_phase(role: str) -> str:
     return "process"
 
 
-def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str, default_runtime_type: str, forced_sandbox_id: str) -> ExecObservation | None:
+def timestamp_from_monotonic_nanos(value: int, monotonic_epoch_ns: int) -> str:
+    return timestamp_from_unix_nanos(value + monotonic_epoch_ns)
+
+
+def parse_timestamped_bpftrace_line(parts: list[str], legacy_field_count: int, monotonic_epoch_ns: int) -> tuple[int, str, list[str]]:
+    """Return event timestamp ns, ISO timestamp, and fields after optional nsecs.
+
+    Older saved bpftrace logs did not include `nsecs`; keep accepting that shape
+    for offline validation, but prefer kernel monotonic timestamps for live
+    capture so pipe/stdout buffering does not shift exec events later in the
+    startup timeline.
+    """
+    if len(parts) >= legacy_field_count + 1:
+        try:
+            monotonic_ns = int(parts[1])
+            # `nsecs` is monotonic nanoseconds since boot and will be far larger
+            # than a PID.  This keeps pre-change saved logs unambiguous.
+            if monotonic_ns > 1_000_000_000_000:
+                timestamp_ns = monotonic_ns + monotonic_epoch_ns
+                return timestamp_ns, timestamp_from_unix_nanos(timestamp_ns), parts[2:]
+        except ValueError:
+            pass
+    timestamp_ns = time.time_ns()
+    return timestamp_ns, timestamp_from_unix_nanos(timestamp_ns), parts[1:]
+
+
+def parse_exec_line(line: str, argv_slots: int, env_slots: int, fallback_observed_at: str, default_runtime_type: str, forced_sandbox_id: str, monotonic_epoch_ns: int = 0) -> ExecObservation | None:
     parts = line.rstrip("\n").split("\t")
     expected = 6 + argv_slots + env_slots
     if len(parts) < expected or parts[0] != "RP_EXEC_ENTER":
         return None
+    timestamp_ns, observed_at, fields = parse_timestamped_bpftrace_line(parts, expected, monotonic_epoch_ns)
+    if not monotonic_epoch_ns:
+        observed_at = fallback_observed_at
     try:
-        pid = int(parts[1])
-        ppid = int(parts[2])
-        uid = int(parts[3])
-        gid = int(parts[4])
-    except ValueError:
+        pid = int(fields[0])
+        ppid = int(fields[1])
+        uid = int(fields[2])
+        gid = int(fields[3])
+    except (IndexError, ValueError):
         return None
-    comm = parts[5]
-    binary = parts[6]
-    argv_start = 7
-    argv = [item for item in parts[argv_start:argv_start + argv_slots] if item]
-    env_items = parts[argv_start + argv_slots:argv_start + argv_slots + env_slots]
+    comm = fields[4]
+    binary = fields[5]
+    argv_start = 6
+    argv = [item for item in fields[argv_start:argv_start + argv_slots] if item]
+    env_items = fields[argv_start + argv_slots:argv_start + argv_slots + env_slots]
     env = parse_env(env_items)
     cni_args = parse_cni_args(env.get("CNI_ARGS", ""))
 
@@ -1119,6 +1260,7 @@ def parse_exec_line(line: str, argv_slots: int, env_slots: int, observed_at: str
         argv=argv,
         env={key: env[key] for key in CNI_ENV_KEYS if key in env},
         observed_at=observed_at,
+        timestamp_ns=timestamp_ns,
         role=role,
         sandbox_id=sandbox_id,
         cri_sandbox_id=cni_container_id or bundle_report_sandbox_id or containerd_id,
@@ -1285,6 +1427,7 @@ def event_from_observation(obs: ExecObservation, event_type: str, timestamp: str
         "requestId": obs.request_id,
         "function": "execve",
         "timestamp": timestamp,
+        "timestampNs": obs.timestamp_ns,
         "sandboxId": obs.sandbox_id,
         "criSandboxId": obs.cri_sandbox_id,
         "containerdId": obs.containerd_id,
@@ -1329,26 +1472,13 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
     routes: dict[int, ProcessRoute] = {}
     containerd_by_pid: dict[int, ContainerdTarget] = {}
     for target in containerd_targets or []:
-        containerd_by_pid[target.pid] = target
-        for thread_pid in thread_pids(target.pid) | {target.pid}:
-            routes[thread_pid] = ProcessRoute(
-                pid=thread_pid,
-                ppid=0,
-                containerd_pid=target.pid,
-                containerd_instance_id=target.instance_id,
-            )
-        for descendant_pid in descendant_pids(target.pid) if tree_routing else set():
-            routes.setdefault(descendant_pid, ProcessRoute(
-                pid=descendant_pid,
-                ppid=0,
-                containerd_pid=target.pid,
-                containerd_instance_id=target.instance_id,
-            ))
+        register_containerd_target(routes, containerd_by_pid, target, include_descendants=tree_routing)
     events: list[dict[str, object]] = []
     runtime_type = default_runtime_type or "unknown"
     sandbox_id = forced_sandbox_id
     cri_sandbox_id = ""
     containerd_id = ""
+    monotonic_epoch_ns = time.time_ns() - time.monotonic_ns()
 
     for raw in lines:
         now = utc_now()
@@ -1366,12 +1496,16 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
                     meta_key = (int(parsed_peek[2]), int(parsed_peek[3]))
                 except ValueError:
                     meta_key = None
-            parsed_go = parse_go_uprobe_line(raw, go_meta_by_thread.get(meta_key or (-1, -1), {}))
+            parsed_go = parse_go_uprobe_line(raw, go_meta_by_thread.get(meta_key or (-1, -1), {}), monotonic_epoch_ns)
             if not parsed_go:
                 continue
             event_type, obs = parsed_go
             if event_type == "enter":
                 pending_go[obs.request_id] = obs
+                events.append(event_from_go_uprobe(obs, event_type, runtime_type, "", ""))
+                if not any(existing.function == obs.function and existing.pid == obs.pid and existing.tid == obs.tid for existing in pending_go.values() if existing.request_id != obs.request_id):
+                    events.append(synthetic_go_uprobe_exit(obs))
+                continue
             else:
                 pending_go.pop(obs.request_id, None)
             events.append(event_from_go_uprobe(obs, event_type, runtime_type, "", ""))
@@ -1379,9 +1513,10 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
             parts = raw.rstrip("\n").split("\t")
             if len(parts) < 3:
                 continue
+            _timestamp_ns, _observed_at, fields = parse_timestamped_bpftrace_line(parts, 4, monotonic_epoch_ns)
             try:
-                parent_pid = int(parts[1])
-                child_pid = int(parts[2])
+                parent_pid = int(fields[0])
+                child_pid = int(fields[1])
             except ValueError:
                 continue
             if not tree_routing:
@@ -1389,13 +1524,7 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
             parent_pid = proc_tgid(parent_pid)
             target = discover_containerd_target_by_pid(child_pid, containerd_binary) if containerd_binary else None
             if target:
-                containerd_by_pid[target.pid] = target
-                routes[target.pid] = ProcessRoute(
-                    pid=target.pid,
-                    ppid=parent_pid,
-                    containerd_pid=target.pid,
-                    containerd_instance_id=target.instance_id,
-                )
+                register_containerd_target(routes, containerd_by_pid, target, ppid=parent_pid)
                 continue
             parent_route = routes.get(parent_pid)
             if parent_route:
@@ -1421,10 +1550,14 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
                     attributes=dict(parent_route.attributes),
                 )
         elif raw.startswith("RP_EXEC_ENTER\t"):
-            obs = parse_exec_line(raw, argv_slots, env_slots, now, default_runtime_type, forced_sandbox_id)
+            obs = parse_exec_line(raw, argv_slots, env_slots, now, default_runtime_type, forced_sandbox_id, monotonic_epoch_ns)
             if not obs:
                 continue
             if tree_routing:
+                observed_containerd_target = containerd_target_from_observation(obs, containerd_binary) if containerd_binary else None
+                if observed_containerd_target:
+                    register_containerd_target(routes, containerd_by_pid, observed_containerd_target, ppid=obs.ppid)
+                    continue
                 direct_parent_route = routes.get(obs.ppid)
                 parent_tgid_route = routes.get(proc_tgid(obs.ppid))
                 parent_route = direct_parent_route or parent_tgid_route
@@ -1479,32 +1612,34 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
             parts = raw.rstrip("\n").split("\t")
             if len(parts) < 2:
                 continue
+            timestamp_ns, observed_at, fields = parse_timestamped_bpftrace_line(parts, 3, monotonic_epoch_ns)
             try:
-                pid = int(parts[1])
+                pid = int(fields[0])
             except ValueError:
                 continue
             obs = pending.pop(pid, None)
             if obs:
-                events.append(event_from_observation(obs, "exit", now, route=routes.get(pid) if tree_routing else None))
+                obs.timestamp_ns = timestamp_ns
+                events.append(event_from_observation(obs, "exit", observed_at, route=routes.get(pid) if tree_routing else None))
             if tree_routing:
                 routes.pop(pid, None)
 
     # If a short capture window ends before process exit, emit complete events with a
     # minimal duration so the startup-callchain normalizer still surfaces the binary.
     for obs in pending.values():
-        exit_time = utc_now()
+        if obs.timestamp_ns:
+            obs.timestamp_ns += 1_000_000
+            exit_time = timestamp_from_unix_nanos(obs.timestamp_ns)
+        else:
+            exit_time = timestamp_plus_ms(obs.observed_at, 1.0) or utc_now()
         event = event_from_observation(obs, "exit", exit_time, route=routes.get(obs.pid) if tree_routing else None)
         event["durationMs"] = 1
         event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
         events.append(event)
     synthetic_exit_time = max([str(event.get("timestamp", "") or "") for event in events] or [utc_now()]) or utc_now()
-    for obs in pending_go.values():
-        event = event_from_go_uprobe(obs, "exit", runtime_type, "", "")
-        event["timestamp"] = synthetic_exit_time
-        event["durationMs"] = 1
-        event.setdefault("attributes", {})["startup.probe.exitMissing"] = True
-        event.setdefault("attributes", {})["startup.probe.exitSynthetic"] = "last-observed-startup-event"
-        events.append(event)
+    # Entry-only Go uprobes already get an immediate synthetic exit above so
+    # their boundary is visible without stretching the call-chain to the end of
+    # the capture window.
 
     events = correlate_cni_netns_events(events)
     events = correlate_oci_bundle_metadata_events(events)
@@ -1519,6 +1654,14 @@ def collect_from_stream(lines: Iterable[str], argv_slots: int, env_slots: int, d
 
 def event_time(event: dict[str, object]) -> datetime | None:
     return parse_iso8601(str(event.get("timestamp", "") or ""))
+
+
+def timestamp_plus_ms(value: str, duration_ms: float) -> str | None:
+    started_at = parse_iso8601(value)
+    if not started_at:
+        return None
+    ended_at = started_at + timedelta(milliseconds=max(duration_ms, 1.0))
+    return ended_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def event_time_range(events: list[dict[str, object]]) -> tuple[datetime | None, datetime | None]:
@@ -2336,7 +2479,10 @@ def attach_bcc_go_uprobes(go_uprobes: list[GoUprobeSpec]):
 def read_bcc_go_uprobe_lines(bpf, symbol_by_index: dict[int, GoUprobeSpec]) -> list[str]:
     if bpf is None:
         return []
-    trace = bpf.trace_open(nonblocking=True)
+    trace = getattr(bpf, "_runtimepulse_trace", None)
+    if trace is None:
+        trace = bpf.trace_open(nonblocking=True)
+        bpf._runtimepulse_trace = trace
     lines: list[str] = []
     pattern = re.compile(r"^\s*(?P<comm>.*?)\s*[-]\s*\d+\s+\[.*?\]\s+[^:]+:\s+(?:(?P<ip>0x[0-9a-fA-F]+):\s+)?(?:bpf_trace_printk:\s+)?(?P<kind>RP_GO_UPROBE_(?:ENTER|EXIT))\s+(?P<idx>\d+)\s+(?P<ts>\d+)\s+(?P<pid>\d+)\s+(?P<tid>\d+)")
     meta_pattern = re.compile(r"^\s*(?P<comm>.*?)\s*[-]\s*\d+\s+\[.*?\]\s+[^:]+:\s+(?:(?P<ip>0x[0-9a-fA-F]+):\s+)?(?:bpf_trace_printk:\s+)?RP_GO_UPROBE_META\s+(?P<pid>\d+)\s+(?P<tid>\d+)\s+(?P<field>\S+)\s+(?P<value>.*)$")
@@ -2379,8 +2525,7 @@ def read_bcc_go_uprobe_lines(bpf, symbol_by_index: dict[int, GoUprobeSpec]) -> l
 
 def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: list[GoUprobeSpec] | None = None) -> list[str]:
     go_uprobes = go_uprobes or []
-    bcc_bpf, bcc_symbols = attach_bcc_go_uprobes(go_uprobes) if go_uprobes else (None, {})
-    program = build_bpftrace_program(candidates, args.duration_ms, args.argv_slots, args.env_slots, [], args.containerd_tree)
+    program = build_bpftrace_program(candidates, args.duration_ms, args.argv_slots, args.env_slots, go_uprobes, args.containerd_tree)
     bpftrace = shutil.which(args.bpftrace) or args.bpftrace
     if not bpftrace or not os.path.exists(bpftrace):
         raise SystemExit(f"bpftrace not found: {args.bpftrace}")
@@ -2391,7 +2536,10 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: lis
 
     env = os.environ.copy()
     env.setdefault("BPFTRACE_STRLEN", str(args.strlen))
-    cmd = [bpftrace, "-q", script_path]
+    cmd = [bpftrace, "-q"]
+    if go_uprobes:
+        cmd.append("--unsafe")
+    cmd.append(script_path)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env)
     lines: list[str] = []
     try:
@@ -2406,9 +2554,7 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: lis
                         Path(args.ready_file).write_text(str(proc.pid))
                     if line.startswith("RP_"):
                         lines.append(line)
-                    lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
                     continue
-            lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
             if proc.poll() is not None:
                 break
         if proc.poll() is None:
@@ -2417,9 +2563,6 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: lis
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
-        if bcc_bpf is not None:
-            time.sleep(0.05)
-        lines.extend(read_bcc_go_uprobe_lines(bcc_bpf, bcc_symbols))
         stderr = proc.stderr.read() if proc.stderr else ""
         if proc.returncode not in (0, None) and not lines:
             raise SystemExit(f"bpftrace failed with {proc.returncode}: {stderr.strip()}")
@@ -2847,7 +2990,7 @@ def self_test() -> None:
     ambiguous_reports = grouped_reports(ambiguous_events, ambiguous_runtime, "", "", "self-test")
     assert len(ambiguous_reports) == 2
     assert all(report["summary"].get("assignedPendingGoUprobeEventCount") == 0.0 for report in ambiguous_reports)
-    assert all(report["summary"].get("unassignedPendingGoUprobeEventCount") == 3.0 for report in ambiguous_reports)
+    assert all(report["summary"].get("unassignedPendingGoUprobeEventCount") == 4.0 for report in ambiguous_reports)
 
     orphan_runtime_lines = [
         "RP_GO_UPROBE_ENTER\t1779940000160000000\t999\t1000\tcontainerd-shim-runc-v2\tOCIRuncCreate\tgithub.com/containerd/go-runc.(*Runc).Create\t/usr/bin/containerd-shim-runc-v2\n",
@@ -2967,6 +3110,29 @@ def self_test() -> None:
     assert iptables_attrs["cni.root.plugin"] == "bridge"
     assert iptables_attrs["containerd.instance_id"] == "containerd:900:42"
     assert tree_summary["observedCniGroupExecCount"] == 2.0
+    restart_lines = [
+        "RP_PROC_FORK\t1\t910\tcontainerd\n",
+        "RP_EXEC_ENTER\t910\t1\t0\t0\tcontainerd\t/usr/bin/containerd\t/usr/bin/containerd\t\t\t\t\t\t\t\t\t\t\n",
+        "RP_PROC_FORK\t910\t911\tbridge\n",
+        "RP_EXEC_ENTER\t911\t910\t0\t0\tcontainerd\t/opt/cni/bin/bridge\t/opt/cni/bin/bridge\t\t\t\t\t\tCNI_COMMAND=ADD\tCNI_CONTAINERID=sandbox-restart\tCNI_ARGS=K8S_POD_NAMESPACE=default;K8S_POD_NAME=restart-demo;K8S_POD_INFRA_CONTAINER_ID=sandbox-restart\tCNI_NETNS=/proc/self/ns/net\n",
+        "RP_PROC_EXIT\t911\tbridge\n",
+    ]
+    restart_events, restart_summary, _restart_runtime, restart_sandbox, _restart_cri = collect_from_stream(
+        restart_lines,
+        6,
+        4,
+        "runc",
+        "",
+        None,
+        [],
+        True,
+        "/usr/bin/containerd",
+    )
+    assert restart_sandbox == "sandbox-restart"
+    restart_event = next(event for event in restart_events if event.get("eventType") == "enter" and basename(str(event.get("binary"))) == "bridge")
+    assert restart_event["attributes"]["containerd.pid"] == 910
+    assert restart_event["attributes"]["containerd.instance_id"].startswith("containerd:910:")
+    assert restart_summary["observedContainerdInstanceCount"] == 1.0
     print("self-test ok")
 
 

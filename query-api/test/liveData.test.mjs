@@ -254,6 +254,68 @@ test('reconciles containerd running snapshots from inventory metadata', () => {
   assert.equal(snapshot.sandboxes, 1);
 });
 
+test('keeps aliased k8s sandbox when containerd snapshot uses raw runtime id', () => {
+  const store = createLiveStore();
+  recordLiveBatch(store, {
+    source: 'cri-events',
+    metadata: {
+      clusters: [],
+      nodes: [],
+      images: [],
+      sandboxes: [{
+        id: 'k8s-default-runtimepulse-demo-pod',
+        nodeId: 'node-a',
+        imageRef: 'registry.k8s.io/pause:3.10',
+        runtimeType: 'runc',
+        attributes: {
+          'cri.sandbox_id': 'abcdef0123456789',
+          'containerd.container_id': 'containerd-k8s-io-abcdef0123456789',
+          'k8s.namespace': 'default',
+          'k8s.pod': 'runtimepulse-demo',
+          'k8s.container': 'POD',
+          'k8s.pod_attempt': '1',
+        },
+      }],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  recordLiveBatch(store, {
+    source: 'host-containerd',
+    metadata: {
+      clusters: [],
+      nodes: [{
+        id: 'node-a',
+        attributes: {
+          'snapshot.scope': 'containerd-running',
+          'snapshot.nodeId': 'node-a',
+          'snapshot.sandboxIds': ['containerd-k8s-io-abcdef0123456789'],
+        },
+      }],
+      images: [],
+      sandboxes: [{
+        id: 'containerd-k8s-io-abcdef0123456789',
+        nodeId: 'node-a',
+        imageRef: 'registry.k8s.io/pause:3.10',
+        runtimeType: 'runc',
+        attributes: {
+          'containerd.id': 'abcdef0123456789',
+          'snapshot.scope': 'containerd-running',
+        },
+      }],
+    },
+    metrics: [],
+    events: [],
+    traces: [],
+    profiles: [],
+  });
+
+  assert.deepEqual(liveSandboxes(store).map((sandbox) => sandbox.id), ['k8s-default-runtimepulse-demo-pod']);
+});
+
 test('empty containerd running snapshot removes stale live sandboxes', () => {
   const store = createLiveStore();
   recordLiveBatch(store, {

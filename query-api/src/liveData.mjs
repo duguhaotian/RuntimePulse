@@ -735,11 +735,42 @@ function reconcileSnapshotEvents(store, events) {
 }
 
 function reconcileSandboxSnapshot(store, scope, nodeId, sandboxIds) {
+  const canonicalSandboxIds = canonicalSnapshotSandboxIds(store, sandboxIds);
   for (const sandbox of Array.from(store.sandboxes.values())) {
     if (sandbox.nodeId !== nodeId) continue;
     if (!sandboxMatchesSnapshotScope(sandbox, scope)) continue;
-    if (!sandboxIds.has(sandbox.id)) removeLiveSandbox(store, sandbox.id);
+    if (!canonicalSandboxIds.has(sandbox.id)) removeLiveSandbox(store, sandbox.id);
   }
+}
+
+function canonicalSnapshotSandboxIds(store, sandboxIds) {
+  const canonicalIds = new Set();
+  for (const sandboxId of sandboxIds) {
+    for (const candidate of sandboxIdCandidates(sandboxId)) {
+      canonicalIds.add(candidate);
+      for (const kind of ['sandbox-id', 'runtime-id']) {
+        const canonical = store.sandboxAliasToId.get(`${kind}:${candidate}`);
+        if (canonical) canonicalIds.add(canonical);
+      }
+    }
+  }
+  return canonicalIds;
+}
+
+function sandboxIdCandidates(value) {
+  const text = stringValue(value);
+  if (!text) return [];
+
+  const candidates = new Set([text]);
+  const pathPart = text.includes('/') ? text.split('/').at(-1) : text;
+  if (pathPart) candidates.add(pathPart);
+
+  if (pathPart?.startsWith('containerd-')) {
+    const tail = pathPart.split('-').at(-1);
+    if (tail) candidates.add(tail);
+  }
+
+  return Array.from(candidates);
 }
 
 function sandboxMatchesSnapshotScope(sandbox, scope) {
