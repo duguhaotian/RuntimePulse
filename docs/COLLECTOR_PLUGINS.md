@@ -33,7 +33,7 @@ Do not use container-side `procfs` or `cgroupfs` plugins for node-wide metrics. 
 - `host-containerd-events`: runs on the host, follows containerd events, and is the preferred Kubernetes lifecycle stream.
 - `host-containerd-cgroupfs`: runs on the host, samples only containerd containers made active by task events, and resolves cgroup paths from the task PID. It is the Kubernetes/containerd fallback when the standard metrics platform does not expose a needed sandbox metric.
 - `host-kubelet-events`: runs on the host, follows CRI/Kubelet lifecycle events from a configurable JSONL command such as `crictl events --output json`, and enriches Kubernetes sandbox lifecycle records around the containerd path.
-- `host-startup-callchain`: runs on the host, reads or invokes an external RunPodSandbox/CNI/OCI/Kata uprobe exporter through `RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH` or `RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`, and pushes normalized startup spans/metrics to the outlet.
+- `host-startup-callchain`: runs on the host, consumes completed RunPodSandbox/CNI/OCI/Kata uprobe reports from `RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR` (or legacy path/command hooks), and pushes normalized startup spans/metrics to the outlet.
 - `host-docker`: runs on the host, reads Docker container/image inventory through the Docker CLI, then pushes sandbox and image metadata to the outlet over HTTP. This is the single-node/local validation path, not the Kubernetes path.
 - `host-docker-events`: runs on the host, follows Docker lifecycle events, and pushes sandbox lifecycle event records to the outlet for single-node Docker scenarios.
 - `host-docker-cgroupfs`: runs on the host, resolves cgroup paths from Docker running-container PIDs, and reports per-sandbox CPU, memory, IO, network, and process metrics without scanning the whole cgroup tree.
@@ -111,16 +111,17 @@ into RunPodSandbox, CNI plugin binary, OCI runtime, Kata, and helper spans
 before metrics are derived.
 
 For production-like host deployments, prefer the dedicated
-`runtimepulse-startup-callchain` systemd unit rather than adding
-`startup-callchain` to the multi-source host-agent.  Long BPF capture windows
-can otherwise delay normal inventory/event sources in the host-agent collection
-loop:
+`runtimepulse-startup-probe` producer plus `runtimepulse-startup-callchain`
+spool consumer rather than adding `startup-callchain` to the multi-source
+host-agent. This keeps probes attached continuously without delaying normal
+inventory/event sources in the host-agent collection loop:
 
 ```bash
 sudo install -m 0755 tools/runtimepulse-startup-probe/runtimepulse-startup-probe /usr/local/bin/runtimepulse-startup-probe
 sudo install -m 0644 deploy/systemd/runtimepulse-startup-callchain.service /etc/systemd/system/runtimepulse-startup-callchain.service
+sudo install -m 0644 deploy/systemd/runtimepulse-startup-probe.service /etc/systemd/system/runtimepulse-startup-probe.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now runtimepulse-startup-callchain
+sudo systemctl enable --now runtimepulse-startup-probe runtimepulse-startup-callchain
 ```
 
 Use the shared `/etc/runtimepulse/host-agent.env` file to configure both the
@@ -130,9 +131,14 @@ normal host-agent and the dedicated startup call-chain service:
 RUNTIMEPULSE_HOST_AGENT_SOURCES=procfs,psi,cgroupfs,containerd-inventory,containerd-events,cri-startup-trace,containerd-sandbox-cgroupfs,image-cache,profile-report,perf,ebpf
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io
 RUNTIMEPULSE_CRI_EVENTS_CMD=crictl events --output json
-RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS=9000
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_TIMEOUT_MS=45000
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD=/usr/local/bin/runtimepulse-startup-probe export --once --duration-ms 8000 --containerd-tree --containerd-namespace k8s.io --include-helpers --containerd-binary /usr/bin/containerd --containerd-config /etc/containerd/config.toml
+RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR=/var/lib/runtimepulse/startup-callchain
+RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS=1000
+RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_TREE=true
+RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES=k8s.io
+RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS=true
+RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES=true
+RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY=/usr/bin/containerd
+RUNTIMEPULSE_CONTAINERD_CONFIG=/etc/containerd/config.toml
 ```
 
 The repository includes a minimal exporter at
@@ -164,8 +170,10 @@ Local one-shot validation can read the bundled raw-event example without a real
 uprobe exporter:
 
 ```bash
+install -d /tmp/runtimepulse-startup-callchain-spool && \
+cp rust-collector/examples/startup-uprobe-events.json /tmp/runtimepulse-startup-callchain-spool/example.json && \
 RUNTIMEPULSE_COLLECTOR_ONCE=true \
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH=rust-collector/examples/startup-uprobe-events.json \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR=/tmp/runtimepulse-startup-callchain-spool \
 cargo run --manifest-path rust-collector/Cargo.toml -- host-startup-callchain
 ```
 
@@ -173,9 +181,11 @@ The same normalizer is also available as an outlet-container plugin when the
 exporter runs inside the outlet namespace:
 
 ```bash
+install -d /tmp/runtimepulse-startup-callchain-spool && \
+cp rust-collector/examples/startup-uprobe-events.json /tmp/runtimepulse-startup-callchain-spool/example.json && \
 RUNTIMEPULSE_COLLECTOR_ONCE=true \
 RUNTIMEPULSE_COLLECTOR_PLUGINS=startup-callchain \
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH=rust-collector/examples/startup-uprobe-events.json \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR=/tmp/runtimepulse-startup-callchain-spool \
 cargo run --manifest-path rust-collector/Cargo.toml
 ```
 

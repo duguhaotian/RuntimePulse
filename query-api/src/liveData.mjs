@@ -1212,7 +1212,7 @@ function refreshSandboxFromTraceSpan(store, span) {
 }
 
 function startupTraceSpan(span) {
-  return ['container.startup', 'sandbox.startup', 'sandbox.startup.e2e'].includes(String(span?.spanName ?? ''));
+  return ['sandbox.startup.callchain', 'container.startup', 'sandbox.startup', 'sandbox.startup.e2e'].includes(String(span?.spanName ?? ''));
 }
 
 function applySandboxRuntimeTypeFromTrace(sandbox, span) {
@@ -1227,6 +1227,7 @@ function applySandboxRuntimeTypeFromTrace(sandbox, span) {
 
 function startupDurationMetric(metric) {
   return [
+    'sandbox.startup.callchain_duration_ms',
     'sandbox.startup.duration_ms',
     'sandbox.startup.e2e_duration_ms',
   ].includes(String(metric?.name ?? ''));
@@ -1258,11 +1259,12 @@ function applySandboxStartupDuration(sandbox, durationMs, span, source = 'metric
 }
 
 function startupDurationPriority(source, plugin) {
+  if (source === 'trace' && plugin === 'startup-callchain') return 6;
+  if (source === 'metric' && plugin === 'startup-callchain') return 5.9;
   if (source === 'trace' && plugin === 'cri-startup-trace') return 5;
   if (source === 'metric' && plugin === 'cri-startup-trace') return 4.9;
   if (source === 'trace' && runtimeStartupTracePlugin(plugin)) return 4;
   if (source === 'metric' && runtimeStartupTracePlugin(plugin)) return 3.9;
-  if (source === 'trace' && plugin === 'startup-callchain') return 3;
   if (source === 'trace') return 2;
   if (source === 'metric') return 1;
   return 0;

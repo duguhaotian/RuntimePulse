@@ -1,7 +1,7 @@
 [Unit]
 Description=RuntimePulse startup callchain collector
-After=network-online.target runtimepulse-host-agent.service
-Wants=network-online.target
+After=network-online.target runtimepulse-host-agent.service runtimepulse-startup-probe.service
+Wants=network-online.target runtimepulse-startup-probe.service
 
 [Service]
 Type=simple

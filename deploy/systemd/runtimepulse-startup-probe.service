@@ -1,0 +1,17 @@
+[Unit]
+Description=RuntimePulse startup eBPF probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/runtimepulse/host-agent.env
+ExecStart=/usr/local/bin/runtimepulse-startup-probe daemon
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

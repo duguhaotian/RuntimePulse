@@ -57,6 +57,7 @@ ENABLE_GO_URETPROBES="${ENABLE_GO_URETPROBES:-false}"
 
 mkdir -p "$OUT_DIR"
 REPORT_PATH="${REPORT_PATH:-$OUT_DIR/startup-probe-report.json}"
+SPOOL_DIR="${SPOOL_DIR:-$OUT_DIR/startup-callchain-spool}"
 COLLECTOR_LOG="$OUT_DIR/startup-callchain-collector.log"
 READY_FILE="$OUT_DIR/startup-probe.ready"
 RUNP_LOG="$OUT_DIR/crictl-runp.log"
@@ -432,6 +433,7 @@ capture_probe() {
   fi
 
   rm -f "$READY_FILE" "$REPORT_PATH" "$RUNP_LOG" "$CREATE_LOG" "$START_LOG" "$SANDBOX_ID_FILE" "$CONTAINER_ID_FILE"
+  rm -rf "$SPOOL_DIR"
   trap cleanup_sandbox EXIT
   echo "starting startup probe capture: $REPORT_PATH" >&2
   sudo "$PROBE_BIN" export \
@@ -472,8 +474,11 @@ capture_probe() {
 
 normalize_report() {
   echo "normalizing startup-callchain report: $REPORT_PATH" >&2
+  rm -rf "$SPOOL_DIR"
+  mkdir -p "$SPOOL_DIR"
+  cp "$REPORT_PATH" "$SPOOL_DIR/report.json"
   RUNTIMEPULSE_COLLECTOR_ONCE=true \
-  RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH="$REPORT_PATH" \
+  RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR="$SPOOL_DIR" \
   RUNTIMEPULSE_LOCAL_REPORT_URL="$LOCAL_REPORT_URL" \
   cargo run --manifest-path "$ROOT_DIR/rust-collector/Cargo.toml" --quiet -- host-startup-callchain \
     > "$COLLECTOR_LOG"

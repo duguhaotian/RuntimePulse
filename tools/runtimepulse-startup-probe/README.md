@@ -43,32 +43,39 @@ sudo install -m 0755 tools/runtimepulse-startup-probe/runtimepulse-startup-probe
 RUNTIMEPULSE_HOST_AGENT_SOURCES=containerd-events,cri-events,cri-startup-trace,startup-callchain \
 RUNTIMEPULSE_CONTAINERD_NAMESPACES=k8s.io \
 RUNTIMEPULSE_CRI_EVENTS_CMD='crictl events --output json' \
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD='sudo runtimepulse-startup-probe export --once --duration-ms 8000 --containerd-tree --containerd-namespace k8s.io --include-helpers --enable-go-uprobes' \
+RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR=/var/lib/runtimepulse/startup-callchain \
 runtimepulse-collector host-agent
 ```
 
-For long capture windows, prefer the dedicated `host-startup-callchain` systemd
-unit in `deploy/systemd/` and keep `startup-callchain` out of
-`RUNTIMEPULSE_HOST_AGENT_SOURCES`; this prevents a blocking BPF snapshot from
-delaying the normal host inventory/event sources:
+Use the dedicated producer/consumer units in `deploy/systemd/` and keep
+`startup-callchain` out of `RUNTIMEPULSE_HOST_AGENT_SOURCES`; the probe daemon
+captures continuously and the collector service consumes completed reports from
+the spool:
 
 ```bash
 sudo install -m 0755 tools/runtimepulse-startup-probe/runtimepulse-startup-probe /usr/local/bin/runtimepulse-startup-probe
 sudo install -m 0644 deploy/systemd/runtimepulse-startup-callchain.service /etc/systemd/system/runtimepulse-startup-callchain.service
+sudo install -m 0644 deploy/systemd/runtimepulse-startup-probe.service /etc/systemd/system/runtimepulse-startup-probe.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now runtimepulse-startup-callchain
+sudo systemctl enable --now runtimepulse-startup-probe runtimepulse-startup-callchain
 ```
 
-Recommended shared env settings for that unit:
+Recommended shared env settings for those units:
 
 ```text
-RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS=9000
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_TIMEOUT_MS=45000
-RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD=/usr/local/bin/runtimepulse-startup-probe export --once --duration-ms 8000 --containerd-tree --containerd-namespace k8s.io --include-helpers --containerd-binary /usr/bin/containerd --containerd-config /etc/containerd/config.toml
+RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR=/var/lib/runtimepulse/startup-callchain
+RUNTIMEPULSE_STARTUP_CALLCHAIN_INTERVAL_MS=1000
+RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_TREE=true
+RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES=k8s.io
+RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS=true
+RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES=true
+RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY=/usr/bin/containerd
+RUNTIMEPULSE_CONTAINERD_CONFIG=/etc/containerd/config.toml
 ```
 
-Because the systemd unit runs as root, do not prefix the command with `sudo` in
-`RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`.
+The legacy `export --once` path remains available for parser/debug validation,
+but normal deployment should use `runtimepulse-startup-probe daemon` plus the
+spool consumer so short-lived startup events are not missed between polls.
 
 For local parser validation without attaching BPF:
 
@@ -166,8 +173,8 @@ tools/runtimepulse-startup-probe/validate-cri-containerd-startup.sh
 High-precision RunPodSandbox uprobe mode:
 
 ```bash
-sudo runtimepulse-startup-probe export \
-  --once --duration-ms 15000 \
+sudo RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR=/var/lib/runtimepulse/startup-callchain \
+  runtimepulse-startup-probe daemon \
   --containerd-namespace k8s.io \
   --include-helpers \
   --enable-go-uprobes \

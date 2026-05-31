@@ -149,10 +149,11 @@ runtime-boundary profiles and repeated validation while preserving the same
 startup-callchain JSON contract.
 
 `startup-callchain` is the report-ingestion bridge for that later high-fidelity
-path. External uprobe/eBPF exporters can write JSON/JSONL or be invoked by
-`RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD`; the host-agent normalizes the
-report into trace spans, startup metrics, and a `startup.callchain.observed`
-event. The expected report can either carry one sandbox startup trace plus spans
+path. External uprobe/eBPF exporters should write completed JSON/JSONL reports
+to `RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR`; the host-agent normalizes each
+spooled report into trace spans,
+startup metrics, and a `startup.callchain.observed` event. The expected report
+can either carry one sandbox startup trace plus spans
 such as `cri.run_pod_sandbox`, `cni.plugin.bridge`, `process.exec.iptables`,
 `oci.runc.create`, `kata.vm.boot`, or `kata.agent.connect`, or carry raw
 uprobe/eBPF enter/exit events under `events`/`uprobeEvents`/`rawEvents`.

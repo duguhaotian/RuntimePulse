@@ -100,7 +100,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
   }, [metrics]);
 
   const metricGroups = useMemo(() => {
-    return Object.entries(metricsByGroup).sort(([leftGroup], [rightGroup]) => {
+    return Object.entries(metricsByGroup).filter(([group]) => group !== 'startup').sort(([leftGroup], [rightGroup]) => {
       const leftPinned = pinnedMetricGroups.includes(leftGroup);
       const rightPinned = pinnedMetricGroups.includes(rightGroup);
 
@@ -110,6 +110,8 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
       return leftGroup.localeCompare(rightGroup);
     });
   }, [metricsByGroup, pinnedMetricGroups]);
+
+  const startupMetricSeries = metricsByGroup.startup ?? [];
 
   const pressureSeries = useMemo(() => {
     const io = metrics.find((item) => item.name === 'sandbox.io.read_bytes');
@@ -230,6 +232,7 @@ export function SandboxDetail({ api, sandboxId, onBack }: SandboxDetailProps) {
           <MetricPanelToolbar size={metricPanelSize} onSizeChange={setMetricPanelSize} />
           {selectedEvent && <SelectedEventContext event={selectedEvent} onClear={() => setSelectedEvent(undefined)} />}
           {pinnedMetricGroups.length > 0 && <PinnedMetricSummary pinnedGroups={pinnedMetricGroups} onClear={() => setPinnedMetricGroups([])} />}
+          {startupMetricSeries.length > 0 && <StartupDebugMetrics metrics={startupMetricSeries} sandbox={sandbox} />}
           {metricGroups.map(([group, groupSeries]) => (
             <MetricChart
               height={metricPanelHeights[metricPanelSize]}
@@ -909,6 +912,62 @@ function SelectedEventContext({ event, onClear }: { event: EventRecord; onClear:
       <button onClick={onClear}>Clear marker</button>
     </div>
   );
+}
+
+function StartupDebugMetrics({ metrics, sandbox }: { metrics: MetricSeries[]; sandbox: Sandbox }) {
+  const keyMetrics = startupDebugSummary(metrics, sandbox);
+  const rawMetrics = metrics.slice().sort((left, right) => left.label.localeCompare(right.label));
+
+  return (
+    <details className="startup-debug-metrics">
+      <summary>
+        <div>
+          <strong>Startup debug metrics</strong>
+          <span>Collector-derived startup counters and raw diagnostics are hidden from the main metric charts.</span>
+        </div>
+        <em>{metrics.length} raw series</em>
+      </summary>
+      <div className="startup-debug-summary">
+        {keyMetrics.map((item) => (
+          <div className="startup-debug-chip" key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="startup-debug-table">
+        <table>
+          <thead>
+            <tr><th>Metric</th><th>Latest</th><th>Unit</th></tr>
+          </thead>
+          <tbody>
+            {rawMetrics.map((series) => (
+              <tr key={series.id}>
+                <td>
+                  <strong>{series.label}</strong>
+                  <small>{series.name}</small>
+                </td>
+                <td>{formatMetricValue(latestMetricValue(series), series.unit)}</td>
+                <td>{series.unit || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  );
+}
+
+function startupDebugSummary(metrics: MetricSeries[], sandbox: Sandbox) {
+  const value = (name: string) => latestMetricByName(metrics, name) ?? 0;
+  return [
+    { label: 'E2E startup', value: formatDuration(sandbox.startupDurationMs || value('sandbox.startup.e2e_duration_ms')) },
+    { label: 'Callchain', value: formatDuration(value('sandbox.startup.callchain_duration_ms')) },
+    { label: 'CNI plugins', value: String(value('sandbox.startup.cni_plugin_count')) },
+    { label: 'Runtime calls', value: String(value('sandbox.startup.oci_call_count')) },
+    { label: 'Helper calls', value: String(value('sandbox.startup.helper_binary_count')) },
+    { label: 'Exec events', value: String(value('sandbox.startup.binary_exec_count')) },
+  ];
 }
 
 function SpanDetailPanel({ span }: { span?: TraceSpan }) {

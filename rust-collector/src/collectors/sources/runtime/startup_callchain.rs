@@ -12,27 +12,20 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
-use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
 
 use crate::collectors::core::config::CollectorConfig;
-use crate::collectors::core::error::{CollectorError, Result};
+use crate::collectors::core::error::Result;
 use crate::collectors::core::model::{
     EventRecord, Metadata, MetricSample, PluginOutput, TraceSpan,
 };
 use crate::collectors::core::plugin::CollectorPlugin;
 
-const DEFAULT_TIMEOUT_MS: u64 = 1000;
-
 pub struct StartupCallchainPlugin {
-    path: Option<PathBuf>,
-    command: Option<String>,
-    timeout: Duration,
+    spool_dir: Option<PathBuf>,
+    pending_spool_files: Vec<PathBuf>,
 }
 
 #[derive(Default, Debug, Deserialize)]
@@ -205,14 +198,20 @@ enum ParsedCallchainReport {
 impl StartupCallchainPlugin {
     pub fn from_env() -> Self {
         Self {
-            path: env_path("RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_PATH"),
-            command: env_string("RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_CMD"),
-            timeout: Duration::from_millis(
-                env_u64("RUNTIMEPULSE_STARTUP_CALLCHAIN_REPORT_TIMEOUT_MS")
-                    .unwrap_or(DEFAULT_TIMEOUT_MS)
-                    .max(100),
-            ),
+            spool_dir: env_path("RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR"),
+            pending_spool_files: Vec::new(),
         }
+    }
+
+    pub fn ack_spool_files(&mut self) -> Result<()> {
+        for path in self.pending_spool_files.drain(..) {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -223,33 +222,89 @@ impl CollectorPlugin for StartupCallchainPlugin {
 
     fn collect(&mut self, now: DateTime<Utc>, config: &CollectorConfig) -> Result<PluginOutput> {
         let mut output = PluginOutput::default();
+        self.pending_spool_files.clear();
 
-        if let Some(path) = self.path.clone() {
-            let content = match fs::read_to_string(&path) {
-                Ok(content) => content,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(error) => return Err(error.into()),
-            };
-            if !content.trim().is_empty() {
-                merge_plugin_output(
-                    &mut output,
-                    startup_callchain_output_from_content(&content, now, config)?,
-                );
-            }
-        }
-
-        if let Some(command) = self.command.clone() {
-            let content = run_report_command(&command, self.timeout)?;
-            if !content.trim().is_empty() {
-                merge_plugin_output(
-                    &mut output,
-                    startup_callchain_output_from_content(&content, now, config)?,
-                );
-            }
+        if let Some(spool_dir) = self.spool_dir.clone() {
+            let (spool_output, pending_files) = collect_spool_dir(&spool_dir, now, config)?;
+            self.pending_spool_files = pending_files;
+            merge_plugin_output(&mut output, spool_output);
         }
 
         Ok(output)
     }
+}
+
+fn collect_spool_dir(
+    spool_dir: &PathBuf,
+    now: DateTime<Utc>,
+    config: &CollectorConfig,
+) -> Result<(PluginOutput, Vec<PathBuf>)> {
+    let mut output = PluginOutput::default();
+    let entries = match fs::read_dir(spool_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((output, Vec::new()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with('.') || file_name.ends_with(".tmp") || file_name.ends_with(".bad")
+        {
+            continue;
+        }
+        let extension = path.extension().and_then(|value| value.to_str()).unwrap_or("");
+        if !matches!(extension, "json" | "jsonl") {
+            continue;
+        }
+        paths.push(path);
+    }
+    paths.sort();
+
+    let mut ack_files = Vec::new();
+    for path in paths.into_iter().take(512) {
+        let content = fs::read_to_string(&path)?;
+        if content.trim().is_empty() {
+            ack_files.push(path);
+            continue;
+        }
+        match startup_callchain_output_from_content(&content, now, config) {
+            Ok(parsed) => {
+                merge_plugin_output(&mut output, parsed);
+                ack_files.push(path);
+            }
+            Err(error) => {
+                quarantine_spool_file(&path);
+                eprintln!(
+                    "{}",
+                    json!({
+                        "level": "error",
+                        "message": "startup_callchain_spool_file_invalid",
+                        "path": path.to_string_lossy(),
+                        "error": error.to_string(),
+                    })
+                );
+            }
+        }
+    }
+
+    Ok((output, ack_files))
+}
+
+fn quarantine_spool_file(path: &PathBuf) {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("startup-callchain.json");
+    let bad_path = path.with_file_name(format!("{file_name}.bad"));
+    let _ = fs::rename(path, bad_path);
 }
 
 pub fn startup_callchain_output_from_content(
@@ -2824,99 +2879,6 @@ fn metric(
     }
 }
 
-fn run_report_command(command: &str, timeout: Duration) -> Result<String> {
-    let mut child_command = Command::new("sh");
-    child_command
-        .arg("-lc")
-        .arg(command)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(unix)]
-    child_command.process_group(0);
-    let mut child = child_command.spawn()?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-
-    let stdout_reader = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        if let Some(mut stream) = stdout.take() {
-            stream.read_to_end(&mut buffer)?;
-        }
-        Ok(buffer)
-    });
-    let stderr_reader = thread::spawn(move || -> std::io::Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        if let Some(mut stream) = stderr.take() {
-            stream.read_to_end(&mut buffer)?;
-        }
-        Ok(buffer)
-    });
-
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait()? {
-            let stdout = join_reader(stdout_reader, "stdout")?;
-            let stderr = join_reader(stderr_reader, "stderr")?;
-            if !status.success() {
-                return Err(CollectorError::Plugin {
-                    plugin: "startup-callchain".to_string(),
-                    message: format!(
-                        "startup call-chain command exited with status {:?}: {}",
-                        status.code(),
-                        String::from_utf8_lossy(&stderr).trim()
-                    ),
-                });
-            }
-            return Ok(String::from_utf8_lossy(&stdout).to_string());
-        }
-
-        if started.elapsed() >= timeout {
-            kill_child_tree(&mut child);
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(CollectorError::Plugin {
-                plugin: "startup-callchain".to_string(),
-                message: format!(
-                    "startup call-chain command timed out after {} ms",
-                    timeout.as_millis()
-                ),
-            });
-        }
-
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn join_reader(
-    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
-    stream_name: &str,
-) -> Result<Vec<u8>> {
-    reader
-        .join()
-        .map_err(|_| CollectorError::Plugin {
-            plugin: "startup-callchain".to_string(),
-            message: format!("startup call-chain {stream_name} reader panicked"),
-        })?
-        .map_err(CollectorError::from)
-}
-
-fn kill_child_tree(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let group = format!("-{}", child.id());
-        let _ = Command::new("kill").args(["-TERM", &group]).status();
-        thread::sleep(Duration::from_millis(50));
-        let _ = Command::new("kill").args(["-KILL", &group]).status();
-        return;
-    }
-
-    #[allow(unreachable_code)]
-    {
-        let _ = child.kill();
-    }
-}
-
 fn merge_plugin_output(target: &mut PluginOutput, output: PluginOutput) {
     target.metadata.clusters.extend(output.metadata.clusters);
     target.metadata.nodes.extend(output.metadata.nodes);
@@ -2945,10 +2907,6 @@ fn env_path(name: &str) -> Option<PathBuf> {
 
 fn env_string(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.trim().is_empty())
-}
-
-fn env_u64(name: &str) -> Option<u64> {
-    env::var(name).ok()?.parse::<u64>().ok()
 }
 
 fn timestamp(time: DateTime<Utc>) -> String {

@@ -671,11 +671,11 @@ test('derives sandbox startup duration from cri startup trace spans and callchai
     profiles: [],
   });
 
-  assert.equal(liveSandboxes(store)[0].startupDurationMs, 1200);
-  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 1500);
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'startup-callchain');
 });
 
-test('keeps runpod e2e startup over short startup-callchain trace spans', () => {
+test('uses runpod callchain startup over shorter create-to-ready trace', () => {
   const store = createLiveStore();
   recordLiveBatch(store, {
     source: 'runpod-e2e',
@@ -732,12 +732,12 @@ test('keeps runpod e2e startup over short startup-callchain trace spans', () => 
     profiles: [],
   });
 
-  assert.equal(liveSandboxes(store)[0].startupDurationMs, 36);
-  assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:00.036Z');
-  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'cri-startup-trace');
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 2);
+  assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:01.002Z');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'startup-callchain');
 });
 
-test('keeps containerd startup trace over startup-callchain trace spans', () => {
+test('uses startup-callchain over containerd startup trace for unified runpod-to-ready duration', () => {
   const store = createLiveStore();
   recordLiveBatch(store, {
     source: 'containerd-startup-trace',
@@ -784,9 +784,9 @@ test('keeps containerd startup trace over startup-callchain trace spans', () => 
     profiles: [],
   });
 
-  assert.equal(liveSandboxes(store)[0].startupDurationMs, 40);
-  assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:00.040Z');
-  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'containerd-startup-trace');
+  assert.equal(liveSandboxes(store)[0].startupDurationMs, 2);
+  assert.equal(liveSandboxes(store)[0].startedAt, '2026-05-22T02:00:01.002Z');
+  assert.equal(liveSandboxes(store)[0].attributes['startup.duration.plugin'], 'startup-callchain');
 });
 
 test('applies stored cri startup trace when sandbox metadata arrives later', () => {

@@ -566,18 +566,30 @@ fn run_host_startup_callchain() -> Result<()> {
         let now = Utc::now();
         match plugin.collect(now, &config) {
             Ok(output) => match send_local_report(&client, &config.local_report_url, &output) {
-                Ok(()) => println!(
-                    "{}",
-                    json!({
-                        "level": "info",
-                        "message": "host_startup_callchain_report_accepted",
-                        "url": config.local_report_url,
-                        "sandboxes": output.metadata.sandboxes.len(),
-                        "metrics": output.metrics.len(),
-                        "events": output.events.len(),
-                        "traces": output.traces.len(),
-                    })
-                ),
+                Ok(()) => {
+                    if let Err(error) = plugin.ack_spool_files() {
+                        eprintln!(
+                            "{}",
+                            json!({
+                                "level": "error",
+                                "message": "host_startup_callchain_spool_ack_failed",
+                                "error": error.to_string(),
+                            })
+                        );
+                    }
+                    println!(
+                        "{}",
+                        json!({
+                            "level": "info",
+                            "message": "host_startup_callchain_report_accepted",
+                            "url": config.local_report_url,
+                            "sandboxes": output.metadata.sandboxes.len(),
+                            "metrics": output.metrics.len(),
+                            "events": output.events.len(),
+                            "traces": output.traces.len(),
+                        })
+                    )
+                }
                 Err(error) => eprintln!(
                     "{}",
                     json!({

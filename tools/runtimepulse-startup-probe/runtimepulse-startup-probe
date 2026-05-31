@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -628,6 +629,15 @@ def build_bpftrace_program(candidates: set[str], duration_ms: int, argv_slots: i
     printf_values = ", ".join(values)
     go_uprobe_program = bpftrace_go_uprobe_program(go_uprobes or [])
 
+    interval_program = ""
+    if duration_ms > 0:
+        interval_program = f"""
+interval:ms:{max(duration_ms, 100)}
+{{
+  exit();
+}}
+"""
+
     return f"""
 BEGIN
 {{
@@ -652,10 +662,7 @@ tracepoint:sched:sched_process_exit
 
 {go_uprobe_program}
 
-interval:ms:{max(duration_ms, 100)}
-{{
-  exit();
-}}
+{interval_program}
 """
 
 
@@ -2574,6 +2581,216 @@ def run_bpftrace(args: argparse.Namespace, candidates: set[str], go_uprobes: lis
     return lines
 
 
+def prepare_capture(args: argparse.Namespace) -> tuple[set[str], list[GoUprobeSpec]]:
+    global EXTRA_CONTAINERD_CONFIGS
+    EXTRA_CONTAINERD_CONFIGS = split_csv(args.containerd_config or [])
+    candidates = candidate_names(existing_files(args.include_binary))
+    cni_dirs = args.cni_bin_dir or DEFAULT_CNI_BIN_DIRS
+    cni_binaries = discover_cni_binaries(cni_dirs)
+    runtime_binaries = existing_or_resolved_files(args.runtime_binary or DEFAULT_RUNTIME_BINARIES)
+    helper_binaries = existing_files(DEFAULT_HELPER_BINARIES if args.include_helpers else [])
+    candidates.update(candidate_names(cni_binaries))
+    candidates.update(candidate_names(runtime_binaries))
+    candidates.update(candidate_names(helper_binaries))
+    if args.containerd_tree:
+        candidates.clear()
+
+    go_uprobes: list[GoUprobeSpec] = []
+    if args.enable_go_uprobes:
+        explicit_patterns = bool(args.go_uprobe_symbol)
+        patterns = args.go_uprobe_symbol or DEFAULT_GO_UPROBE_SYMBOL_PATTERNS
+        attach_return = args.enable_go_uretprobes
+        go_uprobes = discover_go_uprobes(args.containerd_binary, patterns, attach_return)
+        if args.enable_cni_go_uprobes:
+            go_uprobes.extend(discover_go_uprobes(args.containerd_binary, args.cni_go_uprobe_symbol or DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS, attach_return))
+        if args.enable_runtime_go_uprobes:
+            runtime_patterns = args.runtime_go_uprobe_symbol or DEFAULT_GO_RUNTIME_UPROBE_SYMBOL_PATTERNS
+            runtime_binaries = unique_realpaths(existing_files(args.runtime_uprobe_binary or DEFAULT_RUNTIME_UPROBE_BINARIES))
+            for runtime_binary in runtime_binaries:
+                go_uprobes.extend(discover_go_uprobes(runtime_binary, runtime_patterns, attach_return))
+        if go_uprobes and not explicit_patterns:
+            runpod = go_uprobes[:1]
+            extra = [spec for spec in go_uprobes[1:] if go_uprobe_role(spec.function) != "cri"]
+            go_uprobes = runpod + extra
+        if not go_uprobes:
+            raise SystemExit(f"no Go uprobe symbols matched in {args.containerd_binary}: {patterns}")
+    return candidates, go_uprobes
+
+
+def start_bpftrace_process(args: argparse.Namespace, candidates: set[str], go_uprobes: list[GoUprobeSpec], duration_ms: int) -> tuple[subprocess.Popen[str], str]:
+    program = build_bpftrace_program(candidates, duration_ms, args.argv_slots, args.env_slots, go_uprobes, args.containerd_tree)
+    bpftrace = shutil.which(args.bpftrace) or args.bpftrace
+    if not bpftrace or not os.path.exists(bpftrace):
+        raise SystemExit(f"bpftrace not found: {args.bpftrace}")
+
+    with tempfile.NamedTemporaryFile("w", prefix="runtimepulse-startup-probe-", suffix=".bt", delete=False) as handle:
+        handle.write(program)
+        script_path = handle.name
+
+    env = os.environ.copy()
+    env.setdefault("BPFTRACE_STRLEN", str(args.strlen))
+    cmd = [bpftrace, "-q"]
+    if go_uprobes:
+        cmd.append("--unsafe")
+    cmd.append(script_path)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=env)
+    return proc, script_path
+
+
+def safe_report_key(report: dict[str, object]) -> str:
+    return ":".join(
+        str(report.get(key, "") or "").strip()
+        for key in ("sandboxId", "criSandboxId", "containerdId", "startTime")
+    )
+
+
+def report_ready_to_flush(report: dict[str, object], idle_ms: int) -> bool:
+    events = report.get("events")
+    if not isinstance(events, list) or not events:
+        return False
+    sandbox = str(report.get("sandboxId") or report.get("criSandboxId") or report.get("containerdId") or "").strip()
+    if not sandbox:
+        return False
+    end_time = parse_iso8601(str(report.get("endTime") or ""))
+    if not end_time:
+        return False
+    now = datetime.now(timezone.utc)
+    return (now - end_time).total_seconds() * 1000.0 >= max(idle_ms, 100)
+
+
+def event_timestamp_from_raw_line(raw: str, monotonic_epoch_ns: int) -> datetime | None:
+    parts = raw.rstrip("\n").split("\t")
+    if len(parts) < 2:
+        return None
+    try:
+        ns = int(parts[1])
+    except ValueError:
+        return None
+    if raw.startswith("RP_PROC_") or raw.startswith("RP_EXEC_") or raw.startswith("RP_GO_UPROBE_"):
+        if ns < 10_000_000_000_000_000:
+            ns += monotonic_epoch_ns
+    try:
+        return datetime.fromtimestamp(ns / 1_000_000_000, timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def prune_raw_lines(lines: list[str], retention_ms: int, monotonic_epoch_ns: int) -> list[str]:
+    if retention_ms <= 0:
+        return lines
+    cutoff = datetime.now(timezone.utc) - timedelta(milliseconds=retention_ms)
+    kept: list[str] = []
+    for line in lines:
+        ts = event_timestamp_from_raw_line(line, monotonic_epoch_ns)
+        if ts is None or ts >= cutoff:
+            kept.append(line)
+    return kept
+
+
+def write_spool_report(spool_dir: Path, report: dict[str, object]) -> Path:
+    sandbox = str(report.get("sandboxId") or report.get("criSandboxId") or report.get("containerdId") or "unknown")
+    name = f"{int(time.time() * 1000)}-{sanitize_id(sandbox)}-{uuid.uuid4().hex}.json"
+    tmp = spool_dir / f".{name}.tmp"
+    final = spool_dir / name
+    tmp.write_text(json.dumps(report, separators=(",", ":")) + "\n")
+    os.replace(tmp, final)
+    return final
+
+
+def daemon_command(args: argparse.Namespace) -> None:
+    candidates, go_uprobes = prepare_capture(args)
+    spool_dir = Path(args.spool_dir)
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    monotonic_epoch_ns = time.time_ns() - time.monotonic_ns()
+    proc, script_path = start_bpftrace_process(args, candidates, go_uprobes, 0)
+    raw_lines: list[str] = []
+    flushed: set[str] = set()
+    stopping = False
+
+    def stop(_signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+
+    old_int = signal.signal(signal.SIGINT, stop)
+    old_term = signal.signal(signal.SIGTERM, stop)
+    try:
+        assert proc.stdout is not None
+        last_flush = time.monotonic()
+        while not stopping:
+            readable, _, _ = select.select([proc.stdout], [], [], max(args.flush_interval_ms / 1000.0, 0.1))
+            if readable:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                if line.startswith("RP_STARTUP_PROBE_READY"):
+                    if args.ready_file:
+                        Path(args.ready_file).write_text(str(proc.pid))
+                    print(json.dumps({"level": "info", "message": "startup_probe_ready", "pid": proc.pid, "spoolDir": str(spool_dir)}), file=sys.stderr, flush=True)
+                    continue
+                if line.startswith("RP_"):
+                    raw_lines.append(line)
+
+            if time.monotonic() - last_flush < max(args.flush_interval_ms / 1000.0, 0.1):
+                if proc.poll() is None:
+                    continue
+            last_flush = time.monotonic()
+            if not raw_lines:
+                if proc.poll() is not None:
+                    break
+                continue
+
+            namespaces = set(split_csv(args.containerd_namespace)) if args.containerd_namespace else None
+            containerd_targets = discover_containerd_targets(args.containerd_binary) if args.containerd_tree else []
+            events, _summary, runtime_type, sandbox_id, cri_sandbox_id = collect_from_stream(
+                raw_lines,
+                args.argv_slots,
+                args.env_slots,
+                args.runtime_type,
+                args.sandbox_id,
+                namespaces,
+                containerd_targets,
+                args.containerd_tree,
+                args.containerd_binary,
+            )
+            for report in grouped_reports(events, runtime_type, sandbox_id, cri_sandbox_id, args.source):
+                key = safe_report_key(report)
+                if key in flushed or not report_ready_to_flush(report, args.flush_idle_ms):
+                    continue
+                path = write_spool_report(spool_dir, report)
+                flushed.add(key)
+                print(json.dumps({
+                    "level": "info",
+                    "message": "startup_callchain_report_spooled",
+                    "path": str(path),
+                    "sandboxId": report.get("sandboxId", ""),
+                    "events": len(report.get("events") or []),
+                }), file=sys.stderr, flush=True)
+            raw_lines = prune_raw_lines(raw_lines, args.spool_retention_ms, monotonic_epoch_ns)
+            if proc.poll() is not None:
+                break
+
+        stderr = proc.stderr.read() if proc.stderr else ""
+        if proc.returncode not in (0, None) and not raw_lines:
+            raise SystemExit(f"bpftrace failed with {proc.returncode}: {stderr.strip()}")
+    finally:
+        signal.signal(signal.SIGINT, old_int)
+        signal.signal(signal.SIGTERM, old_term)
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        try:
+            os.unlink(script_path)
+        except FileNotFoundError:
+            pass
+
+
 def event_sandbox_key(event: dict[str, object]) -> str:
     for key in ("sandboxId", "criSandboxId", "containerdId"):
         value = str(event.get(key, "") or "").strip()
@@ -2827,38 +3044,7 @@ def emit_report(
 
 
 def export_command(args: argparse.Namespace) -> None:
-    global EXTRA_CONTAINERD_CONFIGS
-    EXTRA_CONTAINERD_CONFIGS = split_csv(args.containerd_config or [])
-    candidates = candidate_names(existing_files(args.include_binary))
-    cni_dirs = args.cni_bin_dir or DEFAULT_CNI_BIN_DIRS
-    cni_binaries = discover_cni_binaries(cni_dirs)
-    runtime_binaries = existing_or_resolved_files(args.runtime_binary or DEFAULT_RUNTIME_BINARIES)
-    helper_binaries = existing_files(DEFAULT_HELPER_BINARIES if args.include_helpers else [])
-    candidates.update(candidate_names(cni_binaries))
-    candidates.update(candidate_names(runtime_binaries))
-    candidates.update(candidate_names(helper_binaries))
-    if args.containerd_tree:
-        candidates.clear()
-
-    go_uprobes: list[GoUprobeSpec] = []
-    if args.enable_go_uprobes:
-        explicit_patterns = bool(args.go_uprobe_symbol)
-        patterns = args.go_uprobe_symbol or DEFAULT_GO_UPROBE_SYMBOL_PATTERNS
-        attach_return = args.enable_go_uretprobes
-        go_uprobes = discover_go_uprobes(args.containerd_binary, patterns, attach_return)
-        if args.enable_cni_go_uprobes:
-            go_uprobes.extend(discover_go_uprobes(args.containerd_binary, args.cni_go_uprobe_symbol or DEFAULT_GO_CNI_UPROBE_SYMBOL_PATTERNS, attach_return))
-        if args.enable_runtime_go_uprobes:
-            runtime_patterns = args.runtime_go_uprobe_symbol or DEFAULT_GO_RUNTIME_UPROBE_SYMBOL_PATTERNS
-            runtime_binaries = unique_realpaths(existing_files(args.runtime_uprobe_binary or DEFAULT_RUNTIME_UPROBE_BINARIES))
-            for runtime_binary in runtime_binaries:
-                go_uprobes.extend(discover_go_uprobes(runtime_binary, runtime_patterns, attach_return))
-        if go_uprobes and not explicit_patterns:
-            runpod = go_uprobes[:1]
-            extra = [spec for spec in go_uprobes[1:] if go_uprobe_role(spec.function) != "cri"]
-            go_uprobes = runpod + extra
-        if not go_uprobes:
-            raise SystemExit(f"no Go uprobe symbols matched in {args.containerd_binary}: {patterns}")
+    candidates, go_uprobes = prepare_capture(args)
 
     if args.from_bpftrace_log:
         lines = Path(args.from_bpftrace_log).read_text().splitlines(True)
@@ -3139,38 +3325,50 @@ def self_test() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="runtimepulse-startup-probe")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    def add_capture_args(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument("--bpftrace", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_BPFTRACE", "bpftrace"))
+        command_parser.add_argument("--cni-bin-dir", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_BIN_DIRS", "")]))
+        command_parser.add_argument("--runtime-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_BINARIES", "")]))
+        command_parser.add_argument("--include-binary", action="append", default=[])
+        command_parser.add_argument("--include-helpers", action="store_true", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS", "false").lower() == "true")
+        command_parser.add_argument("--enable-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES"), help="attach high-precision Go uprobes to containerd RunPodSandbox symbols")
+        command_parser.add_argument("--containerd-binary", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY", shutil.which("containerd") or next((path for path in DEFAULT_CONTAINERD_BINARIES if os.path.exists(path)), "containerd")))
+        command_parser.add_argument("--containerd-config", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_CONTAINERD_CONFIG", "")]), help="containerd config.toml used to infer task bundle roots from state/root; may be repeated")
+        command_parser.add_argument("--containerd-tree", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_TREE", True), help="trace all execs/forks and route only current containerd descendant CNI/runtime subtrees")
+        command_parser.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd RunPodSandbox Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
+        command_parser.add_argument("--enable-cni-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_CNI_GO_UPROBES"), help="also attach containerd/go-cni setup Go uprobes")
+        command_parser.add_argument("--cni-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_GO_UPROBE_SYMBOLS", "")]), help="containerd CNI setup Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
+        command_parser.add_argument("--enable-runtime-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_RUNTIME_GO_UPROBES"), help="also attach OCI/Kata runtime shim Go uprobes")
+        command_parser.add_argument("--runtime-uprobe-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_UPROBE_BINARIES", "")]), help="runtime shim binary for Go uprobe discovery; may be repeated")
+        command_parser.add_argument("--runtime-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_GO_UPROBE_SYMBOLS", "")]), help="OCI/Kata runtime Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
+        command_parser.add_argument("--enable-go-uretprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_URETPROBES"), help="experimental: also attach Go return probes for real function exit timestamps; disabled by default because some Go/runtime combinations cannot unwind safely")
+        command_parser.add_argument("--sandbox-id", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SANDBOX_ID", ""))
+        command_parser.add_argument("--containerd-namespace", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES", "")]), help="only keep OCI/runtime execs from these containerd namespaces; CNI execs are kept by CNI_CONTAINERID")
+        command_parser.add_argument("--runtime-type", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_TYPE", ""))
+        command_parser.add_argument("--source", default="runtimepulse-startup-probe")
+        command_parser.add_argument("--argv-slots", type=int, default=16)
+        command_parser.add_argument("--env-slots", type=int, default=32)
+        command_parser.add_argument("--strlen", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_STRLEN", "1024")))
+        command_parser.add_argument(
+            "--ready-file",
+            default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_READY_FILE", ""),
+            help="write this file after bpftrace reports probes are attached",
+        )
+
+    daemon = sub.add_parser("daemon", help="continuously capture startup call-chain events and spool completed reports")
+    add_capture_args(daemon)
+    daemon.add_argument("--spool-dir", default=os.getenv("RUNTIMEPULSE_STARTUP_CALLCHAIN_SPOOL_DIR", "/var/lib/runtimepulse/startup-callchain"))
+    daemon.add_argument("--flush-interval-ms", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_FLUSH_INTERVAL_MS", "1000")))
+    daemon.add_argument("--flush-idle-ms", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_FLUSH_IDLE_MS", "2000")))
+    daemon.add_argument("--spool-retention-ms", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SPOOL_RETENTION_MS", "120000")))
+    daemon.set_defaults(func=daemon_command)
+
     export = sub.add_parser("export", help="export one RuntimePulse startup-callchain raw-event report")
+    add_capture_args(export)
     export.add_argument("--once", action="store_true", help="compatibility flag; export already captures one window")
     export.add_argument("--duration-ms", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_DURATION_MS", "1000")))
-    export.add_argument("--bpftrace", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_BPFTRACE", "bpftrace"))
-    export.add_argument("--cni-bin-dir", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_BIN_DIRS", "")]))
-    export.add_argument("--runtime-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_BINARIES", "")]))
-    export.add_argument("--include-binary", action="append", default=[])
-    export.add_argument("--include-helpers", action="store_true", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_INCLUDE_HELPERS", "false").lower() == "true")
-    export.add_argument("--enable-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_UPROBES"), help="attach high-precision Go uprobes to containerd RunPodSandbox symbols")
-    export.add_argument("--containerd-binary", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_BINARY", shutil.which("containerd") or next((path for path in DEFAULT_CONTAINERD_BINARIES if os.path.exists(path)), "containerd")))
-    export.add_argument("--containerd-config", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_CONTAINERD_CONFIG", "")]), help="containerd config.toml used to infer task bundle roots from state/root; may be repeated")
-    export.add_argument("--containerd-tree", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_TREE", True), help="trace all execs/forks and route only current containerd descendant CNI/runtime subtrees")
-    export.add_argument("--go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_GO_UPROBE_SYMBOLS", "")]), help="containerd RunPodSandbox Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
-    export.add_argument("--enable-cni-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_CNI_GO_UPROBES"), help="also attach containerd/go-cni setup Go uprobes")
-    export.add_argument("--cni-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CNI_GO_UPROBE_SYMBOLS", "")]), help="containerd CNI setup Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
-    export.add_argument("--enable-runtime-go-uprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_RUNTIME_GO_UPROBES"), help="also attach OCI/Kata runtime shim Go uprobes")
-    export.add_argument("--runtime-uprobe-binary", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_UPROBE_BINARIES", "")]), help="runtime shim binary for Go uprobe discovery; may be repeated")
-    export.add_argument("--runtime-go-uprobe-symbol", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_GO_UPROBE_SYMBOLS", "")]), help="OCI/Kata runtime Go symbol/pattern to attach; may be repeated; prefix regex: for regex")
-    export.add_argument("--enable-go-uretprobes", action="store_true", default=env_flag("RUNTIMEPULSE_STARTUP_PROBE_ENABLE_GO_URETPROBES"), help="experimental: also attach Go return probes for real function exit timestamps; disabled by default because some Go/runtime combinations cannot unwind safely")
-    export.add_argument("--sandbox-id", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_SANDBOX_ID", ""))
-    export.add_argument("--containerd-namespace", action="append", default=split_csv([os.getenv("RUNTIMEPULSE_STARTUP_PROBE_CONTAINERD_NAMESPACES", "")]), help="only keep OCI/runtime execs from these containerd namespaces; CNI execs are kept by CNI_CONTAINERID")
-    export.add_argument("--runtime-type", default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_RUNTIME_TYPE", ""))
-    export.add_argument("--source", default="runtimepulse-startup-probe")
-    export.add_argument("--argv-slots", type=int, default=16)
-    export.add_argument("--env-slots", type=int, default=32)
-    export.add_argument("--strlen", type=int, default=int(os.getenv("RUNTIMEPULSE_STARTUP_PROBE_STRLEN", "1024")))
     export.add_argument("--from-bpftrace-log", help=argparse.SUPPRESS)
-    export.add_argument(
-        "--ready-file",
-        default=os.getenv("RUNTIMEPULSE_STARTUP_PROBE_READY_FILE", ""),
-        help="write this file after bpftrace reports probes are attached",
-    )
     export.add_argument(
         "--no-group-by-sandbox",
         action="store_true",
